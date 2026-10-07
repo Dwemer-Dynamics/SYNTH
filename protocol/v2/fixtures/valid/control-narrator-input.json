@@ -1,0 +1,24 @@
+{
+  "schema": "synth.event.v2",
+  "protocol_version": 2,
+  "type": "input_text",
+  "session_id": "control-fixture",
+  "request_id": "text-1",
+  "turn_id": "turn-1",
+  "generation": 1,
+  "game": "fo4",
+  "runtime_variant": "flat",
+  "client_version": "source",
+  "runtime_version": "1.11.240",
+  "capabilities": [
+    "control.menu"
+  ],
+  "context_sequence": 1,
+  "payload": {
+    "text": "Describe this place.",
+    "control": {
+      "mode": "NARRATOR",
+      "model_slot": 1
+    }
+  }
+}

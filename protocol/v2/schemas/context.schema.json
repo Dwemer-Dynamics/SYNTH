@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/context.schema.json",
+  "title": "SYNTH context payload v2",
+  "$defs": {
+    "scene_reference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["form_id", "origin_plugin"],
+      "properties": {
+        "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$", "not": {"const": "0x00000000"}},
+        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "playthrough_id",
+    "snapshot_sequence",
+    "player",
+    "audience",
+    "active_quests",
+    "nearby_items",
+    "points_of_interest"
+  ],
+  "allOf": [{"if":{"required":["audience_observation"],"properties":{"audience_observation":{"const":"unavailable"}}},"then":{"properties":{"audience":{"maxItems":0}}}},{"if":{"required":["active_quests_observation"],"properties":{"active_quests_observation":{"const":"unavailable"}}},"then":{"properties":{"active_quests":{"maxItems":0}}}},{"if":{"required":["nearby_items_observation"],"properties":{"nearby_items_observation":{"const":"unavailable"}}},"then":{"properties":{"nearby_items":{"maxItems":0}}}},{"if":{"required":["points_of_interest_observation"],"properties":{"points_of_interest_observation":{"const":"unavailable"}}},"then":{"properties":{"points_of_interest":{"maxItems":0}}}}],
+  "properties": {
+    "actor_events": {"$ref": "actor-events.schema.json"},
+    "player_event": {"$ref": "player-event.schema.json"},
+    "quest_events": {"$ref": "quest-events.schema.json"},
+    "active_quests_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+    "audience_observation": {"type": "string", "enum": ["complete", "partial", "unavailable"]},
+    "nearby_items_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+    "points_of_interest_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+    "playthrough_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "snapshot_sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "player": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "target": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "audience": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "../../v1/schemas/identity.schema.json"
+      }
+    },
+    "actor_states": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "actor-state.schema.json"
+      }
+    },
+    "active_quests": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+          "$ref": "quest-state.schema.json"
+      }
+    },
+    "nearby_items": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "../../v1/schemas/nearby-item.schema.json"
+      }
+    },
+    "points_of_interest": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "../../v1/schemas/point-of-interest.schema.json"
+      }
+    },
+    "world": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [{
+        "if": {"properties": {"interior": {"const": true}}},
+        "then": {"properties": {"scene": {"properties": {"worldspace": {"type": "null"}}}}},
+        "else": {"properties": {"scene": {"properties": {"worldspace": {"$ref": "#/$defs/scene_reference"}}}}}
+      }],
+      "required": [
+        "location",
+        "cell",
+        "worldspace",
+        "weather",
+        "interior",
+        "game_time_ticks"
+      ],
+      "properties": {
+        "scene": {
+          "type": "object", "additionalProperties": false, "required": ["cell", "worldspace"],
+          "properties": {
+            "cell": {"$ref": "#/$defs/scene_reference"},
+            "worldspace": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/scene_reference"}]}
+          }
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "cell": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "worldspace": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "weather": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "interior": {
+          "type": "boolean"
+        },
+        "game_time_ticks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "loaded_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "playthrough_id",
+        "session_id",
+        "generation",
+        "context_sequence"
+      ],
+      "properties": {
+        "playthrough_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "context_sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

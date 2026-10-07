@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/voice-sample.schema.json",
+  "title": "SYNTH voice sample upload/probe v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "session_id",
+    "request_id",
+    "generation",
+    "game",
+    "voice_id",
+    "original_name",
+    "actor_name",
+    "mode",
+    "compression",
+    "unpacked_bytes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.voice_sample.v2"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "game": {
+      "const": "fo4"
+    },
+    "voice_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_+-]{1,128}$"
+    },
+    "original_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "actor_name": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "reference_text": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "mode": {
+      "enum": [
+        "probe",
+        "import"
+      ]
+    },
+    "compression": {
+      "enum": [
+        "none",
+        "zlib"
+      ]
+    },
+    "unpacked_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8388608
+    }
+  }
+}

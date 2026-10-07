@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/tts-status.schema.json",
+  "title": "SYNTH deferred TTS status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "cache_key", "status"],
+  "properties": {
+    "schema": {"const": "synth.tts_status.v1"},
+    "cache_key": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "status": {"enum": ["pending", "ready", "failed", "unknown"]},
+    "updated_at": {"type": "integer", "minimum": 0},
+    "error_code": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$"},
+    "media": {"$ref": "media.schema.json"}
+  }
+}

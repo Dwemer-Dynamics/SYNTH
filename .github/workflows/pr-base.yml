@@ -1,0 +1,22 @@
+name: PR branch policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  alpha-base:
+    name: PR targets alpha
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check pull request base
+        env:
+          PR_BASE: ${{ github.base_ref }}
+        run: |
+          if [ "$PR_BASE" != "alpha" ]; then
+            echo '::error::Every SYNTH pull request must target alpha. Edit the PR base branch.'
+            exit 1
+          fi

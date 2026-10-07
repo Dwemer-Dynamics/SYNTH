@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/media.schema.json",
+  "title": "SYNTH opaque media reference v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "media_id", "content_type", "sha256", "size"],
+  "properties": {
+    "schema": {"const": "synth.media.v1"},
+    "media_id": {"type": "string", "pattern": "^media/[a-f0-9]{64}$"},
+    "content_type": {"enum": ["audio/wav", "audio/ogg", "image/jpeg", "image/png", "image/webp"]},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "size": {"type": "integer", "minimum": 1, "maximum": 16777216}
+  }
+}

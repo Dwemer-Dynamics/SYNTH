@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/diary-request.schema.json",
+  "title": "NPC, Player or Narrator diary admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["actors", "include_player", "include_narrator", "reason"],
+  "properties": {
+    "actors": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "../../v1/schemas/identity.schema.json"}},
+    "include_player": {"type": "boolean"},
+    "include_narrator": {"type": "boolean"},
+    "reason": {"enum": ["manual", "sleep", "wait"]}
+  },
+  "anyOf": [
+    {"properties": {"actors": {"minItems": 1}}},
+    {"properties": {"include_narrator": {"const": true}}},
+    {"properties": {"include_player": {"const": true}}}
+  ]
+}

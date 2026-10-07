@@ -1,0 +1,9 @@
+* text=auto
+
+# The mirrored protocol is hashed byte-for-byte on Windows and Linux.
+/protocol/** text eol=lf
+# The release audit pins the project license bytes.
+/LICENSE text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

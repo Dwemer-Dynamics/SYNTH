@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/voice-sample-response.schema.json",
+  "title": "SYNTH voice sample response v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "generation",
+    "ok"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.voice_sample.response.v2"
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "saved": {
+      "type": "boolean"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "already_available": {
+      "type": "boolean"
+    },
+    "codename": {
+      "type": "string",
+      "pattern": "^[a-z0-9_+-]{1,128}$"
+    },
+    "driver": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "cached_path": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 512
+    }
+  }
+}

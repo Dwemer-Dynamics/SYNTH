@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/trigger.schema.json",
+  "title": "SYNTH native trigger with optional exact visual capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "actor"
+  ],
+  "properties": {
+    "reply_to_request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "reply_to_line_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "scene_context_sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "kind": {
+      "enum": [
+        "auto_greeting",
+        "bored",
+        "combat_bark",
+        "rechat",
+        "external_comment",
+        "external_reaction",
+        "external_tts",
+        "quest_updated",
+        "player_reaction"
+      ]
+    },
+    "actor": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "game_time_ticks": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "event_id": {"type": "string", "pattern": "^player:[1-9][0-9]{0,15}$"},
+    "previous_context_sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "capture_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["scene_context_sequence"]},
+      "then": {"required": ["reply_to_request_id", "reply_to_line_id"], "properties": {"kind": {"const": "rechat"}}}
+    },
+    {
+      "if": {"anyOf": [{"required": ["reply_to_request_id"]}, {"required": ["reply_to_line_id"]}]},
+      "then": {"required": ["reply_to_request_id", "reply_to_line_id"], "properties": {"kind": {"const": "rechat"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "player_reaction"}}},
+      "then": {"required": ["event_id"], "not": {"required": ["game_time_ticks"]}},
+      "else": {"not": {"required": ["event_id"]}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "quest_updated"}}},
+      "then": {"required": ["previous_context_sequence"]},
+      "else": {"not": {"required": ["previous_context_sequence"]}}
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "auto_greeting"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "game_time_ticks"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "external_reaction"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "instruction"
+        ],
+        "not": {
+          "required": [
+            "text"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "external_tts"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "text"
+        ],
+        "not": {
+          "required": [
+            "instruction"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "auto_greeting",
+              "bored",
+              "combat_bark",
+              "rechat",
+              "external_comment",
+              "quest_updated",
+              "player_reaction"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "instruction"
+              ]
+            },
+            {
+              "required": [
+                "text"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "capture_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "external_reaction"
+          }
+        }
+      }
+    }
+  ]
+}

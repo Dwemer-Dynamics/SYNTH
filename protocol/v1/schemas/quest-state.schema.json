@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/quest-state.schema.json",
+  "title": "SYNTH active Fallout quest state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["form_id", "origin_plugin", "display_name", "editor_id", "current_stage", "active_objectives", "objectives"],
+  "allOf": [{"if": {"required": ["objectives_observation"], "properties": {"objectives_observation": {"const": "unavailable"}}}, "then": {"properties": {"objectives": {"maxItems": 0}, "active_objectives": {"const": 0}}}}],
+  "properties": {
+    "objectives_observation": {"type": "string", "enum": ["complete", "partial", "unavailable"]},
+    "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+    "editor_id": {"type": "string", "maxLength": 255},
+    "current_stage": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "active_objectives": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "objectives": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 255}
+    }
+  }
+}

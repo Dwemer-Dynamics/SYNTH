@@ -1,0 +1,45 @@
+# Build systems and IDEs
+/build/
+/build-*/
+out/
+.xmake/
+.vs/
+.vscode/
+vsxmake*/
+compile_commands.json
+CMakeUserPresets.json
+CMakeUserEnvVars.json
+*.sln
+*.vcxproj*
+*.user
+
+# Native outputs
+*.dll
+*.exp
+*.ilk
+*.lib
+*.obj
+*.pdb
+__pycache__/
+
+# Local game/mod-manager paths and runtime output
+deploy/
+package/
+/runtime/
+logs/
+*.log
+Mod/Data/F4SE/Plugins/SYNTH_custom.ini
+Data/F4SE/Plugins/SYNTH_custom.ini
+config/SYNTH_custom.ini
+SYNTH_custom.ini
+
+# Credentials and machine-local settings
+.env
+.env.*
+!.env.example
+secrets/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp

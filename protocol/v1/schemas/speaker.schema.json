@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/speaker.schema.json",
+  "title": "SYNTH response speaker v1",
+  "oneOf": [
+    {"$ref": "identity.schema.json"},
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "display_name"],
+      "properties": {
+        "kind": {"const": "narrator"},
+        "id": {"const": "narrator"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 255}
+      }
+    }
+  ]
+}

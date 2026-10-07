@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/payloads.schema.json",
+  "title": "SYNTH typed payload catalog v1",
+  "$defs": {
+    "init": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locale"],
+      "properties": {
+        "locale": {"type": "string", "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$", "maxLength": 35},
+        "hmd_pose_fresh": {"type": "boolean"},
+        "plugins": {
+          "type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["plugin_name", "is_light", "compile_index", "small_file_compile_index", "partial_index", "formid_prefix"],
+            "properties": {
+              "plugin_name": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+              "is_light": {"type": "boolean"},
+              "compile_index": {"type": "integer", "minimum": 0, "maximum": 255},
+              "small_file_compile_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+              "partial_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+              "formid_prefix": {"type": "string", "pattern": "^([0-9A-F]{2}|FE[0-9A-F]{3})$"}
+            }
+          }
+        }
+      }
+    },
+    "input_text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 4096}}
+    },
+    "input_audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media"],
+      "properties": {"media": {"$ref": "media.schema.json"}}
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [{"if":{"required":["audience_observation"],"properties":{"audience_observation":{"const":"unavailable"}}},"then":{"properties":{"audience":{"maxItems":0}}}},{"if":{"required":["active_quests_observation"],"properties":{"active_quests_observation":{"const":"unavailable"}}},"then":{"properties":{"active_quests":{"maxItems":0}}}},{"if":{"required":["nearby_items_observation"],"properties":{"nearby_items_observation":{"const":"unavailable"}}},"then":{"properties":{"nearby_items":{"maxItems":0}}}},{"if":{"required":["points_of_interest_observation"],"properties":{"points_of_interest_observation":{"const":"unavailable"}}},"then":{"properties":{"points_of_interest":{"maxItems":0}}}}],
+        "required": ["playthrough_id", "snapshot_sequence", "player", "audience", "active_quests", "nearby_items", "points_of_interest"],
+      "properties": {
+        "playthrough_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+        "snapshot_sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "player": {"$ref": "identity.schema.json"},
+        "target": {"$ref": "identity.schema.json"},
+        "audience": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "identity.schema.json"}},
+        "actor_states": {"type": "array", "maxItems": 16, "items": {"$ref": "actor-state.schema.json"}},
+        "active_quests_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+        "audience_observation": {"type": "string", "enum": ["complete", "partial", "unavailable"]},
+        "nearby_items_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+        "points_of_interest_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+          "active_quests": {"type": "array", "maxItems": 16, "items": {"$ref": "quest-state.schema.json"}},
+          "nearby_items": {"type": "array", "maxItems": 32, "items": {"$ref": "nearby-item.schema.json"}},
+          "points_of_interest": {"type": "array", "maxItems": 16, "items": {"$ref": "point-of-interest.schema.json"}},
+        "world": {
+          "type": "object", "additionalProperties": false,
+          "required": ["location", "cell", "worldspace", "weather", "interior", "game_time_ticks"],
+          "properties": {
+            "location": {"type": "string", "maxLength": 255},
+            "cell": {"type": "string", "maxLength": 255},
+            "worldspace": {"type": "string", "maxLength": 255},
+            "weather": {"type": "string", "maxLength": 255},
+            "interior": {"type": "boolean"},
+            "game_time_ticks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+          }
+        }
+      }
+    },
+    "activate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "source"],
+      "properties": {
+        "actor": {"$ref": "identity.schema.json"},
+        "source": {"enum": ["manual", "automatic"]}
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "actor"],
+      "properties": {
+        "kind": {"enum": ["auto_greeting", "bored", "combat_bark", "rechat", "external_comment", "external_reaction", "external_tts"]},
+        "actor": {"$ref": "identity.schema.json"},
+        "game_time_ticks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "auto_greeting"}}}, "then": {"required": ["game_time_ticks"]}},
+        {"if": {"properties": {"kind": {"const": "external_reaction"}}}, "then": {"required": ["instruction"], "not": {"required": ["text"]}}},
+        {"if": {"properties": {"kind": {"const": "external_tts"}}}, "then": {"required": ["text"], "not": {"required": ["instruction"]}}},
+        {"if": {"properties": {"kind": {"enum": ["auto_greeting", "bored", "combat_bark", "rechat", "external_comment"]}}}, "then": {"not": {"anyOf": [{"required": ["instruction"]}, {"required": ["text"]}]}}}
+      ]
+    },
+    "profile_refresh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actors", "include_narrator"],
+      "properties": {
+        "actors": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "identity.schema.json"}},
+        "include_narrator": {"type": "boolean"}
+      }
+    },
+    "action_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {"result": {"$ref": "action-result.schema.json"}}
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancel_request_id"],
+      "properties": {"cancel_request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}}
+    },
+    "halt": {"type": "object", "additionalProperties": false, "maxProperties": 0},
+    "response_start": {
+      "type": "object", "additionalProperties": false, "required": ["server_version"],
+      "properties": {"server_version": {"type": "string", "minLength": 1, "maxLength": 64}}
+    },
+    "dialogue": {
+      "type": "object", "additionalProperties": false, "required": ["speaker", "text"],
+      "properties": {"speaker": {"$ref": "speaker.schema.json"}, "text": {"type": "string", "minLength": 1, "maxLength": 4096}, "media": {"$ref": "media.schema.json"}, "speech": {"$ref": "speech.schema.json"}}
+    },
+    "action": {
+      "type": "object", "additionalProperties": false, "required": ["action"],
+      "properties": {"action": {"$ref": "action.schema.json"}}
+    },
+    "status": {
+      "type": "object", "additionalProperties": false, "required": ["code"],
+      "properties": {"code": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$"}, "detail": {"type": "string", "maxLength": 1024}}
+    },
+    "response_end": {
+      "type": "object", "additionalProperties": false, "required": ["status"],
+      "properties": {"status": {"enum": ["complete", "cancelled", "error"]}}
+    }
+  }
+}

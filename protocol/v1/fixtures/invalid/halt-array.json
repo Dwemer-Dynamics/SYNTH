@@ -1,0 +1,1 @@
+{"schema":"synth.event.v1","protocol_version":1,"type":"halt","session_id":"session:flat:fixture","request_id":"req-halt-1","turn_id":"turn-halt-1","generation":2,"game":"fo4","runtime_variant":"flat","client_version":"0.1.0","runtime_version":"1.11.240","capabilities":["dialogue.text"],"payload":[]}

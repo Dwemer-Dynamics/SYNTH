@@ -1,0 +1,1 @@
+{"schema":"synth.event.v1","protocol_version":1,"type":"init","session_id":"session:flat:fixture","request_id":"req-bad-1","turn_id":"turn-bad-1","generation":1,"game":"fo4","runtime_variant":"flat","client_version":"0.1.0","runtime_version":"1.10.163","capabilities":[],"payload":{},"unexpected":true}

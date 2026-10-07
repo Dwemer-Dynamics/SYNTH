@@ -1,0 +1,39 @@
+{
+  "schema": "synth.visual_context.capture.v2",
+  "protocol_version": 2,
+  "session_id": "session:flat:fixture",
+  "request_id": "req-vision-1",
+  "turn_id": "turn-vision-1",
+  "generation": 2,
+  "game": "fo4",
+  "runtime_variant": "flat",
+  "capture_id": "capture-vision-1",
+  "interaction_mode": "describe",
+  "perspective": "first_person",
+  "media": {
+    "schema": "synth.media.v1",
+    "media_id": "media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_type": "image/jpeg",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size": 2048
+  },
+  "world": {
+    "location": "Sanctuary Hills",
+    "worldspace": "Commonwealth",
+    "cell_form_id": "",
+    "worldspace_form_id": "",
+    "weather": "Clear",
+    "interior": false,
+    "game_time_ticks": 123456
+  },
+  "subject": {
+    "form_id": "0x0001A4D7",
+    "origin_plugin": "Fallout4.esm",
+    "playthrough_id": "save:fo4:001",
+    "display_name": "Preston Garvey"
+  },
+  "nearby_actors": [],
+  "visual_type": "actor",
+  "visual_key": "actor:fo4:save:fo4:001:fallout4.esm:0x0001a4d7",
+  "context_sequence": 1
+}

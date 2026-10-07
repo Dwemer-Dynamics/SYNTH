@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/nearby-item.schema.json",
+  "title": "SYNTH nearby Fallout item v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reference_id", "reference_origin_plugin", "base_form_id", "base_origin_plugin", "cell_form_id", "cell_origin_plugin", "display_name", "position", "distance", "count", "value", "weight", "form_type", "stealing", "looking_at", "held"],
+  "properties": {
+    "reference_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "reference_origin_plugin": {"type": "string", "pattern": "^(?:|[^/\\\\]+\\.(esm|esp|esl))$", "maxLength": 255},
+    "base_form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "base_origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+    "cell_form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "cell_origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+    "position": {"type": "object", "additionalProperties": false, "required": ["x", "y", "z"], "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}},
+    "distance": {"type": "number", "minimum": 0, "maximum": 1000000},
+    "count": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "value": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "weight": {"type": "number", "minimum": 0, "maximum": 100000},
+    "form_type": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "stealing": {"type": "boolean"},
+    "looking_at": {"type": "boolean"},
+    "held": {"type": "boolean"}
+  }
+}

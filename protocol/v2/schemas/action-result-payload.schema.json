@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/action-result-payload.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result"
+  ],
+  "properties": {
+    "result": {
+      "oneOf": [
+        {
+          "$ref": "../../v1/schemas/action-result.schema.json"
+        },
+        {
+          "$ref": "action-result.schema.json"
+        },
+        {
+          "$ref": "action-transfer-result.schema.json"
+        }
+      ]
+    }
+  }
+}

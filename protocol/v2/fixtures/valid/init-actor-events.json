@@ -1,0 +1,1 @@
+{"schema":"synth.event.v2","protocol_version":2,"type":"init","session_id":"session:actor:fixture","request_id":"init:actor","turn_id":"turn:actor","generation":1,"game":"fo4","runtime_variant":"flat","client_version":"0.1.0","runtime_version":"1.11.240","capabilities":["dialogue.text","context.actor_events"],"payload":{"locale":"en-US"},"context_sequence":0}

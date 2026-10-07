@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/response-line.schema.json",
+  "title": "SYNTH streamed response line v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol_version", "type", "line_id", "request_id", "turn_id", "generation", "game", "runtime_variant", "payload"],
+  "properties": {
+    "schema": {"const": "synth.response.line.v1"},
+    "protocol_version": {"const": 1},
+    "type": {"enum": ["response_start", "dialogue", "action", "status", "response_end"]},
+    "line_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "turn_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "game": {"const": "fo4"},
+    "runtime_variant": {"enum": ["flat", "vr"]},
+    "payload": {"type": "object", "maxProperties": 64}
+  }
+}

@@ -1,0 +1,2 @@
+{"schema":"synth.response.line.v1","protocol_version":1,"type":"response_start","line_id":"line-bad-1","request_id":"req-bad-4","turn_id":"turn-bad-4","generation":1,"game":"fo4","runtime_variant":"flat","payload":{}}
+{"schema":"synth.response.line.v1","protocol_version":1,"type":"dialogue"

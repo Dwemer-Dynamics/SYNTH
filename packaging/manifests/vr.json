@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "lane": "vr",
+  "artifact": "SYNTHVR.dll",
+  "entry_source": "src/vr/plugin_entry.cpp",
+  "dependencies": [
+    {
+      "name": "ArthurHub/CommonLibF4VR",
+      "repository": "https://github.com/ArthurHub/CommonLibF4VR.git",
+      "revision": "1c7b4fc860261eabad9f044e336965c26abe8ee6",
+      "provisioning": "required_external_source_fetch"
+    },
+    {
+      "name": "F4SEVR",
+      "version": "0.6.21",
+      "provisioning": "required_user_runtime_install"
+    },
+    {
+      "name": "Fallout VR Address Library",
+      "repository": "https://github.com/alandtse/fallout_vr_address_library.git",
+      "release": "v1.13.1",
+      "revision": "8f8d65e5941c17c88576e7b1185f26ea337f068f",
+      "provisioning": "required_user_runtime_install"
+    }
+  ],
+  "supported_runtime_candidate": "Fallout 4 VR 1.2.72",
+  "optional_runtime_integrations": [
+    "None. F4SE Menu Framework does not support Fallout 4 VR, so the VR lane is configured through SYNTH_custom.ini"
+  ],
+  "package_does_not_include": [
+    "Fallout 4 VR binaries",
+    "F4SEVR binaries",
+    "VR Address Library runtime files",
+    "game data",
+    "Bethesda, Creation Club or third-party ESP/ESL/ESM/PEX/BA2 files; the VR lane ships no ESP, and its only script is SYNTH's original SYNTHNative bridge when built, audited against its tracked source"
+  ]
+}

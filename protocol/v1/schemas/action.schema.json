@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/action.schema.json",
+  "title": "SYNTH typed Fallout 4 action intent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "action_id", "idempotency_key", "name", "capability", "actor", "arguments", "deadline_ms"],
+  "properties": {
+    "schema": {"const": "synth.action.v1"},
+    "action_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "idempotency_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "name": {"enum": [
+      "attack", "check_inventory", "come_closer", "consume", "equip_item",
+      "decrease_walk_speed", "end_conversation", "follow", "follow_player",
+      "stop_following", "give_caps_to", "give_item_to", "increase_walk_speed",
+      "inspect_actor", "inspect_surroundings", "make_follower", "move_to", "barter",
+      "open_inventory", "pickup_item", "read_quests", "relax", "director_command",
+      "spawn_caps", "spawn_item", "teleport_actor", "kill_target", "sheathe_weapon",
+      "stop_walk", "take_a_seat", "take_caps_from_player", "travel_to",
+      "unequip_item", "wait_here"
+    ]},
+    "capability": {"type": "string", "pattern": "^action\\.[a-z][a-z0-9_.-]{0,56}$"},
+    "actor": {"$ref": "identity.schema.json"},
+    "target": {"$ref": "identity.schema.json"},
+    "arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target_name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "item": {"type": "string", "minLength": 1, "maxLength": 255},
+        "amount": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "location": {"type": "string", "minLength": 1, "maxLength": 255},
+        "message": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "speed": {"enum": ["walk", "jog", "run"]}
+      },
+      "maxProperties": 7
+    },
+    "deadline_ms": {"type": "integer", "minimum": 100, "maximum": 120000}
+  }
+}

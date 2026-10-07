@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/speech.schema.json",
+  "title": "SYNTH deferred speech job v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "utterance_id", "cache_key", "status", "deadline_ms"],
+  "properties": {
+    "schema": {"const": "synth.speech.v1"},
+    "utterance_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "cache_key": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "status": {"enum": ["pending", "ready", "failed"]},
+    "deadline_ms": {"type": "integer", "minimum": 1, "maximum": 120000},
+    "media": {"$ref": "media.schema.json"}
+  }
+}

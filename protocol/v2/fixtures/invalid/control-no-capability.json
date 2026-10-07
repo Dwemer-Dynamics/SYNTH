@@ -1,0 +1,19 @@
+{
+  "schema": "synth.event.v2",
+  "protocol_version": 2,
+  "type": "control",
+  "session_id": "control-fixture",
+  "request_id": "control-1",
+  "turn_id": "settings-1",
+  "generation": 1,
+  "game": "fo4",
+  "runtime_variant": "flat",
+  "client_version": "source",
+  "runtime_version": "1.11.240",
+  "capabilities": [],
+  "context_sequence": 0,
+  "payload": {
+    "setting": "status",
+    "value": ""
+  }
+}

@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/event.schema.json",
+  "title": "SYNTH client event v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "type",
+    "session_id",
+    "request_id",
+    "turn_id",
+    "generation",
+    "game",
+    "runtime_variant",
+    "client_version",
+    "runtime_version",
+    "capabilities",
+    "payload",
+    "context_sequence"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.event.v2"
+    },
+    "protocol_version": {
+      "const": 2
+    },
+    "type": {
+      "enum": [
+        "init",
+        "control",
+        "input_text",
+        "input_audio",
+        "context",
+        "activate",
+        "trigger",
+        "profile_refresh",
+        "diary_request",
+        "action_result",
+        "cancel",
+        "halt"
+      ]
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "turn_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "game": {
+      "const": "fo4"
+    },
+    "runtime_variant": {
+      "enum": [
+        "flat",
+        "vr"
+      ]
+    },
+    "client_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "runtime_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "maxProperties": 64
+    },
+    "context_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "control"}}},
+      "then": {"properties": {"payload": {"$ref": "control.schema.json"}, "capabilities": {"contains": {"const": "control.menu"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"enum": ["input_text", "input_audio"]}, "payload": {"required": ["control"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "control.menu"}}, "payload": {"properties": {"control": {"$ref": "control.schema.json#/$defs/selection"}}}}}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "action.consume_inventory"}}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"allOf": [
+        {"contains": {"const": "action.consume"}}, {"contains": {"const": "action.inventory_observation"}},
+        {"contains": {"const": "dialogue.turn_ownership"}}
+      ]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "action_result"}}},
+      "then": {"properties": {"payload": {"$ref": "action-result-payload.schema.json"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "action_result"}, "payload": {"properties": {"result": {"properties": {"schema": {"const": "synth.action.result.v2"}}, "required": ["schema"]}}, "required": ["result"]}}},
+      "then": {"properties": {"context_sequence": {"minimum": 1}, "capabilities": {"allOf": [
+        {"contains": {"const": "action.inventory_observation"}}, {"contains": {"const": "dialogue.turn_ownership"}}
+      ]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "action_result"}, "payload": {"properties": {"result": {"properties": {"inventory": {"properties": {"items": {"minItems": 33}}, "required": ["items"]}}, "required": ["inventory"]}}, "required": ["result"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"contains": {"const": "context.inventory_512"}}}}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.ownership"}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.turn_ownership"}}}}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.scene"}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.ownership"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "context"}, "payload": {"required": ["world"],
+        "properties": {"world": {"required": ["scene"]}}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.scene"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"required": ["scene_context_sequence"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.scene"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"properties": {"kind": {"const": "rechat"}}, "required": ["kind"]},
+        "capabilities": {"contains": {"const": "dialogue.rechat.scene"}}}},
+      "then": {"properties": {"payload": {"required": ["scene_context_sequence"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"properties": {"kind": {"const": "rechat"}}, "required": ["kind"]},
+        "capabilities": {"contains": {"const": "dialogue.rechat.ownership"}}}},
+      "then": {"properties": {"context_sequence": {"minimum": 1}, "payload": {"required": ["reply_to_request_id", "reply_to_line_id"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"anyOf": [
+        {"required": ["reply_to_request_id"]}, {"required": ["reply_to_line_id"]}
+      ]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.rechat.ownership"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"properties": {"kind": {"const": "player_reaction"}}, "required": ["kind"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"allOf": [
+        {"contains": {"const": "dialogue.player_reactions"}}, {"contains": {"const": "context.player_events"}}
+      ]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "context"}, "payload": {"required": ["player_event"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"contains": {"const": "context.player_events"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "trigger"}, "payload": {"properties": {"kind": {"const": "quest_updated"}}, "required": ["kind"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"allOf": [
+        {"contains": {"const": "dialogue.quest_reactions"}}, {"contains": {"const": "context.quest_tracking"}}
+      ]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "context"}, "payload": {"required": ["active_quests"], "properties": {"active_quests": {"contains": {"required": ["tracked"]}}}}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"contains": {"const": "context.quest_tracking"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "context"}, "payload": {"required": ["actor_events"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"contains": {"const": "context.actor_events"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "context"}, "payload": {"required": ["quest_events"]}}},
+      "then": {"properties": {"runtime_variant": {"const": "flat"}, "capabilities": {"contains": {"const": "context.quest_events"}}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "diary_request"}}},
+      "then": {
+        "properties": {"payload": {"$ref": "diary-request.schema.json"}},
+        "allOf": [
+          {
+            "if": {"properties": {"payload": {"properties": {"reason": {"const": "sleep"}}}}},
+            "then": {"properties": {"capabilities": {"contains": {"const": "diary.automatic.sleep"}}}}
+          },
+          {
+            "if": {"properties": {"payload": {"properties": {"reason": {"const": "wait"}}}}},
+            "then": {"properties": {"capabilities": {"contains": {"const": "diary.automatic.wait"}}}}
+          },
+          {
+            "if": {"properties": {"payload": {"properties": {"include_player": {"const": true}}}}},
+            "then": {"properties": {"capabilities": {"contains": {"const": "diary.manual.player"}}}}
+          },
+          {
+            "if": {"properties": {"payload": {"properties": {"actors": {"minItems": 1}}}}},
+            "then": {"properties": {"capabilities": {"contains": {"const": "diary.manual.npc"}}}}
+          },
+          {
+            "if": {"properties": {"payload": {"properties": {"include_narrator": {"const": true}}}}},
+            "then": {"properties": {"capabilities": {"contains": {"const": "diary.manual.narrator"}}}}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "input_text",
+              "input_audio",
+              "activate",
+              "trigger",
+              "profile_refresh",
+              "diary_request",
+              "action_result"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "context_sequence": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {"if":{"properties":{"type":{"const":"action_result"},"payload":{"properties":{"result":{"properties":{"schema":{"const":"synth.action.transfer-result.v2"}},"required":["schema"]}},"required":["result"]}}},"then":{"properties":{"capabilities":{"contains":{"const":"action.transfer_inventory"}}}}},
+    {"if":{"properties":{"capabilities":{"contains":{"const":"action.transfer_inventory"}}}},"then":{"properties":{"runtime_variant":{"const":"flat"},"capabilities":{"allOf":[{"contains":{"const":"action.give_item_to"}},{"contains":{"const":"action.inventory_observation"}},{"contains":{"const":"dialogue.turn_ownership"}}]}}}},
+    {"if":{"properties":{"capabilities":{"contains":{"const":"action.caps_inventory"}}}},"then":{"properties":{"runtime_variant":{"const":"flat"},"capabilities":{"allOf":[{"contains":{"const":"action.transfer_inventory"}},{"contains":{"const":"action.give_caps_to"}}]}}}},
+    {"if":{"properties":{"capabilities":{"contains":{"const":"action.player_caps_inventory"}}}},"then":{"properties":{"runtime_variant":{"const":"flat"},"capabilities":{"allOf":[{"contains":{"const":"action.caps_inventory"}},{"contains":{"const":"action.take_caps_from_player"}}]}}}},
+    {"if":{"properties":{"type":{"const":"action_result"},"payload":{"properties":{"result":{"properties":{"recipient_inventory":{"properties":{"items":{"minItems":33}},"required":["items"]}},"required":["recipient_inventory"]}},"required":["result"]}}},"then":{"properties":{"runtime_variant":{"const":"flat"},"capabilities":{"contains":{"const":"context.inventory_512"}}}}}
+  ]
+}

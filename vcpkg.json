@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "synth",
+  "version-string": "0.1.0",
+  "builtin-baseline": "8e88484407a1be45235a333c8de49fdd8f46d3a3",
+  "dependencies": [
+    "rapidcsv",
+    "rsm-mmio",
+    "spdlog"
+  ]
+}

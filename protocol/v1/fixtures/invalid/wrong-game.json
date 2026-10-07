@@ -1,0 +1,1 @@
+{"schema":"synth.event.v1","protocol_version":1,"type":"init","session_id":"session:flat:fixture","request_id":"req-bad-3","turn_id":"turn-bad-3","generation":1,"game":"fnv","runtime_variant":"flat","client_version":"0.1.0","runtime_version":"1.4.0.525","capabilities":[],"payload":{}}

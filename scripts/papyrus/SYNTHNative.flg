@@ -1,0 +1,5 @@
+// Original minimal flag definition for the native-only SYNTH API.
+Flag Hidden 0
+{
+    Script
+}

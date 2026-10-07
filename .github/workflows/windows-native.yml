@@ -1,0 +1,73 @@
+name: windows-native
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flat:
+    name: Fallout 4 flat DLL
+    runs-on: windows-2022
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install xmake
+        shell: pwsh
+        run: |
+          choco install xmake --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'xmake installation failed.' }
+          # Chocolatey updates persistent PATH, not the current runner process.
+          [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ } | Add-Content $env:GITHUB_PATH
+          [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ } | Add-Content $env:GITHUB_PATH
+      - name: Build and test flat lane
+        shell: pwsh
+        run: ./scripts/build-flat.ps1 -Mode releasedbg
+      - name: Record evidence boundary
+        if: always()
+        shell: pwsh
+        run: |
+          'This job proves the pinned flat source build and its native suites.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          'It does not package; release packages are built and audited locally.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          'It does not claim F4SE load or in-game behavior.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+  vr:
+    name: Fallout 4 VR DLL
+    runs-on: windows-2022
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prepare VR dependency toolchain
+        shell: pwsh
+        run: |
+          # build-vr.ps1 lets CMake install the pinned manifest into its own build tree
+          # with the x64-windows-static-md triplet, so SYNTHVR.dll imports no spdlog.dll/fmt.dll.
+          if (!(Test-Path "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe")) { throw 'vcpkg toolchain is unavailable.' }
+          # Hosted images may omit historical objects needed by the pinned manifest.
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git -C $env:VCPKG_INSTALLATION_ROOT fetch --no-tags origin $baseline
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline fetch failed.' }
+          git -C $env:VCPKG_INSTALLATION_ROOT cat-file -e "${baseline}:versions/baseline.json"
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline is unavailable.' }
+      - name: Build and test VR lane
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          ./scripts/build-vr.ps1 -Configuration RelWithDebInfo
+      - name: Record evidence boundary
+        if: always()
+        shell: pwsh
+        run: |
+          'This job proves the pinned VR source build and its native suites.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          'It does not package; release packages are built and audited locally.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          'It does not claim F4SEVR load or in-headset behavior.' | Out-File $env:GITHUB_STEP_SUMMARY -Append

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "lane": "flat",
+  "artifact": "SYNTH.dll",
+  "entry_source": "src/flat/plugin_entry.cpp",
+  "dependency": {
+    "name": "libxse/CommonLibF4",
+    "repository": "https://github.com/libxse/CommonLibF4.git",
+    "revision": "6266ecc9014b473fc6b6efd04abac324477c63cd",
+    "provisioning": "required_external_source_fetch"
+  },
+  "runtime_requirements": [
+    "Fallout 4 runtime 1.11.240",
+    "F4SE runtime 0.7.9",
+    "Address Library for F4SE Plugins matching Fallout 4 1.11.240"
+  ],
+  "optional_runtime_integrations": [
+    "F4SE Menu Framework (DCCStudios/F4SEMenuFramework) hosts SYNTH's native in-game settings pages and hotkey registry; SYNTH registers through its consumer API, ships no MCM config, and remains fully configurable through SYNTH_custom.ini without it"
+  ],
+  "package_does_not_include": [
+    "Fallout 4 binaries",
+    "F4SE binaries",
+    "game data",
+    "Bethesda, Creation Club or third-party ESP/ESL/ESM/PEX/BA2 files; the only plugin and scripts shipped are SYNTH's original Data/SYNTH.esp, SYNTHWait and (when built) SYNTHNative, each audited against its tracked source"
+  ]
+}

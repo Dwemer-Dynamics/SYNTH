@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/action-transfer-result.schema.json",
+  "title": "SYNTH paired inventory transfer receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "action_id",
+    "idempotency_key",
+    "status",
+    "detail",
+    "inventory",
+    "recipient_inventory"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.action.transfer-result.v2"
+    },
+    "action_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "rejected",
+        "unavailable",
+        "timed_out",
+        "cancelled",
+        "failed",
+        "unsupported_without_esp",
+        "unsupported_runtime"
+      ]
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "inventory": {
+      "$ref": "action-result.schema.json#/properties/inventory"
+    },
+    "recipient_inventory": {
+      "$ref": "action-result.schema.json#/properties/inventory"
+    }
+  }
+}

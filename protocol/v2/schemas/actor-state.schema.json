@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/actor-state.schema.json",
+  "title": "SYNTH nearby actor state v2 (negotiated extended inventory)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["actor", "base_form_id", "base_origin_plugin", "position", "distance", "alive", "disabled", "in_combat", "hostile_to_player", "sneaking", "level", "race", "sex", "voice_type", "teammate", "health_percent", "action_points_percent", "inventory", "line_of_sight", "factions", "faction_observation", "life_state", "posture", "weapon_drawn", "movement_speed", "sprinting", "talking_to_player", "in_power_armor", "current_package"],
+  "allOf": [
+    {"if": {"required": ["inventory_observation"], "properties": {"inventory_observation": {"const": "unavailable"}}}, "then": {"properties": {"inventory": {"maxItems": 0}}}},
+    {"if": {"required": ["faction_completeness"], "properties": {"faction_completeness": {"enum": ["complete", "partial"]}}}, "then": {"properties": {"faction_observation": {"enum": ["effective", "base_only"]}}}},
+    {"if": {"required": ["faction_completeness"], "properties": {"faction_completeness": {"const": "unavailable"}}}, "then": {"properties": {"faction_observation": {"const": "unavailable"}, "factions": {"maxItems": 0}}}},
+    {"if": {"properties": {"faction_observation": {"const": "unavailable"}}}, "then": {"properties": {"factions": {"maxItems": 0}, "faction_completeness": {"const": "unavailable"}}}}
+  ],
+  "properties": {
+    "actor": {"$ref": "../../v1/schemas/identity.schema.json"},
+    "base_form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "base_origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"}
+      }
+    },
+    "distance": {"type": "number", "minimum": 0, "maximum": 1000000},
+    "alive": {"type": "boolean"},
+    "disabled": {"type": "boolean"},
+    "in_combat": {"type": "boolean"},
+    "hostile_to_player": {"type": "boolean"},
+    "sneaking": {"type": "boolean"},
+    "level": {"type": "integer", "minimum": 0, "maximum": 32767},
+    "race": {"type": "string", "maxLength": 255},
+    "sex": {"enum": ["", "male", "female", "unknown"]},
+    "voice_type": {"type": "string", "maxLength": 255},
+    "teammate": {"type": "boolean"},
+    "health_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "action_points_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "health_percent_available": {"type": "boolean"},
+    "action_points_percent_available": {"type": "boolean"},
+    "line_of_sight": {"enum": ["visible", "blocked", "unknown"]},
+    "faction_observation": {"enum": ["effective", "base_only", "unavailable"]},
+    "faction_completeness": {"type": "string", "enum": ["complete", "partial", "unavailable"]},
+    "life_state": {"enum": ["alive", "dying", "dead", "unconscious", "reanimate", "recycle", "restrained", "essential_down", "bleedout", "unknown"]},
+    "posture": {"enum": ["normal", "want_to_sit", "waiting_for_sit", "sitting", "want_to_stand", "want_to_sleep", "waiting_for_sleep", "sleeping", "want_to_wake", "unknown"]},
+    "weapon_drawn": {"type": "boolean"},
+    "movement_speed": {"type": "number", "minimum": 0, "maximum": 100000},
+    "sprinting": {"type": "boolean"},
+    "talking_to_player": {"type": "boolean"},
+    "in_power_armor": {"type": "boolean"},
+    "current_package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "form_id", "origin_plugin", "display_name", "editor_id"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "form_id": {"type": "string", "maxLength": 10},
+        "origin_plugin": {"type": "string", "maxLength": 255},
+        "display_name": {"type": "string", "maxLength": 255},
+        "editor_id": {"type": "string", "maxLength": 255}
+      }
+    },
+    "factions": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["form_id", "origin_plugin", "display_name", "editor_id", "rank"],
+        "properties": {
+          "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+          "origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+          "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+          "editor_id": {"type": "string", "maxLength": 255},
+          "rank": {"type": "integer", "minimum": 0, "maximum": 127}
+        }
+      }
+    },
+    "inventory_observation": {"type": "string", "enum": ["unavailable", "partial", "complete"]},
+    "inventory": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["form_id", "origin_plugin", "display_name", "count", "value", "weight", "form_type", "equipped"],
+        "properties": {
+          "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+          "origin_plugin": {"type": "string", "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$", "maxLength": 255},
+          "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+          "count": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+          "value": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+          "weight": {"type": "number", "minimum": 0, "maximum": 100000},
+          "form_type": {"type": "integer", "minimum": 0, "maximum": 65535},
+          "equipped": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

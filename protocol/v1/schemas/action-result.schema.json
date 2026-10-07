@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/action-result.schema.json",
+  "title": "SYNTH terminal action result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "action_id", "idempotency_key", "status", "detail"],
+  "properties": {
+    "schema": {"const": "synth.action.result.v1"},
+    "action_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "idempotency_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "status": {"enum": ["succeeded", "rejected", "unavailable", "timed_out", "cancelled", "failed", "unsupported_without_esp", "unsupported_runtime"]},
+    "detail": {"type": "string", "maxLength": 1024}
+  }
+}

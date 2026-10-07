@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v1/schemas/identity.schema.json",
+  "title": "SYNTH authoritative form identity v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["form_id", "origin_plugin", "playthrough_id"],
+  "properties": {
+    "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$"},
+    "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"},
+    "playthrough_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 255}
+  }
+}

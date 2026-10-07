@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/player-event.schema.json",
+  "title": "Owned sampled player transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "kind", "before", "after", "interval_ms", "age_ms"],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^player:[1-9][0-9]{0,15}$"},
+    "kind": {"enum": ["level_up", "combat_end"]},
+    "before": {"$ref": "#/$defs/state"},
+    "after": {"$ref": "#/$defs/state"},
+    "interval_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "age_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+  },
+  "$defs": {
+    "state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["game_time_ticks", "level", "in_combat"],
+      "properties": {
+        "game_time_ticks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "level": {"type": "integer", "minimum": 1, "maximum": 32767},
+        "in_combat": {"type": "boolean"}
+      }
+    }
+  },
+  "allOf": [{
+    "if": {"properties": {"kind": {"const": "combat_end"}}},
+    "then": {"properties": {
+      "before": {"properties": {"in_combat": {"const": true}}},
+      "after": {"properties": {"in_combat": {"const": false}}}
+    }}
+  }]
+}

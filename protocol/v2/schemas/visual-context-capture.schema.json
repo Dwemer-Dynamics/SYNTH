@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/visual-context-capture.schema.json",
+  "title": "SYNTH snapshot-bound visual context capture v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "session_id",
+    "request_id",
+    "turn_id",
+    "generation",
+    "game",
+    "runtime_variant",
+    "capture_id",
+    "interaction_mode",
+    "perspective",
+    "media",
+    "world",
+    "context_sequence"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.visual_context.capture.v2"
+    },
+    "protocol_version": {
+      "const": 2
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "turn_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "game": {
+      "const": "fo4"
+    },
+    "runtime_variant": {
+      "enum": [
+        "flat",
+        "vr"
+      ]
+    },
+    "capture_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "interaction_mode": {
+      "enum": [
+        "store_only",
+        "describe",
+        "npc_portrait"
+      ]
+    },
+    "perspective": {
+      "enum": [
+        "first_person",
+        "third_person",
+        "hmd"
+      ]
+    },
+    "media": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/media.schema.json"
+        },
+        {
+          "properties": {
+            "content_type": {
+              "enum": [
+                "image/jpeg",
+                "image/png",
+                "image/webp"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "world": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location",
+        "worldspace",
+        "cell_form_id",
+        "worldspace_form_id",
+        "weather",
+        "interior",
+        "game_time_ticks"
+      ],
+      "properties": {
+        "location": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "worldspace": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "cell_form_id": {"const": ""},
+        "worldspace_form_id": {"const": ""},
+        "weather": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "interior": {
+          "type": "boolean"
+        },
+        "game_time_ticks": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "subject": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "nearby_actors": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "$ref": "../../v1/schemas/identity.schema.json"
+      }
+    },
+    "visual_type": {
+      "enum": [
+        "scene",
+        "location",
+        "actor",
+        "player",
+        "item",
+        "furniture",
+        "object"
+      ]
+    },
+    "visual_key": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "context_sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtime_variant": {
+            "const": "vr"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "perspective": {
+            "const": "hmd"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "perspective": {
+            "enum": [
+              "first_person",
+              "third_person"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "interaction_mode": {
+            "enum": ["npc_portrait", "describe"]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "subject"
+        ]
+      }
+    }
+  ]
+}
