@@ -5,7 +5,7 @@ SYNTH does not use the other Dwemer mods' unstable-first workflow.
 
 | Branch | Purpose |
 |---|---|
-| alpha | Current development and default PR target |
+| alpha | Current development and required PR target |
 | unstable | Reserved integration lane |
 | dev | Reserved tested-development lane |
 | synth | Main/release lane |
