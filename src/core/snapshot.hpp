@@ -2,6 +2,9 @@
 
 #include "generation.hpp"
 #include "runtime_identity.hpp"
+#include "combat_target.hpp"
+#include "combat_contacts.hpp"
+#include "enemy_awareness.hpp"
 
 #include <algorithm>
 #include <array>
@@ -327,7 +330,10 @@ public:
                   std::string faction_completeness = {},
                   bool health_percent_available = false,
                   bool action_points_percent_available = false,
-                  bool conversation_area_available = false)
+                  bool conversation_area_available = false,
+                  CombatTargetSnapshot combat_target = {},
+                  std::vector<CombatContactSnapshot> combat_contacts = {},
+                  EnemyAwarenessSnapshot enemy_awareness = {}, bool conversation_held = false)
         : form_id_{form_id},
           name_{std::move(name)},
           position_{position},
@@ -365,7 +371,8 @@ public:
               : std::move(faction_completeness)},
           health_percent_available_{health_percent_available},
           action_points_percent_available_{action_points_percent_available},
-          conversation_area_available_{conversation_area_available} {
+          conversation_area_available_{conversation_area_available},
+          combat_target_{std::move(combat_target)}, combat_contacts_{std::move(combat_contacts)}, enemy_awareness_{std::move(enemy_awareness)}, conversation_held_{conversation_held} {
         const auto valid_plugin = !origin_plugin_.empty() && origin_plugin_.size() <= 255 &&
                                   origin_plugin_.find_first_of("/\\") == std::string::npos &&
                                   (origin_plugin_.ends_with(".esm") || origin_plugin_.ends_with(".esp") ||
@@ -398,7 +405,10 @@ public:
             !valid_life_state(life_state_) || !valid_posture(posture_) ||
             !std::isfinite(movement_speed_) || movement_speed_ < 0.0 ||
             movement_speed_ > 100000.0 ||
-            (current_package_ && !current_package_->valid())) {
+            (current_package_ && !current_package_->valid()) ||
+            !combat_target_.valid_for(form_id_, origin_plugin_, playthrough_id_, alive_, disabled_, in_combat_) ||
+            !valid_combat_contacts(combat_contacts_,form_id_,origin_plugin_,playthrough_id_,alive_,disabled_) ||
+            !valid_enemy_awareness(enemy_awareness_,form_id_,playthrough_id_,alive_,disabled_)) {
             throw std::invalid_argument{"actor snapshot fields are invalid"};
         }
     }
@@ -434,6 +444,32 @@ public:
         return line_of_sight_;
     }
     [[nodiscard]] bool conversation_area_available() const noexcept { return conversation_area_available_; }
+    [[nodiscard]] const CombatTargetSnapshot& combat_target() const noexcept { return combat_target_; }
+    [[nodiscard]] const std::vector<CombatContactSnapshot>& combat_contacts() const noexcept { return combat_contacts_; }
+
+    [[nodiscard]] bool conversation_held() const noexcept { return conversation_held_; }
+    [[nodiscard]] const EnemyAwarenessSnapshot& enemy_awareness() const noexcept { return enemy_awareness_; }
+    [[nodiscard]] ActorSnapshot with_enemy_awareness(EnemyAwarenessSnapshot value) const {
+        if (!valid_enemy_awareness(value,form_id_,playthrough_id_,alive_,disabled_))
+            throw std::invalid_argument{"invalid enemy awareness"};
+        auto result=*this;result.enemy_awareness_=std::move(value);return result;
+    }
+
+    [[nodiscard]] ActorSnapshot with_combat_contacts(std::vector<CombatContactSnapshot> contacts) const {
+        if (!valid_combat_contacts(contacts,form_id_,origin_plugin_,playthrough_id_,alive_,disabled_))
+            throw std::invalid_argument{"invalid visual combat contacts"};
+        auto result=*this;
+        result.combat_contacts_=std::move(contacts);
+        return result;
+    }
+
+    [[nodiscard]] ActorSnapshot with_combat_target(CombatTargetSnapshot observation) const {
+        if (!observation.valid_for(form_id_, origin_plugin_, playthrough_id_, alive_, disabled_, in_combat_))
+            throw std::invalid_argument{"invalid combat target for captured actor"};
+        auto result = *this;
+        result.combat_target_ = std::move(observation);
+        return result;
+    }
     [[nodiscard]] const std::vector<FactionMembershipSnapshot>& factions() const noexcept {
         return factions_;
     }
@@ -483,6 +519,13 @@ public:
         result.faction_observation_ = observed.faction_observation_;
         result.faction_completeness_ = observed.faction_completeness_;
         result.current_package_ = observed.current_package_;
+        // Selection facts remain frozen; a combat transition during enrichment cannot attest a current opponent.
+        result.combat_target_ = in_combat_ == observed.in_combat_ && alive_ == observed.alive_ && disabled_ == observed.disabled_
+            ? observed.combat_target_ : CombatTargetSnapshot{};
+        result.combat_contacts_ = alive_ == observed.alive_ && disabled_ == observed.disabled_
+            ? observed.combat_contacts_ : std::vector<CombatContactSnapshot>{};
+        result.enemy_awareness_ = alive_ == observed.alive_ && disabled_ == observed.disabled_
+            ? observed.enemy_awareness_ : EnemyAwarenessSnapshot{};
         return result;
     }
 
@@ -545,6 +588,10 @@ private:
     bool health_percent_available_;
     bool action_points_percent_available_;
     bool conversation_area_available_;
+    CombatTargetSnapshot combat_target_;
+    std::vector<CombatContactSnapshot> combat_contacts_;
+    EnemyAwarenessSnapshot enemy_awareness_;
+    bool conversation_held_{};
 };
 
 class RuntimeSnapshot final {

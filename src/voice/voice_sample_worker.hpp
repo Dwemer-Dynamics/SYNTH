@@ -172,8 +172,10 @@ private:
                     const auto length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
                     if (!length || length >= executable.size()) throw std::runtime_error{"Cannot resolve game Data folder"};
                     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds{45};
-                    index.scan(data_root_.empty() ? std::filesystem::path{executable.data()}.parent_path() / "Data" : data_root_, plugins,
-                               [&] { return cancelled() || std::chrono::steady_clock::now() > until; });
+                    const auto data = data_root_.empty() ? std::filesystem::path{executable.data()}.parent_path() / "Data" : data_root_;
+                    index.scan(data, plugins,
+                               [&] { return cancelled() || std::chrono::steady_clock::now() > until; },
+                               SampleIndex::read_rejected_sources(data / "F4SE/Plugins/SYNTH_rejected_voice_samples.txt"));
                     indexed = true;
                 }
                 std::size_t complete{}, failed{}, total = job.all ? index.samples().size() : 1;

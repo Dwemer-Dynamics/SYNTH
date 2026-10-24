@@ -1,5 +1,24 @@
 # Persistent wait ownership and paused-chat targeting
 
+## Dialogue wait commands
+
+The flat client advertises `action.wait_here` and `action.release_wait` and routes
+validated dialogue actions to the same controller as the control-menu commands.
+The action must name one exact NPC in its captured scene, with no target or extra
+arguments. VR does not advertise these capabilities. The server exposes them only
+to an explicit player text/audio request, with existing catalog disable settings
+preserved. Release Wait removes SYNTH's hold; it does not start following.
+
+Execution belongs to the requesting turn. After acceptance, the existing
+90-second unpaused hold survives the next player utterance. Stop, session retirement
+and save/load revoke its separate lifetime; Release Wait and the existing timeout
+still release the hold. Repeated action IDs or idempotency keys cannot restart it.
+Queued acceptance remains separate from the game-thread movement verification.
+
+Manual acceptance is open: typed and spoken Wait Here, a follow-up while held,
+Release Wait, Stop, the 90-second timeout and save/load. The original ESP and script
+are reused; this connection adds no gameplay records or arbitrary script proxy.
+
 ## Current: September 14 direct movement hold
 
 The 12:49 diagnostic run confirmed Preston retained `WorkshopSandboxAtWork7x17`

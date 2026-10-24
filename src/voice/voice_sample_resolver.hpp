@@ -49,10 +49,37 @@ public:
     const Samples& samples() const noexcept { return samples_; }
     std::size_t unsupported_archives() const noexcept { return unsupported_; }
 
+    // Local review decisions contain source names only, never provider credentials.
+    static std::vector<std::string> read_rejected_sources(const std::filesystem::path& path) {
+        std::error_code error;
+        if (!std::filesystem::exists(path, error)) return {};
+        if (error || std::filesystem::is_symlink(path) || std::filesystem::file_size(path) > 65'536)
+            throw std::runtime_error{"Invalid rejected voice sample list"};
+        std::ifstream input{path, std::ios::binary};
+        if (!input) throw std::runtime_error{"Cannot read rejected voice sample list"};
+        std::vector<std::string> result;
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty() || line.front() == '#') continue;
+            line = lower(std::move(line));
+            std::ranges::replace(line, '\\', '/');
+            if (line.size() > 1024 || !line.starts_with("sound/voice/") ||
+                std::ranges::count(line, '/') != 4 || line.find("..") != std::string::npos ||
+                line.find_first_of(":\0", 0, 2) != std::string::npos ||
+                std::ranges::any_of(line, [](unsigned char c) { return c < 32; }) || result.size() == 64)
+                throw std::runtime_error{"Invalid rejected voice sample source"};
+            result.push_back(std::move(line));
+        }
+        if (input.bad()) throw std::runtime_error{"Rejected voice sample list read failed"};
+        return result;
+    }
+
     void scan(const std::filesystem::path& data, const std::vector<std::string>& plugins,
-              const Cancelled& cancelled) {
+              const Cancelled& cancelled, std::vector<std::string> rejected_sources = {}) {
         samples_.clear();
         unsupported_ = 0;
+        rejected_sources_ = std::move(rejected_sources);
         std::vector<std::string> enabled;
         for (const auto& plugin : plugins) enabled.push_back(lower(plugin));
         std::vector<std::filesystem::path> archives;
@@ -118,6 +145,7 @@ private:
     void consider(Sample sample, const std::vector<std::string>& plugins) {
         auto path = lower(sample.original_name);
         std::ranges::replace(path, '\\', '/');
+        if (std::ranges::find(rejected_sources_, path) != rejected_sources_.end()) return;
         std::vector<std::string> parts;
         for (std::size_t start = 0, end;; start = end + 1) {
             end = path.find('/', start);
@@ -187,6 +215,7 @@ private:
     }
 
     Samples samples_;
+    std::vector<std::string> rejected_sources_;
     std::size_t unsupported_{};
 };
 

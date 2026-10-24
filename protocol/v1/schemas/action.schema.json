@@ -17,7 +17,7 @@
       "open_inventory", "pickup_item", "read_quests", "relax", "director_command",
       "spawn_caps", "spawn_item", "teleport_actor", "kill_target", "sheathe_weapon",
       "stop_walk", "take_a_seat", "take_caps_from_player", "travel_to",
-      "unequip_item", "wait_here"
+      "unequip_item", "wait_here", "release_wait"
     ]},
     "capability": {"type": "string", "pattern": "^action\\.[a-z][a-z0-9_.-]{0,56}$"},
     "actor": {"$ref": "identity.schema.json"},

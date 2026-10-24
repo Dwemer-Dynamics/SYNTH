@@ -42,6 +42,7 @@ local test_suites = {
     {name = "audio", source = "tests/audio/audio_tests.cpp"},
     {name = "presentation", source = "tests/presentation/presentation_tests.cpp"},
     {name = "media-fetch", source = "tests/media_fetch/media_fetch_tests.cpp"},
+    {name = "radio", source = "tests/radio/radio_tests.cpp"},
     {name = "adapters", source = "tests/adapters/adapters_tests.cpp"}
 }
 
@@ -66,6 +67,16 @@ for _, suite in ipairs(test_suites) do
                 os.execv(target:targetfile())
             end
         end)
+    target_end()
+end
+
+if is_plat("windows") then
+    target("synth-native-playback-tests")
+        set_kind("binary")
+        set_default(true)
+        add_files("tests/audio/native_playback_tests.cpp")
+        add_includedirs("tests/audio/fake_windows", "src")
+        add_cxxflags("/permissive-", "/EHsc")
     target_end()
 end
 

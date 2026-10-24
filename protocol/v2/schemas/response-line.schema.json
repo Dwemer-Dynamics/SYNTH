@@ -62,11 +62,20 @@
     "payload": {
       "type": "object",
       "properties": {
+        "combat_targets": {
+          "type": "boolean"
+        },
         "rechat_scene": {
           "type": "boolean"
         },
         "listener": {
           "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        "combat_contacts": {
+          "type": "boolean"
+        },
+        "enemy_awareness": {
+          "type": "boolean"
         }
       },
       "maxProperties": 64
@@ -76,5 +85,56 @@
       "minimum": 0,
       "maximum": 9007199254740991
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "action"
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "wait_here",
+                      "release_wait"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "$ref": "wait-action.schema.json"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

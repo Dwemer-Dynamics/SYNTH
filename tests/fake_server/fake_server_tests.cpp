@@ -22,6 +22,7 @@ public:
     std::size_t chunk_size{};
     bool response_returned{};
     std::string diary_ack{"diary_queued"};
+    std::string audio_ack;
     bool quest_support{};
     bool quest_tracking_support{};
     bool quest_reaction_support{};
@@ -35,6 +36,11 @@ public:
     bool caps_support{};
     bool player_caps_support{};
     bool rechat_scene_support{};
+    bool combat_targets_support{};
+    std::optional<synth::json::Value> combat_contacts_ack;
+    std::optional<synth::json::Value> enemy_awareness_ack;
+    bool ambient_npc_support{};
+    std::optional<synth::json::Value> ambient_npc_ack;
     std::optional<synth::protocol_native::Identity> dialogue_listener;
     std::string player_ack{"context_accepted"};
     std::vector<synth::client::HttpRequest> requests;
@@ -71,11 +77,16 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((rechat_scene_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        if ((enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
+            if (combat_targets_support) payload.emplace_back("combat_targets",true);
+            if (combat_contacts_ack) payload.emplace_back("combat_contacts",*combat_contacts_ack);
+            if (enemy_awareness_ack) payload.emplace_back("enemy_awareness",*enemy_awareness_ack);
+            if (ambient_npc_ack) payload.emplace_back("ambient_npc",*ambient_npc_ack);
+            else if (ambient_npc_support) payload.emplace_back("ambient_npc",true);
             body += line("status", json::Value{std::move(payload)});
         }
         if (protocol_native::text(event, "type") == "input_text") {
@@ -87,6 +98,8 @@ public:
         }
         if (protocol_native::text(event, "type") == "diary_request" && !diary_ack.empty())
             body += line("status", json::Value{protocol_native::object({{"code", diary_ack}})});
+        if (protocol_native::text(event, "type") == "input_audio" && !audio_ack.empty())
+            body += line("status", json::Value{protocol_native::object({{"code", audio_ack}})});
         if ((actor_support || player_support) && protocol_native::text(event, "type") == "context" && !player_ack.empty())
             body += line("status", json::Value{protocol_native::object({{"code", player_ack}})});
         body += line("response_end", json::Value{protocol_native::object({
@@ -618,6 +631,143 @@ int main() {
             CHECK(scene_client.initialize(2,false).status==RequestStatus::malformed_response);
             CHECK(!scene_client.rechat_scene_ready());
         }
+        for (const auto* lane : {"flat", "vr"}) for (const bool offered : {false, true}) for (const bool supported : {false, true}) {
+            BindingEchoTransport wire;
+            wire.rechat_scene_support = true;  // A complete legacy init still lacks the combat-target ACK.
+            wire.combat_targets_support = supported;
+            SynthClient combat_client{wire, SessionOptions{
+                .runtime_session_id = "session:combat", .runtime_variant = lane, .client_version = "test",
+                .runtime_version = "1.11.240", .capabilities = offered ? std::vector<std::string>{"context.combat_targets"} : std::vector<std::string>{}, .protocol_version = 2}};
+            CHECK(combat_client.initialize(1, false).status == RequestStatus::complete);
+            CHECK(combat_client.combat_targets_ready() == (offered && supported));
+            synth::protocol_native::ActorState observed;
+            observed.actor = actor;
+            observed.alive = true;
+            observed.in_combat = true;
+            observed.combat_target = synth::protocol_native::CombatTargetState{"identified",
+                synth::protocol_native::Identity{"0xFF000123", "Fallout4.esm", "save:one", "Raider"}, "HumanRace"};
+            CHECK(combat_client.publish_context(0, "save:one", player, actor, {actor}, {observed}, std::nullopt, {}, {}, {}).status == RequestStatus::complete);
+            const auto event = synth::json::parse(wire.requests.back().body);
+            const auto& state = synth::protocol_native::required(synth::protocol_native::required(event, "payload"), "actor_states").as_array().front();
+            CHECK((state.find("combat_target") != nullptr) == (offered && supported));
+            CHECK(observed.combat_target.has_value());  // Negotiation trims the wire copy only.
+            wire.combat_targets_support = false;
+            CHECK(combat_client.initialize(2, false).status == RequestStatus::complete);
+            CHECK(!combat_client.combat_targets_ready());
+        }
+        for (const auto fault : {BindingEchoTransport::Fault::request, BindingEchoTransport::Fault::turn,
+                BindingEchoTransport::Fault::generation, BindingEchoTransport::Fault::sequence, BindingEchoTransport::Fault::version,
+                BindingEchoTransport::Fault::variant, BindingEchoTransport::Fault::truncated, BindingEchoTransport::Fault::failed,
+                BindingEchoTransport::Fault::duplicate_id, BindingEchoTransport::Fault::http_error, BindingEchoTransport::Fault::timeout}) {
+            BindingEchoTransport wire;
+            wire.combat_targets_support = true;
+            wire.fault = fault;
+            SynthClient combat_client{wire, SessionOptions{.runtime_session_id = "session:combat-fault", .runtime_variant = "flat",
+                .client_version = "test", .runtime_version = "1.11.240", .capabilities = {"context.combat_targets"}, .protocol_version = 2}};
+            CHECK(combat_client.initialize(1, false).status != RequestStatus::complete);
+            CHECK(!combat_client.combat_targets_ready());
+        }
+        // Incoming contacts require an explicit flat ACK plus every ownership capability.
+        for (int mode=0; mode<8; ++mode) {
+            BindingEchoTransport wire;wire.combat_targets_support=mode!=3;
+            if (mode!=1) wire.combat_contacts_ack=mode==7 ? synth::json::Value{"true"} : synth::json::Value{mode!=2};
+            std::vector<std::string> caps{"context.combat_contacts","context.combat_targets","dialogue.turn_ownership"};
+            if (mode==4) caps.erase(caps.begin());
+            if (mode==5) caps.pop_back();
+            SynthClient client{wire,SessionOptions{.runtime_session_id="session:contacts",.runtime_variant=mode==6?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=caps,.protocol_version=2}};
+            const auto init=client.initialize(1,false);
+            CHECK((init.status==RequestStatus::complete)==(mode!=7));
+            CHECK(client.combat_contacts_ready()==(mode==0));
+            if (mode==7) continue;
+            synth::protocol_native::ActorState observed;
+            observed.actor=actor;observed.alive=true;
+            observed.combat_contacts=std::vector<synth::protocol_native::CombatContactState>{{
+                {"0x002377B6","Fallout4.esm","save:one","Mole Rat"},player,"MoleratRace",350,true,true,"visible"}};
+            CHECK(client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
+            const auto event=synth::json::parse(wire.requests.back().body);
+            const auto& payload=synth::protocol_native::required(event,"payload");
+            const auto& state=synth::protocol_native::required(payload,"actor_states").as_array().front();
+            CHECK((state.find("combat_contacts")!=nullptr)==(mode==0));
+            CHECK(synth::protocol_native::required(payload,"audience").as_array().size()==1);
+            CHECK(observed.combat_contacts->size()==1);
+            wire.combat_contacts_ack=false;
+            CHECK(client.initialize(2,false).status==RequestStatus::complete);
+            CHECK(!client.combat_contacts_ready());
+        }
+        // Broader observations require their own explicit ACK; contacts ACK alone cannot enable them.
+        for (int mode=0;mode<9;++mode) {
+            BindingEchoTransport wire;wire.combat_targets_support=mode!=3;wire.combat_contacts_ack=true;
+            if(mode!=1)wire.enemy_awareness_ack=mode==7 ? synth::json::Value{"true"} : synth::json::Value{mode!=2};
+            std::vector<std::string> caps{"context.enemy_awareness","context.combat_targets","dialogue.turn_ownership"};
+            if(mode==4)caps.erase(caps.begin());
+            if(mode==5)caps.pop_back();
+            SynthClient client{wire,SessionOptions{.runtime_session_id="session:awareness",.runtime_variant=mode==6?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=caps,.protocol_version=static_cast<std::uint32_t>(mode==8?1:2)}};
+            const auto init=client.initialize(1,false);
+            CHECK((init.status==RequestStatus::complete)==(mode!=7 && mode!=8));
+            CHECK(client.enemy_awareness_ready()==(mode==0));
+            if(mode==7 || mode==8)continue;
+            synth::protocol_native::ActorState observed;observed.actor=actor;observed.alive=true;
+            observed.enemy_awareness=synth::protocol_native::EnemyAwarenessState{{{{"0x002377B6","Fallout4.esm","save:one","Mole Rat"},"MoleratRace",350,true,false,"visible"}}, {}};
+            CHECK(client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
+            const auto event=synth::json::parse(wire.requests.back().body);
+            const auto& payload=synth::protocol_native::required(event,"payload");
+            const auto& state=synth::protocol_native::required(payload,"actor_states").as_array().front();
+            CHECK((state.find("enemy_awareness")!=nullptr)==(mode==0));
+            CHECK(synth::protocol_native::required(payload,"audience").as_array().size()==1);
+            CHECK(observed.enemy_awareness->current.size()==1);
+            wire.enemy_awareness_ack=false;
+            CHECK(client.initialize(2,false).status==RequestStatus::complete);
+            CHECK(!client.enemy_awareness_ready());
+        }
+        const std::vector<std::string> ambient_caps{"dialogue.ambient_npc", "dialogue.turn_ownership",
+            "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity"};
+        for (const auto* lane : {"flat", "vr"}) for (const bool offered : {false, true}) for (const bool supported : {false, true}) {
+            BindingEchoTransport wire; wire.rechat_scene_support = true; wire.ambient_npc_support = supported;
+            auto caps = ambient_caps;
+            if (!offered) caps.erase(caps.begin());
+            SynthClient ambient_client{wire, SessionOptions{.runtime_session_id="session:ambient", .runtime_variant=lane,
+                .client_version="test", .runtime_version="test", .capabilities=caps, .protocol_version=2}};
+            CHECK(ambient_client.initialize(1, false).status == RequestStatus::complete);
+            CHECK(ambient_client.ready()); // Missing optional ambient ACK does not break ordinary dialogue.
+            CHECK(ambient_client.ambient_npc_ready() == (offered && supported));
+            const auto capture = ambient_client.publish_context(0,"save:one",player,actor,{}, {},std::nullopt,{}, {},{});
+            const auto before = wire.requests.size();
+            bool refused{};
+            try { CHECK(ambient_client.trigger("bored",actor,{},std::nullopt,std::nullopt,capture.context_binding).status==RequestStatus::complete); }
+            catch (const std::invalid_argument&) { refused=true; }
+            CHECK(refused == (offered && !supported));
+            CHECK(wire.requests.size() == before + (refused ? 0 : 1));
+            wire.ambient_npc_support = false;
+            CHECK(ambient_client.initialize(2, false).status == RequestStatus::complete);
+            CHECK(!ambient_client.ambient_npc_ready());
+        }
+        for (std::size_t missing=0; missing<ambient_caps.size(); ++missing) {
+            BindingEchoTransport wire; wire.rechat_scene_support=true; wire.ambient_npc_support=true;
+            auto caps=ambient_caps; caps.erase(caps.begin()+static_cast<std::ptrdiff_t>(missing));
+            SynthClient incomplete{wire,SessionOptions{.runtime_session_id="session:ambient-incomplete",.runtime_variant="flat",
+                .client_version="test",.runtime_version="test",.capabilities=caps,.protocol_version=2}};
+            CHECK(incomplete.initialize(1,false).status==RequestStatus::complete);
+            CHECK(!incomplete.ambient_npc_ready());
+        }
+        for (const auto fault : {BindingEchoTransport::Fault::request, BindingEchoTransport::Fault::turn,
+                BindingEchoTransport::Fault::generation, BindingEchoTransport::Fault::sequence, BindingEchoTransport::Fault::version,
+                BindingEchoTransport::Fault::variant, BindingEchoTransport::Fault::truncated, BindingEchoTransport::Fault::failed,
+                BindingEchoTransport::Fault::duplicate_id, BindingEchoTransport::Fault::http_error, BindingEchoTransport::Fault::timeout}) {
+            BindingEchoTransport wire; wire.rechat_scene_support=true; wire.ambient_npc_support=true; wire.fault=fault;
+            SynthClient damaged{wire,SessionOptions{.runtime_session_id="session:ambient-damaged",.runtime_variant="flat",
+                .client_version="test",.runtime_version="test",.capabilities=ambient_caps,.protocol_version=2}};
+            CHECK(damaged.initialize(1,false).status!=RequestStatus::complete);
+            CHECK(!damaged.ambient_npc_ready());
+        }
+        for (const auto ack : {synth::json::Value{false}, synth::json::Value{"true"}}) {
+            BindingEchoTransport wire; wire.rechat_scene_support=true; wire.ambient_npc_ack=ack;
+            SynthClient explicit_ack{wire,SessionOptions{.runtime_session_id="session:ambient-ack",.runtime_variant="flat",
+                .client_version="test",.runtime_version="test",.capabilities=ambient_caps,.protocol_version=2}};
+            CHECK((explicit_ack.initialize(1,false).status==RequestStatus::complete)==ack.is_bool());
+            CHECK(!explicit_ack.ambient_npc_ready());
+        }
         CHECK(bound_client.send_action_result("action:one", "idem:one", "succeeded", "done", {}, first.context_binding).status == RequestStatus::complete);
         {
             BindingEchoTransport observed_transport;
@@ -704,6 +854,49 @@ int main() {
         bound_transport.diary_ack = "diary_queued";
         CHECK(bound_client.send_audio({"media/" + hash, "audio/wav", hash, 44}, {}, first.context_binding).status == RequestStatus::complete);
         CHECK(synth::protocol_native::text(synth::json::parse(bound_transport.requests.back().body), "turn_id") == first.turn_id);
+        // A successful STT response with no recognized words completes without dialogue/actions or retries.
+        bound_transport.audio_ack = "speech_not_recognized";
+        for (const auto chunk_size : {std::size_t{0}, std::size_t{1}, std::size_t{17}}) {
+            bound_transport.chunk_size = chunk_size;
+            callbacks = 0;
+            std::size_t notices{};
+            const auto requests_before = bound_transport.requests.size();
+            const auto unrecognized = bound_client.send_audio({"media/" + hash, "audio/wav", hash, 44},
+                [&](const auto& line) {
+                    CHECK(bound_transport.response_returned);
+                    CHECK(!std::holds_alternative<synth::protocol_native::Dialogue>(line.payload));
+                    CHECK(!std::holds_alternative<synth::protocol_native::Action>(line.payload));
+                    if (const auto* status = std::get_if<synth::protocol_native::Status>(&line.payload)) {
+                        CHECK(status->code == "speech_not_recognized");
+                        ++notices;
+                    }
+                    ++callbacks;
+                }, streaming_binding);
+            CHECK(unrecognized.status == RequestStatus::complete);
+            CHECK(unrecognized.detail.empty());
+            CHECK(unrecognized.lines.size() == 3 && callbacks == 3 && notices == 1);
+            CHECK(std::holds_alternative<synth::protocol_native::Start>(unrecognized.lines.front().payload));
+            CHECK(std::get<synth::protocol_native::End>(unrecognized.lines.back().payload).status == "complete");
+            CHECK(bound_transport.requests.size() == requests_before + 1);
+        }
+        // The same status cannot convert a failed response into success or deliver its notice early.
+        bound_transport.fault = BindingEchoTransport::Fault::failed;
+        callbacks = 0;
+        const auto failed_audio = bound_client.send_audio({"media/" + hash, "audio/wav", hash, 44}, receive, streaming_binding);
+        CHECK(failed_audio.status == RequestStatus::server_failure);
+        CHECK(failed_audio.detail == "server response error");
+        CHECK(callbacks == 0);
+        bound_transport.fault = BindingEchoTransport::Fault::none;
+        synth::core::CancellationSource empty_speech_owner{synth::core::RuntimeGeneration::initial()};
+        auto empty_speech_binding = streaming_binding;
+        empty_speech_binding.cancellation = empty_speech_owner.token();
+        bound_transport.before_reply = [&] { empty_speech_owner.cancel(); };
+        CHECK(bound_client.send_audio({"media/" + hash, "audio/wav", hash, 44}, receive,
+            empty_speech_binding).status == RequestStatus::cancelled);
+        CHECK(callbacks == 0);
+        bound_transport.before_reply = {};
+        bound_transport.audio_ack.clear();
+        bound_transport.chunk_size = 0;
         const auto before_unbound = bound_transport.requests.size();
         rejected = false;
         try { (void)bound_client.send_text("unbound"); } catch (const std::invalid_argument&) { rejected = true; }

@@ -5,7 +5,10 @@
 #include "client/synth_client.hpp"
 #include "client/rechat_prefetch.hpp"
 #include "client/action_inventory.hpp"
+#include "client/wait_action.hpp"
+#include "client/ambient_exchange.hpp"
 #include "client/speech_facing_binding.hpp"
+#include "client/conversation_holds.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_delivery.hpp"
 #include "client/winhttp_transport.hpp"
@@ -86,6 +89,7 @@ public:
                   }},
           cancellation_{generation},
           turn_cancellation_{cancellation_.token()},
+          wait_lifetime_{cancellation_.token()},
           network_({tasks::LaneConfig{"network", configuration_.limits.max_pending_requests, 1, 3}}, 2),
           automatic_diary_enabled_{variant == core::RuntimeVariant::flat && rest_events_available},
           automatic_diaries_{generation},
@@ -140,6 +144,7 @@ public:
         terminal_.store(true, std::memory_order_release);
         if (save_context_) save_context_->stop_writer(save_binding_.epoch);
         cancellation_.cancel();
+        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
         quest_events_.stop();
         actor_events_.stop();
         { std::scoped_lock lock{diary_mutex_}; automatic_diaries_.clear(); }
@@ -311,6 +316,22 @@ public:
         return !terminal_.load(std::memory_order_acquire) && client_.player_events_ready() && player_events_.due(now);
     }
 
+    // Game-pump-only scalar capture ownership. This never publishes context or starts network/provider work.
+    [[nodiscard]] std::optional<core::CombatantIdentity> enemy_awareness_capture_target(
+        core::SnapshotClock::time_point now,bool player_in_combat) {
+        if (terminal_.load(std::memory_order_acquire) || runtime_paused() || !client_.enemy_awareness_ready()) return {};
+        std::scoped_lock lock{enemy_awareness_mutex_};
+        if (terminal_.load(std::memory_order_acquire)) return {};
+        return enemy_awareness_sampler_.due(monotonic_milliseconds(now),player_in_combat,cancellation_.token().generation().value());
+    }
+    void observe_enemy_awareness(const core::CombatantIdentity& owner,const core::EnemyAwarenessSnapshot& captured,
+                                 std::uint64_t generation,core::SnapshotClock::time_point now) {
+        if (terminal_.load(std::memory_order_acquire) || generation!=cancellation_.token().generation().value() || !captured.available) return;
+        std::scoped_lock lock{enemy_awareness_mutex_};
+        if (terminal_.load(std::memory_order_acquire) || !enemy_awareness_sampler_.owns(owner,generation)) return;
+        (void)enemy_awareness_cache_.observe(owner,captured,generation,monotonic_milliseconds(now));
+    }
+
     void observe_player_events(std::optional<core::PlayerEventSample> sample) {
         if (terminal_.load(std::memory_order_acquire)) return;
         const auto previous = player_events_.front() ? player_events_.front()->serial : 0;
@@ -388,7 +409,7 @@ public:
                 std::scoped_lock lock{activation_mutex_};
                 last_automatic_actor_.clear();
             }
-            push_notification("SYNTH could not find an eligible target to activate");
+            if (manual) push_notification("SYNTH could not find an eligible target to activate");
             return false;
         }
         const auto actor = identity(*target);
@@ -479,6 +500,7 @@ public:
 
     void hard_halt() noexcept {
         terminal_.store(true, std::memory_order_release);
+        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
         halting_.store(true, std::memory_order_release);
         microphone_.cancel();
         transport_.cancel_all();
@@ -625,6 +647,16 @@ public:
         return playback_.active_frame();
     }
 
+    // Release local speech synchronously before coordinator retirement; no network or worker joins.
+    [[nodiscard]] bool stop_local_speech(runtime::IFalloutRuntime& runtime, bool discard = false) noexcept {
+        try {
+            runtime.assert_game_thread();
+            return playback_.stop_on_game_thread([&runtime](const auto& owner, bool forget) {
+                return runtime.set_speech_owner(owner, forget);
+            }, discard);
+        } catch (...) { return false; }
+    }
+
     [[nodiscard]] presentation::DialogueCaptions::Caption subtitle_frame(
         std::uint64_t generation, const std::optional<audio::PlaybackFrame>& playback,
         bool hidden, core::SnapshotClock::time_point now) {
@@ -640,7 +672,9 @@ public:
     // Dialogue-only interruption leaves the connection and runtime session alive.
     void stop_dialogue() {
         if (terminal_.load(std::memory_order_acquire)) return;
+        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
         cancel_voice_capture();
+        wait_lifetime_.stop();
         (void)begin_player_turn();
         mark_activity();
     }
@@ -736,19 +770,40 @@ private:
         return selected;
     }
 
+    [[nodiscard]] bool player_voice_active() const {
+        return ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_);
+    }
+
+    [[nodiscard]] bool ambient_mode_ready() const {
+        const auto controls = control_state();
+        return !controls.pending && controls.selection.mode == "STANDARD";
+    }
+
 public:
     [[nodiscard]] bool maybe_trigger_bored(Snapshot snapshot, core::SnapshotClock::time_point now) {
-        if (!snapshot || microphone_.recording() || runtime_paused_.load(std::memory_order_acquire) ||
-            terminal_.load(std::memory_order_acquire) || !client_.ready() ||
-            !playback_.idle() || speech_jobs_.load(std::memory_order_acquire) != 0 ||
+        if (!snapshot || player_voice_active() || composing_.load(std::memory_order_acquire) ||
+            runtime_paused_.load(std::memory_order_acquire) || !configuration_.activation.enabled ||
+            terminal_.load(std::memory_order_acquire) || !client_.ready() || !client_.ambient_npc_ready() ||
+            !playback_.idle() || !captions_.idle() || speech_jobs_.load(std::memory_order_acquire) != 0 ||
             active_responses_.load(std::memory_order_acquire) != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) {
             return false;
         }
-        const auto target = selected_target(*snapshot, true);
-        if (!target || !claim_bored(now)) return false;
-        if (!queue_context_trigger("bored", identity(*target), std::move(snapshot),
-                                   "bored event stopped")) {
+        if (!ambient_mode_ready()) return false;
+        {
+            std::scoped_lock lock{action_mutex_, rechat_mutex_};
+            if (!pending_actions_.empty() || pending_rechat_ || rechat_capture_ || prefetched_rechat_) return false;
+        }
+        const auto hearing = snapshot->world() && snapshot->world()->interior
+            ? configuration_.activation.interior_hearing_distance : configuration_.activation.exterior_hearing_distance;
+        const auto pair = select_ambient_pair(*snapshot, now, cancellation_.token().generation(), hearing,
+            configuration_.activation.automatic_hearing_distance,
+            [&](const auto& actor) { return !conversation_on_cooldown(identity(actor), now); });
+        if (!pair || !claim_bored(now)) return false;
+        const auto actor = identity(*pair->speaker);
+        const auto deadline = snapshot->captured_at() + std::chrono::seconds{2};
+        if (!queue_context_trigger("bored", actor, std::move(snapshot),
+                                   "ambient exchange stopped", {}, {}, {}, deadline)) {
             mark_activity(now - std::chrono::seconds{configuration_.behavior.bored_event_seconds});
             return false;
         }
@@ -799,18 +854,27 @@ public:
         });
     }
 
+    [[nodiscard]] bool connection_ready() const noexcept { return client_.ready() && !terminal_.load(std::memory_order_acquire); }
     [[nodiscard]] bool halting() const noexcept {
         return halting_.load(std::memory_order_acquire);
     }
 
-    void pump(std::uint64_t generation) {
+    void pump(std::uint64_t generation, runtime::IFalloutRuntime& runtime) {
+        runtime.assert_game_thread();
         if (terminal_.load(std::memory_order_acquire)) {
+            runtime.update_conversation_holds({});
+            (void)stop_local_speech(runtime);
             return;
         }
+        const bool holding = !external_ready() || !captions_.idle();
+        runtime.update_conversation_holds(conversation_holds_.frame(holding,runtime.generation()));
         captions_.enqueue_failed(failed_playback_caption_);
-        if (!failed_playback_caption_ && !playback_.pump(generation, &failed_playback_caption_)) {
+        if (!failed_playback_caption_ && !playback_.pump(generation,
+            [&runtime](const auto& owner, bool discard) { return runtime.set_speech_owner(owner, discard); },
+            &failed_playback_caption_)) {
             push_notification("SYNTH voice playback failed; dialogue remains available as text");
         }
+        refresh_active_speech_spatial(generation, runtime);
         captions_.enqueue_failed(failed_playback_caption_);
         {
             std::scoped_lock lock{rechat_mutex_};
@@ -818,7 +882,7 @@ public:
                 auto& deferred = *prefetched_rechat_;
                 const auto now = tasks::TaskLanes::Clock::now();
                 if (deferred.prefetch->invalid(now)) prefetched_rechat_.reset();
-                else if (runtime_paused() || microphone_.recording()) return;
+                else if (runtime_paused() || player_voice_active()) return;
                 else if (auto lines = deferred.prefetch->take(now)) {
                     deferred.prefetched_lines = std::move(*lines);
                     rechat_capture_ = std::move(deferred);
@@ -827,7 +891,7 @@ public:
                 return;
             }
         }
-        if (runtime_paused_.load(std::memory_order_acquire) || microphone_.recording()) return;
+        if (runtime_paused_.load(std::memory_order_acquire) || player_voice_active()) return;
         // Only the completed response's final currently playing line may authorize one speculative child.
         if (client_.rechat_scene_ready() && active_responses_.load(std::memory_order_acquire) == 0 &&
             active_actions_.load(std::memory_order_acquire) == 0 && speech_jobs_.load(std::memory_order_acquire) == 0 &&
@@ -851,6 +915,7 @@ public:
             terminal_.load(std::memory_order_acquire)) {
             return;
         }
+        if (!runtime.conversation_actions_ready()) return;
         std::optional<PendingAction> pending;
         {
             std::scoped_lock lock{action_mutex_};
@@ -902,7 +967,8 @@ public:
             terminal_.load(std::memory_order_acquire) || caption->generation != cancellation_.token().generation().value()) return;
         const auto& admission = *caption->admission;
         const auto now = core::SnapshotClock::now();
-        if (!snapshot || !admission.matches(*snapshot,now)) {
+        if (const auto reason = admission.rejection_reason(snapshot.get(),now)) {
+            trace_->record(*reason,caption->generation,caption->context_sequence,caption->request_id,caption->line_id);
             caption->admission->rejected.store(true,std::memory_order_release);
             caption->mark_delivery(presentation::DialogueDelivery::discarded);
             stop_dialogue();
@@ -918,7 +984,7 @@ public:
             if (rechat_capture_->prefetch) rechat_capture_->prefetch->cancel();
             rechat_capture_.reset();
         }
-        if (runtime_paused() || microphone_.recording()) return {};
+        if (runtime_paused() || player_voice_active()) return {};
         return rechat_capture_ ? std::optional{rechat_capture_->target} : std::nullopt;
     }
 
@@ -946,10 +1012,8 @@ public:
         if (snapshot->generation()!=previous.generation() || snapshot->variant()!=previous.variant() ||
             now<snapshot->captured_at() || snapshot->captured_at()<previous.captured_at() ||
             now-snapshot->captured_at()>std::chrono::seconds{2} ||
-            !snapshot->world() || !previous.world() || !snapshot->world()->scene || !previous.world()->scene ||
-            !snapshot->world()->scene->valid(snapshot->world()->interior) ||
-            snapshot->world()->interior!=previous.world()->interior ||
-            snapshot->world()->scene!=previous.world()->scene ||
+            !snapshot->world() || !previous.world() ||
+            !presentation::same_presentation_scene(*previous.world(),*snapshot->world()) ||
             actor_key(identity(snapshot->player()))!=actor_key(identity(previous.player())) ||
             target.form_id!=rechat->target.form_id || !selected_target(*snapshot,false,&rechat->target)) {
             trace_->record(diagnostics::ConversationStage::continuation_scene_rejected,rechat->binding.generation,
@@ -1013,6 +1077,7 @@ public:
         }
         const auto started = microphone_.start();
         if (started) {
+            open_mic_passive_recording_ = false;
             voice_turn_ = begin_player_turn();
             bind_voice_target(snapshot);
             mark_activity();
@@ -1024,6 +1089,7 @@ public:
 
     void cancel_voice_capture() {
         microphone_.cancel();
+        open_mic_passive_recording_ = false;
         open_mic_voice_detected_ = false;
         voice_target_.reset();
         if (!voice_turn_.is_cancelled()) {
@@ -1047,6 +1113,7 @@ public:
 
     [[nodiscard]] bool end_voice_capture(Snapshot snapshot) {
         auto wave = microphone_.stop();
+        open_mic_passive_recording_ = false;
         const auto retained = std::exchange(voice_target_, std::nullopt);
         if (!voice_turn_.is_cancelled()) {
             std::scoped_lock lock{conversation_mutex_};
@@ -1077,6 +1144,7 @@ public:
                 if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
 
                 try {
+                    hold_conversation_actor(target,cancellation);
                     const auto sha256 = media_fetch::sha256_hex(wave);
                     protocol_native::Media media{"media/" + sha256, "audio/wav", sha256,
                                                  static_cast<std::uint64_t>(wave.size())};
@@ -1105,6 +1173,7 @@ public:
                             handle_line(line, snapshot, cancellation);
                         }, context_outcome.context_binding, controls);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
+                        conversation_holds_.suspend(cancellation);
                         push_notification("SYNTH voice request failed: " + outcome.detail);
                     }
                 } catch (const std::exception& error) {
@@ -1248,6 +1317,13 @@ public:
     }
 
 private:
+    void hold_conversation_actor(const protocol_native::Identity& actor,core::CancellationToken cancellation) {
+        std::uint32_t form{};
+        if (actor.form_id.size()!=10 || !actor.form_id.starts_with("0x")) return;
+        const auto parsed=std::from_chars(actor.form_id.data()+2,actor.form_id.data()+actor.form_id.size(),form,16);
+        if (parsed.ec==std::errc{} && parsed.ptr==actor.form_id.data()+actor.form_id.size())
+            conversation_holds_.add({form,actor.origin_plugin,actor.playthrough_id},cancellation);
+    }
     // Both typed input and external Ask retain the same exact actor through context publication and response delivery.
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
                                           std::optional<protocol_native::ControlSelection> retained_controls = {}) {
@@ -1273,6 +1349,7 @@ private:
                             push_notification("SYNTH text context failed: " + context_outcome.detail);
                         return;
                     }
+                    hold_conversation_actor(target,cancellation);
                     const auto outcome = client_.send_text(
                         std::move(text), [this, snapshot, cancellation](const protocol_native::Line& line) {
                             handle_line(line, snapshot, cancellation);
@@ -1332,6 +1409,7 @@ public:
         }
         if (!microphone_.recording()) {
             if (microphone_.start(30)) {
+                open_mic_passive_recording_ = true;
                 open_mic_started_at_ = now;
                 open_mic_voice_detected_ = false;
                 voice_target_.reset();
@@ -1362,6 +1440,7 @@ public:
         } else if (open_mic_started_at_.time_since_epoch().count() != 0 &&
                    now - open_mic_started_at_ >= std::chrono::seconds{29}) {
             microphone_.cancel();
+            open_mic_passive_recording_ = false;
             open_mic_started_at_ = {};
         }
         return MicrophoneEvent::none;
@@ -1718,6 +1797,7 @@ private:
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
     [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}) {
+        conversation_holds_.clear();
         trace_->record(diagnostics::ConversationStage::turn_admitted,cancellation_.token().generation().value());
         core::CancellationToken turn;
         {
@@ -1829,9 +1909,22 @@ private:
                                              std::optional<std::uint64_t> player_event_serial = std::nullopt,
                                              std::optional<core::SnapshotClock::time_point> event_deadline = std::nullopt) {
         if (!enrich_selected_actor(snapshot, actor)) return false;
+        if (kind == "bored") {
+            const auto captured_deadline = snapshot->captured_at() + std::chrono::seconds{2};
+            event_deadline = std::min(event_deadline.value_or(captured_deadline), captured_deadline);
+            const auto observed_now = core::SnapshotClock::now();
+            const auto hearing = snapshot->world() && snapshot->world()->interior
+                ? configuration_.activation.interior_hearing_distance : configuration_.activation.exterior_hearing_distance;
+            const auto pair = select_ambient_pair(*snapshot, observed_now, cancellation_.token().generation(),
+                hearing, configuration_.activation.automatic_hearing_distance,
+                [&](const auto& value) { return !conversation_on_cooldown(identity(value), observed_now); });
+            if (!pair || actor_key(identity(*pair->speaker)) != actor_key(actor) || !ambient_mode_ready()) return false;
+        }
         const auto owner = actor_key(actor);
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
+        const auto now = tasks::TaskLanes::Clock::now();
+        const auto deadline = std::min(now + std::chrono::milliseconds{request_timeout_ms() * 2ULL},
+            event_deadline.value_or(core::SnapshotClock::time_point::max()));
+        if (deadline <= now) return false;
         const auto accepted = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, current_turn_token(),
             tasks::TaskLanes::track_activity(active_responses_,
@@ -1844,15 +1937,20 @@ private:
                 try {
                     const auto context_turn = client_.begin_context_turn();
                     if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    if (kind == "bored" && (!client_.ambient_npc_ready() || composing_.load(std::memory_order_acquire) ||
+                        !ambient_mode_ready())) return;
                     if (event_deadline && (core::SnapshotClock::now() > *event_deadline || runtime_paused() ||
                         core::SnapshotClock::now() - snapshot->captured_at() > std::chrono::seconds{2})) return;
                     if (previous_sequence) {
                         std::scoped_lock lock{world_context_mutex_};
                         if (acknowledged_quest_sequence_ != *previous_sequence) return;
                     }
-                    const auto context_outcome = publish_snapshot(snapshot, actor, cancellation);
+                    const auto context_outcome = kind == "bored"
+                        ? publish_snapshot(snapshot, actor, cancellation, nullptr, {}, {}, {}, {"STANDARD", 1})
+                        : publish_snapshot(snapshot, actor, cancellation);
                     if (context_outcome.status != RequestStatus::complete) return;
                     if (event_deadline && (core::SnapshotClock::now() > *event_deadline || cancellation.is_cancelled() || runtime_paused())) return;
+                    if (kind == "bored" && (composing_.load(std::memory_order_acquire) || !ambient_mode_ready())) return;
                     const auto one_shot=kind=="external_tts" || kind=="external_comment" || kind=="external_reaction" || kind=="quest_updated" || kind=="player_reaction";
                     const auto outcome = client_.trigger(
                         kind, actor, [this, snapshot, cancellation, one_shot](const protocol_native::Line& line) {
@@ -1881,20 +1979,23 @@ private:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available) {
         std::vector<std::string> result{
-            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "control.menu",
+            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "control.menu",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
             "profiles.dynamic.refresh", "diary.manual.npc", "diary.manual.narrator", "diary.manual.player", "diary.batch.status",
-            "context.actor_state", "context.actor_factions", "context.world",
+            "context.actor_state", "context.actor_factions", "context.combat_targets", "context.world",
             "context.loaded_plugins", "context.quests",
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
             "action.check_inventory", "action.read_quests", "action.end_conversation",
             "action.sheathe_weapon"};
+        append_wait_capabilities(result, variant);
         if (variant == core::RuntimeVariant::flat && quest_events_available) result.push_back("context.quest_events");
         if (variant == core::RuntimeVariant::flat && actor_events_available) result.push_back("context.actor_events");
         if (variant == core::RuntimeVariant::flat) {
+            result.push_back("context.combat_contacts");
+            result.push_back("context.enemy_awareness");
             result.push_back("action.equip_item");
             result.push_back("action.unequip_item");
             result.push_back("action.inventory_observation");
@@ -2037,7 +2138,7 @@ private:
                     form_id, faction.origin_plugin, faction.display_name, faction.editor_id,
                     faction.rank});
             }
-            return protocol_native::ActorState{
+            auto state = protocol_native::ActorState{
                 .actor = identity(actor),
                 .base_form_id = [&] {
                     char form_id[11]{};
@@ -2091,7 +2192,40 @@ private:
                 .faction_completeness = actor.faction_completeness(),
                 .health_percent_available = actor.health_percent_available(),
                 .action_points_percent_available = actor.action_points_percent_available(),
+                .combat_target = protocol_native::CombatTargetState{
+                    actor.combat_target().observation,
+                    actor.combat_target().actor ? std::optional{protocol_native::Identity{
+                        [&] {
+                            char form_id[11]{};
+                            std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.combat_target().actor->form_id);
+                            return std::string{form_id};
+                        }(), actor.combat_target().actor->origin_plugin, actor.combat_target().actor->playthrough_id,
+                        actor.combat_target().actor->display_name}} : std::nullopt,
+                    actor.combat_target().actor ? actor.combat_target().actor->race : std::string{}},
             };
+            if (actor.conversation_held()) state.conversation_held=true;
+            if (actor.form_id()!=0x14 && client_.combat_contacts_ready()) {
+                state.combat_contacts=std::vector<protocol_native::CombatContactState>{};
+                const auto contact_identity=[](const core::CombatantIdentity& value) {
+                    char form[11]{};std::snprintf(form,sizeof(form),"0x%08X",value.form_id);
+                    return protocol_native::Identity{form,value.origin_plugin,value.playthrough_id,value.display_name};
+                };
+                for (const auto& contact:actor.combat_contacts()) state.combat_contacts->push_back({
+                    contact_identity(contact.actor),contact_identity(contact.target),contact.actor.race,
+                    contact.distance,contact.hostile,contact.in_combat,contact.visible ? "visible" : "unknown"});
+            }
+            if (actor.form_id()!=0x14 && client_.enemy_awareness_ready() && actor.enemy_awareness().available) {
+                state.enemy_awareness=protocol_native::EnemyAwarenessState{};
+                const auto copied=[](const core::CombatantIdentity& value) {
+                    char form[11]{};std::snprintf(form,sizeof(form),"0x%08X",value.form_id);
+                    return protocol_native::Identity{form,value.origin_plugin,value.playthrough_id,value.display_name};
+                };
+                for (const auto& item:actor.enemy_awareness().current) state.enemy_awareness->current.push_back({
+                    copied(item.actor),item.actor.race,item.distance,item.hostile,item.in_combat,item.visible ? "visible" : "unknown"});
+                for (const auto& item:actor.enemy_awareness().recent) state.enemy_awareness->recent.push_back({
+                    copied(item.actor),item.actor.race,item.observation,item.age_ms});
+            }
+            return state;
         };
         actor_states.push_back(make_state(snapshot.player()));
         const std::function<bool(const core::ActorSnapshot&)> selected = target
@@ -2339,6 +2473,20 @@ private:
         if (cancellation.is_cancelled() || !snapshot || line.generation != snapshot->generation().value() || line.context_sequence == 0
             || terminal_.load(std::memory_order_acquire)) return;
         trace_->record(diagnostics::ConversationStage::line_applied,line.generation,line.context_sequence,line.request_id,line.line_id);
+        if (const auto* status = std::get_if<protocol_native::Status>(&line.payload);
+            status && status->code == "speech_not_recognized") {
+            push_notification("SYNTH did not recognize speech; try again.");
+            return;
+        }
+        if (const auto* status = std::get_if<protocol_native::Status>(&line.payload);
+            status && status->code == "combat_identification_complete") {
+            std::scoped_lock lock{rechat_mutex_};
+            if (pending_rechat_ && pending_rechat_->parent.request_id==line.request_id &&
+                pending_rechat_->binding.sequence==line.context_sequence) {
+                pending_rechat_.reset();
+            }
+            return;
+        }
         if (const auto* end = std::get_if<protocol_native::End>(&line.payload); end && allow_followup) {
             std::scoped_lock lock{rechat_mutex_};
             if (pending_rechat_ && pending_rechat_->parent.request_id == line.request_id)
@@ -2391,11 +2539,16 @@ private:
         if (line.generation != snapshot->generation().value()) {
             return;
         }
+        conversation_holds_.suspend(cancellation); // Release participants before any requested action is dispatched.
         const auto action_deadline = runtime::action_start_deadline(action->deadline_ms, request_timeout_ms());
         {
             std::scoped_lock lock{action_mutex_};
             if (pending_actions_.size() >= 32) {
                 push_notification("SYNTH action queue is full");
+                return;
+            }
+            if ((action->name == "wait_here" || action->name == "release_wait") && !wait_replays_.claim(*action)) {
+                push_notification("SYNTH wait action was repeated or its session limit was reached");
                 return;
             }
             pending_actions_.push_back(PendingAction{*action, snapshot,
@@ -2491,11 +2644,13 @@ private:
                         client_.uses_rechat_parent_contract() ? std::optional{rechat.parent} : std::nullopt);
                     if (rechat.prefetch) rechat.prefetch->finish(outcome.status == RequestStatus::complete);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
+                        conversation_holds_.suspend(cancellation);
                         trace_->record(diagnostics::ConversationStage::continuation_failed,rechat.binding.generation,
                             rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
                         push_notification("SYNTH rechat stopped: " + outcome.detail);
                     }
                 } catch (const std::exception& error) {
+                    conversation_holds_.suspend(cancellation);
                     push_notification(std::string{"SYNTH rechat stopped: "} + error.what());
                     if (rechat.prefetch) rechat.prefetch->cancel();
                 }
@@ -2509,7 +2664,7 @@ private:
 
     [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
         const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
-        const core::CancellationToken& cancellation, const Snapshot& snapshot) const {
+        const core::CancellationToken& cancellation, const Snapshot& snapshot) {
         auto admission = std::make_shared<presentation::SceneAdmission>();
         admission->original = snapshot;
         const auto retain = [&](const protocol_native::Identity& actor) {
@@ -2523,13 +2678,18 @@ private:
         };
         if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue.speaker)) retain(*actor);
         if (dialogue.listener) retain(*dialogue.listener);
+        const auto facing=snapshot ? bind_speech_facing(line,dialogue,*snapshot,cancellation) : nullptr;
+        if (facing) {
+            conversation_holds_.add(facing->speaker,cancellation);
+            conversation_holds_.add(facing->listener,cancellation);
+        }
         return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
             .generation = line.generation,
             .speaker = std::visit([](const auto& value) {
                 return value.display_name.empty() ? std::string{"SYNTH"} : value.display_name;
             }, dialogue.speaker),
             .text = dialogue.text, .cancellation = cancellation,
-            .facing = snapshot ? bind_speech_facing(line, dialogue, *snapshot, cancellation) : nullptr,
+            .facing = facing,
             .trace = trace_, .request_id = line.request_id, .line_id = line.line_id, .context_sequence = line.context_sequence,
             .admission = std::move(admission)});
     }
@@ -2662,6 +2822,8 @@ private:
         float volume = static_cast<float>(configuration_.audio.head_voice_volume_percent) / 100.0F;
         float pan{};
         std::string speaker_id{"narrator"};
+        std::optional<runtime::RuntimeSpeechOwner> speech_owner;
+        std::optional<audio::SpatialPlaybackSettings> spatial_settings;
         if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue.speaker)) {
             volume = static_cast<float>(configuration_.audio.voice_volume_percent) / 100.0F;
             speaker_id = actor->form_id;
@@ -2674,6 +2836,18 @@ private:
             if (matches(snapshot->player())) source = &snapshot->player();
             for (const auto& candidate : snapshot->actors()) {
                 if (source == nullptr && matches(candidate)) source = &candidate;
+            }
+            if (source) speech_owner = runtime::RuntimeSpeechOwner{
+                line.generation, line.request_id, line.turn_id, dialogue.speech->utterance_id,
+                {source->form_id(), source->origin_plugin(), source->playthrough_id()}, cancellation};
+            if (source && source->form_id() != 0x14 && configuration_.audio.spatial_playback) {
+                spatial_settings = audio::SpatialPlaybackSettings{
+                    volume, configuration_.audio.distance_scale,
+                    std::max(1.0, static_cast<double>(configuration_.activation.interior_distance)),
+                    std::max(1.0, static_cast<double>(configuration_.activation.exterior_distance)),
+                    configuration_.audio.interior_dropoff_percent / 100.0,
+                    configuration_.audio.exterior_dropoff_percent / 100.0,
+                    configuration_.audio.invert_heading};
             }
             const auto* listener = snapshot->effective_listener_pose(core::SnapshotClock::now());
             if (source != nullptr && listener != nullptr && configuration_.audio.spatial_playback) {
@@ -2725,10 +2899,39 @@ private:
                                                  configuration_.audio.pre_clip_ms,
                                                  configuration_.audio.post_clip_ms, cancellation,
                                                  bind_speech_facing(line, dialogue, *snapshot, cancellation),
-                                                 caption})) {
+                                                 caption, {}, std::move(speech_owner), std::move(spatial_settings)})) {
             throw std::runtime_error{"native playback queue rejected speech"};
         }
         trace_->record(diagnostics::ConversationStage::audio_queued,line.generation,line.context_sequence,line.request_id,line.line_id);
+    }
+
+    void refresh_active_speech_spatial(std::uint64_t generation, runtime::IFalloutRuntime& runtime) {
+        const auto request = playback_.active_spatial_request(generation);
+        if (!request) {
+            spatial_playback_session_ = 0;
+            spatial_playback_token_ = 0;
+            return;
+        }
+        const auto now = core::SnapshotClock::now();
+        const bool new_clip = spatial_playback_session_ != request->playback_session || spatial_playback_token_ != request->playback_token;
+        if (!new_clip && now - last_spatial_capture_ < std::chrono::milliseconds{50}) return;
+        spatial_playback_session_ = request->playback_session;
+        spatial_playback_token_ = request->playback_token;
+        last_spatial_capture_ = now;
+        std::optional<audio::SpatialMix> mix;
+        try {
+            if (const auto captured = runtime.capture_speech_spatial(request->owner)) {
+                const auto& forward = captured->listener_pose.forward().value();
+                const auto& up = captured->listener_pose.up().value();
+                const auto& listener = captured->listener_pose.position();
+                const auto& source = captured->speaker_position;
+                mix = audio::spatial_mix(request->settings, {source.x, source.y, source.z},
+                    audio::Pose{{listener.x, listener.y, listener.z}, {forward.x, forward.y, forward.z}, {up.x, up.y, up.z}, 1},
+                    captured->interior);
+            }
+        } catch (const std::exception&) {}
+        // The request's generation and exact clip token are checked again after native capture.
+        (void)playback_.set_spatial_mix(*request, mix, generation);
     }
 
     void execute_action(PendingAction pending) {
@@ -2795,7 +2998,7 @@ private:
                             detail = "SYNTH conversation ended and reactivation cooldown applied";
                         }
                     }
-                } else if ((action.name == "sheathe_weapon" || action.name == "equip_item" || action.name == "unequip_item" || action.name == "consume" || action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player") &&
+                } else if ((action.name == "sheathe_weapon" || action.name == "equip_item" || action.name == "unequip_item" || action.name == "consume" || action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player" || action.name == "wait_here" || action.name == "release_wait") &&
                     action.capability == "action." + action.name) {
                     std::uint32_t form_id{};
                     if (action.actor.form_id.size() != 10 ||
@@ -2815,7 +3018,12 @@ private:
                                 runtime::RuntimeActionName::sheathe_weapon,
                                 {form_id, action.actor.origin_plugin, action.actor.playthrough_id}};
                             bool request_valid=true;
-                            if (action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player") {
+                            if (action.name == "wait_here" || action.name == "release_wait") {
+                                try { request = prepare_wait_action(*snapshot, action, cancellation, wait_lifetime_.token(), deadline); }
+                                catch (const std::invalid_argument& error) {
+                                    request_valid = false; status = "rejected"; detail = error.what();
+                                }
+                            } else if (action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player") {
                                 try { request=prepare_transfer_action(*snapshot,action,cancellation,deadline); }
                                 catch (const std::invalid_argument& error) {
                                     request_valid=false;status="rejected";detail=error.what();
@@ -3335,6 +3543,17 @@ private:
         try {
             auto enriched = actor_enricher_(snapshot, found->form_id());
             if (!enriched) { push_notification("SYNTH selected actor changed or capture is unavailable; try again"); return false; }
+            // Capture is game-thread owned; cache mutation and retirement are mutually exclusive.
+            const auto observed=std::ranges::find_if(enriched->actors(),[&](const auto& actor){return actor_key(identity(actor))==key;});
+            if (observed!=enriched->actors().end() && observed->enemy_awareness().available) {
+                std::scoped_lock lock{enemy_awareness_mutex_};
+                if (terminal_.load(std::memory_order_acquire) || enriched->generation()!=cancellation_.token().generation()) return false;
+                const auto now=monotonic_milliseconds(core::SnapshotClock::now());
+                enemy_awareness_sampler_.select({observed->form_id(),observed->origin_plugin(),observed->playthrough_id(),observed->name(),observed->race()},enriched->generation().value());
+                const auto cached=enemy_awareness_cache_.observe({observed->form_id(),observed->origin_plugin(),observed->playthrough_id(),observed->name(),observed->race()},
+                    observed->enemy_awareness(),enriched->generation().value(),now);
+                enriched=std::make_shared<const core::RuntimeSnapshot>(enriched->with_actor_details(observed->form_id(),observed->with_enemy_awareness(cached)));
+            }
             snapshot = std::move(enriched);
             return true;
         } catch (const std::exception& error) {
@@ -3343,7 +3562,13 @@ private:
         }
     }
 
+    [[nodiscard]] static std::uint64_t monotonic_milliseconds(core::SnapshotClock::time_point now) noexcept {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+    }
     ActorEnricher actor_enricher_;
+    std::mutex enemy_awareness_mutex_;
+    core::EnemyAwarenessCache enemy_awareness_cache_;
+    core::EnemyAwarenessSampler enemy_awareness_sampler_;
     integration::ExternalConversationOwner external_owner_;
     std::vector<std::string> active_quest_actors_; // Successful activation ACKs only; bounded, session-owned.
     runtime::GameThreadDispatcher& dispatcher_;
@@ -3357,6 +3582,8 @@ private:
     core::CancellationSource cancellation_;
     std::mutex turn_mutex_;
     core::CancellationSource turn_cancellation_;
+    WaitActionLifetime wait_lifetime_;
+    WaitActionReplayGuard wait_replays_;
     core::CancellationToken voice_turn_;
     std::optional<integration::PromptTarget> voice_target_;
     protocol_native::ControlSelection voice_controls_;
@@ -3374,6 +3601,7 @@ private:
     std::atomic_bool halting_{};
     std::atomic_size_t halt_requests_{};
     std::atomic_size_t speech_jobs_{};
+    ConversationHolds conversation_holds_;
     std::atomic_size_t active_responses_{};
     std::atomic_size_t visual_tasks_{};
     std::atomic_size_t active_actions_{};
@@ -3414,9 +3642,12 @@ private:
     core::SnapshotClock::time_point open_mic_started_at_{};
     core::SnapshotClock::time_point open_mic_last_voice_at_{};
     bool open_mic_voice_detected_{};
+    bool open_mic_passive_recording_{};
     std::mutex activity_mutex_;
     core::SnapshotClock::time_point last_activity_at_{core::SnapshotClock::now()};
     core::SnapshotClock::time_point last_combat_bark_at_{};
+    core::SnapshotClock::time_point last_spatial_capture_{};
+    std::uint64_t spatial_playback_session_{}, spatial_playback_token_{};
     std::mutex activation_mutex_;
     std::string last_automatic_actor_;
     std::mutex conversation_mutex_;

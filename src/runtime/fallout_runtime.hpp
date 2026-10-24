@@ -4,6 +4,7 @@
 #include "../core/cancellation.hpp"
 #include "../core/runtime_identity.hpp"
 #include "../core/snapshot.hpp"
+#include "../radio/diagnostic.hpp"
 
 #include <algorithm>
 #include <array>
@@ -75,6 +76,8 @@ struct RuntimeActionRequest final {
     std::string action_id;
     std::optional<RuntimeActorIdentity> recipient;
     std::uint32_t amount{1};
+    // Wait execution is turn-owned; an accepted hold survives later input until Stop/load or its existing timeout.
+    std::optional<core::CancellationToken> wait_session;
 };
 
 // Copied after action execution, never an engine pointer or a replacement for the original scene snapshot.
@@ -136,6 +139,12 @@ struct RuntimeFacingRequest final {
     core::CancellationToken cancellation;
 };
 
+// A temporary conversation participant, owned by the exact dialogue cancellation token.
+struct RuntimeConversationHold final {
+    RuntimeActorIdentity actor;
+    core::CancellationToken cancellation;
+};
+
 // Copied speech performance for the currently audible utterance; never an engine address.
 struct RuntimeSpeechFrame final {
     std::uint64_t generation{};
@@ -143,6 +152,21 @@ struct RuntimeSpeechFrame final {
     std::string utterance_id;
     core::CancellationToken cancellation;
     std::array<float, 7> mouth{};
+};
+
+// Copied actor ownership for a complete local audio clip, including its paused frames.
+struct RuntimeSpeechOwner final {
+    std::uint64_t generation{};
+    std::string request_id, turn_id, utterance_id;
+    RuntimeActorIdentity speaker;
+    core::CancellationToken cancellation;
+};
+
+// Fresh immutable coordinates for one owning clip, copied only on the game thread.
+struct RuntimeSpeechSpatial final {
+    core::Vec3 speaker_position;
+    core::WorldPose listener_pose;
+    bool interior{};
 };
 
 class IFalloutRuntime {
@@ -170,6 +194,28 @@ public:
     virtual void present_notification(std::string_view message) = 0;
     // discard=true invalidates ownership without accessing possibly unloaded game objects.
     virtual void animate_speech(const std::optional<RuntimeSpeechFrame>&, bool = false) {}
+    // Non-null admits/maintains exclusive actor speech. Empty restores; discard forgets stale state.
+    [[nodiscard]] virtual bool set_speech_owner(const std::optional<RuntimeSpeechOwner>& owner, bool = false) {
+        assert_game_thread();
+        return !owner;
+    }
+    [[nodiscard]] virtual std::optional<RuntimeSpeechSpatial> capture_speech_spatial(const RuntimeSpeechOwner&) {
+        assert_game_thread();
+        return std::nullopt;
+    }
+    virtual void update_conversation_holds(std::span<const RuntimeConversationHold>, bool = false) {
+        assert_game_thread();
+    }
+    [[nodiscard]] virtual bool conversation_actions_ready() { assert_game_thread(); return true; }
+    // Optional original native-radio diagnostic seam; VR and other adapters fail closed.
+    [[nodiscard]] virtual radio::ProbeObservation capture_radio_probe() {
+        assert_game_thread();
+        return {generation()};
+    }
+    [[nodiscard]] virtual radio::ProbeResult execute_radio_probe(const radio::ProbeRequest&) {
+        assert_game_thread();
+        return {};
+    }
 };
 
 }  // namespace synth::runtime

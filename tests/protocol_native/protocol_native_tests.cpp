@@ -6,8 +6,102 @@
 #include <string>
 #include <vector>
 
+namespace {
+void enemy_awareness_tests() {
+    using namespace synth;
+    const core::CombatantIdentity owner{0x1A4D7,"Fallout4.esm","save:awareness","Preston","HumanRace"};
+    const core::CombatantIdentity other{0x1CA7D,"Fallout4.esm",owner.playthrough_id,"Codsworth","HandyRace"};
+    const core::CombatantIdentity mole{0x2377B6,"Fallout4.esm",owner.playthrough_id,"Mole Rat","MoleratRace"};
+    const core::EnemyAwarenessSnapshot live{true,{{mole,350,true,false,true}},{},{}};
+    const core::EnemyAwarenessSnapshot empty{true,{},{},{}};
+    const core::EnemyAwarenessSnapshot corpse{true,{}, {mole},{}};
+    const auto require=[](bool value,const char* detail){if(!value)throw std::runtime_error{detail};};
+    require(core::valid_enemy_awareness(live,owner.form_id,owner.playthrough_id,true,false),"idle hostile rejected");
+    core::EnemyAwarenessCache cache;
+    require(cache.observe(owner,corpse,1,1000).recent.empty(),"unknown corpse established enemy identity");
+    require(cache.observe(owner,live,1,2000).recent.empty(),"current enemy duplicated in recent");
+    auto recalled=cache.observe(owner,empty,1,3500);
+    require(recalled.recent.size()==1 && recalled.recent[0].observation=="seen_hostile" && recalled.recent[0].age_ms==1500,"recent encounter lost");
+    require(cache.observe(other,empty,1,3600).recent.empty(),"another NPC inherited sighting");
+    auto dead=cache.observe(owner,corpse,1,4000);
+    require(dead.recent.size()==1 && dead.recent[0].observation=="seen_dead" && dead.recent[0].age_ms==0,"witnessed known corpse lost");
+    require(cache.observe(owner,corpse,1,5000).recent[0].age_ms==1000,"corpse extended death timestamp");
+    require(cache.observe(owner,empty,1,34001).recent.empty(),"expired encounter retained");
+    (void)cache.observe(owner,live,1,35000);
+    require(cache.observe(owner,empty,2,36000).recent.empty(),"generation inherited encounter");
+    (void)cache.observe(owner,live,2,37000);cache.clear();
+    require(cache.observe(owner,empty,2,38000).recent.empty(),"Stop retained encounter");
+    (void)cache.observe(owner,live,2,39000);
+    auto branch=owner;branch.playthrough_id="other:branch";
+    require(cache.observe(branch,empty,2,40000).recent.empty(),"playthrough inherited encounter");
+    (void)cache.observe(owner,live,2,41000);
+    require(cache.observe(owner,empty,2,40000).recent.empty(),"backwards clock retained encounter");
+    const auto counts=core::enemy_awareness_scan_counts({100,1,1,1});
+    require(counts==std::array<std::size_t,4>{61,1,1,1},"bounded scan wasted populated tier budget");
+    require(core::enemy_awareness_scan_counts({100,100,100,100})==std::array<std::size_t,4>{16,16,16,16},"bounded scan starved a process tier");
+    require(core::enemy_awareness_scan_counts({0,2,0,3})==std::array<std::size_t,4>{0,2,0,3},"small tier scan exceeded population");
+    core::EnemyAwarenessSampler sampler;
+    require(!sampler.due(1000,true,1),"unselected observer sampled");
+    sampler.select(owner,1);require(sampler.due(1000,true,1).has_value(),"combat observation not sampled");
+    require(!sampler.due(1999,true,1),"background scanned faster than one second");
+    require(sampler.due(2000,false,1).has_value(),"postcombat observation not sampled");
+    // The combat-positive check at1999 refreshes the window even though cadence suppresses that scan.
+    require(sampler.due(11999,false,1).has_value(),"last postcombat boundary was not sampled");
+    require(!sampler.due(12999,false,1),"background scan escaped postcombat window");
+    sampler.clear();require(!sampler.due(13000,true,1),"Stop repopulated background evidence");
+    sampler.select(owner,2);require(!sampler.due(14000,true,1),"foreign generation sampled");
+    require(!sampler.owns(other,2) && sampler.owns(owner,2),"background owner fence lost");
+    core::ActorSnapshot snapshot{owner.form_id,owner.display_name,{},owner.origin_plugin,owner.playthrough_id};
+    require(snapshot.with_details_from(snapshot.with_enemy_awareness(live)).enemy_awareness().current.size()==1,"snapshot awareness enrichment lost");
+
+    const protocol_native::Identity actor{"0x0001A4D7",owner.origin_plugin,owner.playthrough_id,owner.display_name};
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm",owner.playthrough_id,"Player"};
+    protocol_native::EventContext envelope{"session:flat:awareness","context:1:1","turn:1:1","flat","test","1.11.240",1,
+        {"context.enemy_awareness","context.combat_targets","dialogue.turn_ownership"}};
+    envelope.protocol_version=2;
+    protocol_native::ActorState state;state.actor=actor;state.alive=true;
+    state.enemy_awareness=protocol_native::EnemyAwarenessState{{{{"0x002377B6","Fallout4.esm",owner.playthrough_id,"Mole Rat"},"MoleratRace",350,true,false,"visible"}}, {}};
+    const auto encode=[&](const auto& event,const auto& observed) {
+        return json::parse(protocol_native::encode_context(event,owner.playthrough_id,1,player,actor,{actor},{observed}));
+    };
+    const auto wire=encode(envelope,state);
+    const auto& payload=protocol_native::required(wire,"payload");
+    require(protocol_native::required(payload,"audience").as_array().size()==1,"aware enemy enrolled as audience");
+    const auto& awareness=protocol_native::required(protocol_native::required(payload,"actor_states").as_array()[0],"enemy_awareness");
+    require(protocol_native::required(awareness,"current").as_array().size()==1,"visible idle enemy not encoded");
+    for(int bad=0;bad<20;++bad) {
+        auto context=envelope;auto observed=state;auto& item=observed.enemy_awareness->current[0];
+        if(bad==0)context.capabilities.clear();
+        if(bad==1)context.runtime_variant="vr";
+        if(bad==2)context.protocol_version=1;
+        if(bad==3)observed.alive=false;
+        if(bad==4)observed.disabled=true;
+        if(bad==5)item.actor=actor;
+        if(bad==6)item.actor=player;
+        if(bad==7)item.actor.playthrough_id="foreign";
+        if(bad==8)item.actor.display_name.clear();
+        if(bad==9)item.distance=2001;
+        if(bad==10)item.hostile=false;
+        if(bad==11)item.line_of_sight="unknown";
+        if(bad==12)observed.enemy_awareness->current.push_back(item);
+        if(bad==13)observed.enemy_awareness->current.assign(9,item);
+        if(bad==14)observed.enemy_awareness->recent.push_back({item.actor,item.race,"seen_hostile",0});
+        if(bad==15) { observed.enemy_awareness->recent.push_back({item.actor,item.race,"killed",0});observed.enemy_awareness->current.clear(); }
+        if(bad==16) { observed.enemy_awareness->recent.push_back({item.actor,item.race,"seen_dead",30001});observed.enemy_awareness->current.clear(); }
+        if(bad==17)item.actor.form_id="0x00000000";
+        if(bad==18) {observed.enemy_awareness->current.clear();observed.alive=false;}
+        if(bad==19) {observed.enemy_awareness->current.clear();observed.actor=player;}
+        bool refused=false;try{(void)encode(context,observed);}catch(const std::invalid_argument&){refused=true;}
+        require(refused,("invalid enemy awareness accepted: "+std::to_string(bad)).c_str());
+    }
+    state.enemy_awareness->recent.push_back({state.enemy_awareness->current[0].actor,"MoleratRace","seen_dead",30000});
+    state.enemy_awareness->current.clear();(void)encode(envelope,state);
+}
+}
+
 int main(int argc,char** argv){
  try{
+  enemy_awareness_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};
   std::vector<synth::protocol_native::Line> lines; std::string raw;
@@ -47,6 +141,95 @@ int main(int argc,char** argv){
   if(synth::protocol_native::text(parsed,"schema")!="synth.event.v1" || synth::protocol_native::text(synth::protocol_native::required(synth::protocol_native::required(parsed,"payload"),"result"),"idempotency_key")!="idem-action-1") throw std::runtime_error{"result encoding"};
   const synth::protocol_native::EventContext context{"session:flat:test","activate:2:1","turn:2:2","flat","0.1.0","1.11.240",2,{"agents.manage"}};
   const synth::protocol_native::Identity actor{"0x0001A4D7","Fallout4.esm","save:fo4:001","Preston Garvey"};
+  {
+    auto owner = context;
+    owner.protocol_version = 2;
+    owner.capabilities = {"context.combat_targets"};
+    synth::protocol_native::ActorState state;
+    state.actor = actor; state.alive = true; state.in_combat = true;
+    state.combat_target = synth::protocol_native::CombatTargetState{"identified",
+      synth::protocol_native::Identity{"0xFF000123", "Fallout4.esm", actor.playthrough_id, "Deathclaw"}, "DeathclawRace"};
+    const auto player = synth::protocol_native::Identity{"0x00000014", "Fallout4.esm", actor.playthrough_id, "Player"};
+    for (const auto* lane : {"flat", "vr"}) {
+      owner.runtime_variant = lane;
+      const auto encoded = synth::json::parse(synth::protocol_native::encode_context(owner, actor.playthrough_id, 1, player, actor,
+        {actor}, {state}));
+      const auto& payload = synth::protocol_native::required(encoded, "payload");
+      if (synth::protocol_native::required(payload, "audience").as_array().size() != 1)
+        throw std::runtime_error{"combat opponent gained audience membership"};
+      const auto& observed = synth::protocol_native::required(synth::protocol_native::required(payload, "actor_states").as_array().front(), "combat_target");
+      if (synth::protocol_native::text(synth::protocol_native::required(observed, "actor"), "form_id") != "0xFF000123")
+        throw std::runtime_error{"exact combat target lost"};
+    }
+    for (int bad = 0; bad < 11; ++bad) {
+      auto event = owner; auto invalid = state;
+      if (bad == 0) event.capabilities.clear();
+      if (bad == 1) event.protocol_version = 1;
+      if (bad == 2) invalid.combat_target->observation = "unavailable";
+      if (bad == 3) invalid.combat_target->actor.reset();
+      if (bad == 4) invalid.combat_target->actor = actor;
+      if (bad == 5) invalid.combat_target->actor->playthrough_id = "foreign:save";
+      if (bad == 6) invalid.combat_target->actor->form_id = "0x00000000";
+      if (bad == 7) invalid.combat_target->actor->form_id = "0xGG000123";
+      if (bad == 8) invalid.combat_target->actor->display_name.clear();
+      if (bad == 9) invalid.in_combat = false;
+      if (bad == 10) invalid.alive = false;
+      bool refused = false;
+      try { (void)synth::protocol_native::encode_context(event, actor.playthrough_id, 1, player, actor, {actor}, {invalid}); }
+      catch (const std::invalid_argument&) { refused = true; }
+      if (!refused) throw std::runtime_error{"invalid combat target encoded: " + std::to_string(bad)};
+    }
+  }
+  {
+    auto owner=context;owner.protocol_version=2;
+    owner.capabilities={"context.combat_contacts","context.combat_targets","dialogue.turn_ownership"};
+    const synth::protocol_native::Identity player{"0x00000014","Fallout4.esm",actor.playthrough_id,"Player"};
+    synth::protocol_native::ActorState state;state.actor=actor;state.alive=true;
+    state.combat_contacts=std::vector<synth::protocol_native::CombatContactState>{{
+      {"0x002377B6","Fallout4.esm",actor.playthrough_id,"Mole Rat"},player,"MoleratRace",350,true,true,"visible"}};
+    const auto encode=[&](const auto& envelope,const auto& observed) {
+      return synth::json::parse(synth::protocol_native::encode_context(envelope,actor.playthrough_id,1,player,actor,{actor},{observed}));
+    };
+    const auto wire=encode(owner,state);
+    const auto& payload=synth::protocol_native::required(wire,"payload");
+    if (synth::protocol_native::required(payload,"audience").as_array().size()!=1)
+      throw std::runtime_error{"visual contact became a witness"};
+    const auto& contacts=synth::protocol_native::required(synth::protocol_native::required(payload,"actor_states").as_array()[0],"combat_contacts").as_array();
+    if (contacts.size()!=1 || synth::protocol_native::text(synth::protocol_native::required(contacts[0],"actor"),"display_name")!="Mole Rat")
+      throw std::runtime_error{"visual contact identity lost"};
+    for (int bad=0;bad<20;++bad) {
+      auto envelope=owner;auto observed=state;auto& contact=observed.combat_contacts->front();
+      if(bad==0) envelope.capabilities.clear();
+      if(bad==1) envelope.runtime_variant="vr";
+      if(bad==2) envelope.protocol_version=1;
+      if(bad==3) observed.alive=false;
+      if(bad==4) observed.disabled=true;
+      if(bad==5) contact.actor=actor;
+      if(bad==6) contact.actor=player;
+      if(bad==7) contact.actor.playthrough_id="foreign";
+      if(bad==8) contact.target.playthrough_id="foreign";
+      if(bad==9) contact.target.form_id="0x00000015";
+      if(bad==10) contact.actor.display_name.clear();
+      if(bad==11) contact.distance=2001;
+      if(bad==12) contact.hostile=false;
+      if(bad==13) contact.in_combat=false;
+      if(bad==14) contact.line_of_sight="unknown";
+      if(bad==15) observed.combat_contacts->push_back(contact);
+      if(bad==16) observed.combat_contacts->assign(9,contact);
+      if(bad==17) contact.actor.form_id="0x00000000";
+      if(bad==18) { observed.combat_contacts->clear();observed.alive=false; }
+      if(bad==19) { observed.combat_contacts->clear();observed.actor=player; }
+      bool refused=false;try{(void)encode(envelope,observed);}catch(const std::invalid_argument&){refused=true;}
+      if(!refused) throw std::runtime_error{"invalid visual contact accepted: "+std::to_string(bad)};
+    }
+    // Core enrichment copies only the same actor's valid observation; unrelated actors cannot inherit it.
+    synth::core::ActorSnapshot npc{0x1A4D7,"Preston",{},"Fallout4.esm",actor.playthrough_id};
+    synth::core::CombatContactSnapshot contact{{0x2377B6,"Fallout4.esm",actor.playthrough_id,"Mole Rat","MoleratRace"},
+      {0x14,"Fallout4.esm",actor.playthrough_id,"Player",{}},350,true,true,true};
+    const auto enriched=npc.with_combat_contacts({contact});
+    if(npc.with_details_from(enriched).combat_contacts().size()!=1 || !npc.combat_contacts().empty())
+      throw std::runtime_error{"contact enrichment ownership failed"};
+  }
   {
     auto observed=event; observed.protocol_version=2; observed.context_sequence=7;
     observed.capabilities={"dialogue.turn_ownership","action.inventory_observation","context.inventory_512"};

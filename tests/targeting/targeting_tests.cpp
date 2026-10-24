@@ -1,4 +1,5 @@
 #include "targeting/targeting.hpp"
+#include "client/ambient_exchange.hpp"
 #include "core/automatic_diary_queue.hpp"
 #include "core/picked_reference_mailbox.hpp"
 #include "integration/external_requests.hpp"
@@ -25,6 +26,26 @@ synth::core::ActorSnapshot actor_with_state(std::string life_state, std::string 
         std::nullopt, {}, "effective", std::move(life_state), std::move(posture)};
 }
 
+struct AmbientState {
+    bool alive{true}, disabled{}, combat{}, hostile{}, talking{}, area{true};
+    std::string race{"HumanRace"}, life{"alive"}, posture{"normal"}, save{"save-a"};
+    std::optional<bool> sight;
+};
+
+synth::core::ActorSnapshot ambient_actor(std::uint32_t id, synth::core::Vec3 position, AmbientState state = {}) {
+    return {id,"Same display name",position,"Fallout4.esm",state.save,state.alive,state.disabled,state.combat,state.hostile,
+        false,1,state.race,"male","Voice",false,100,100,{},state.sight,{},"unavailable",state.life,state.posture,
+        false,0,false,state.talking,false,{},id,"Fallout4.esm","unavailable","unavailable",true,true,state.area};
+}
+
+synth::core::RuntimeSnapshot ambient_scene(std::vector<synth::core::ActorSnapshot> actors,
+    synth::core::SnapshotClock::time_point now, synth::core::RuntimeVariant lane = synth::core::RuntimeVariant::flat,
+    std::optional<synth::core::TimedPose> hmd = {}, bool player_combat = false) {
+    using namespace synth::core;
+    return {Game::fallout4,lane,RuntimeGeneration::initial(),4,now,pose({}),std::move(hmd),{},{},
+        ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a",true,false,player_combat},std::move(actors)};
+}
+
 synth::core::RuntimeSnapshot snapshot(synth::core::RuntimeVariant variant,
                                       synth::core::SnapshotClock::time_point now,
                                       std::optional<synth::core::TimedPose> hmd = std::nullopt) {
@@ -45,6 +66,65 @@ synth::core::RuntimeSnapshot snapshot(synth::core::RuntimeVariant variant,
 int main() {
     try {
         using namespace synth;
+        {
+            const auto now = core::SnapshotClock::now();
+            const auto generation = core::RuntimeGeneration::initial();
+            AmbientState handy; handy.race="HandyRace";
+            const auto first=ambient_actor(0x15,{200,0,0},handy), second=ambient_actor(0x16,{300,0,0});
+            const auto scene=ambient_scene({second,first},now);
+            const auto pair=client::select_ambient_pair(scene,now,generation,1750,784);
+            CHECK(pair && pair->speaker->form_id()==0x15 && pair->listener->form_id()==0x16);
+            CHECK(client::select_ambient_pair(ambient_scene({first,second},now),now,generation,1750,784)->speaker->form_id()==0x15);
+            CHECK(!client::select_ambient_pair(ambient_scene({first},now),now,generation,1750,784));
+            CHECK(!client::select_ambient_pair(scene,now-1ms,generation,1750,784));
+            CHECK(!client::select_ambient_pair(scene,now+2001ms,generation,1750,784));
+            CHECK(!client::select_ambient_pair(scene,now,core::RuntimeGeneration::from_value(2),1750,784));
+            CHECK(!client::select_ambient_pair(scene,now,generation,0,784));
+            CHECK(!client::select_ambient_pair(scene,now,generation,1750,0));
+            CHECK(!client::select_ambient_pair(ambient_scene({first,second},now,core::RuntimeVariant::flat,{},true),now,generation,1750,784));
+            CHECK(!client::select_ambient_pair(ambient_scene({first,first,second},now),now,generation,1750,784));
+            CHECK(!client::select_ambient_pair(scene,now,generation,1750,784,[](const auto& actor){return actor.form_id()!=0x16;}));
+            for (int fault=0; fault<12; ++fault) {
+                AmbientState state;
+                if (fault==0) state.alive=false;
+                if (fault==1) state.disabled=true;
+                if (fault==2) state.combat=true;
+                if (fault==3) state.hostile=true;
+                if (fault==4) state.talking=true;
+                if (fault==5) state.area=false;
+                if (fault==6) state.race="DeathclawRace";
+                if (fault==7) state.life="unknown";
+                if (fault==8) state.posture="sleeping";
+                if (fault==9) state.sight=false;
+                if (fault==10) state.save="other-save";
+                if (fault==11) state.life="restrained";
+                CHECK(!client::select_ambient_pair(ambient_scene({first,ambient_actor(0x16,{300,0,0},state)},now),now,generation,1750,784));
+            }
+            CHECK(!client::select_ambient_pair(ambient_scene({ambient_actor(0x15,{900,0,0}),ambient_actor(0x16,{1000,0,0})},now),now,generation,1750,4000));
+            AmbientState visible; visible.sight=true;
+            CHECK(client::select_ambient_pair(ambient_scene({ambient_actor(0x15,{900,0,0},visible),ambient_actor(0x16,{1000,0,0},visible)},now),now,generation,1750,4000));
+            CHECK(!client::select_ambient_pair(ambient_scene({ambient_actor(0x15,{-500,0,0}),ambient_actor(0x16,{500,0,0})},now),now,generation,1750,784));
+            CHECK(!client::select_ambient_pair(ambient_scene({first,second},now,core::RuntimeVariant::vr),now,generation,1750,784));
+            const auto hmd=core::TimedPose{pose({}),now,50ms,4};
+            CHECK(client::select_ambient_pair(ambient_scene({first,second},now,core::RuntimeVariant::vr,hmd),now,generation,1750,784));
+            CHECK(!client::select_ambient_pair(ambient_scene({first,second},now,core::RuntimeVariant::vr,hmd),now+51ms,generation,1750,784));
+            CHECK(!client::select_ambient_pair(ambient_scene({first,second},now,core::RuntimeVariant::vr,
+                core::TimedPose{pose({}),now,50ms,3}),now,generation,1750,784));
+            std::vector<core::ActorSnapshot> crowded{first};
+            AmbientState creature; creature.race="MoleratRace";
+            for (std::uint32_t i=0;i<14;++i) crowded.push_back(ambient_actor(0x100+i,{double(i+1),0,0},creature));
+            crowded.push_back(second);
+            CHECK(!client::select_ambient_pair(ambient_scene(crowded,now),now,generation,1750,784));
+            CHECK(!client::ambient_player_voice_active(false,false,false));
+            CHECK(client::ambient_player_voice_active(true,false,false)); // Manual PTT owns recording immediately.
+            CHECK(!client::ambient_player_voice_active(true,true,false)); // Passive open mic does not consume the idle opportunity.
+            CHECK(client::ambient_player_voice_active(true,true,true));
+            CHECK(client::ambient_actor_class_supported("HandyRace"));
+            CHECK(client::ambient_actor_class_supported("ProtectronRace"));
+            CHECK(!client::ambient_actor_class_supported("FeralGhoulRace"));
+            CHECK(!client::ambient_actor_class_supported("DeathclawRace"));
+            CHECK(!client::ambient_actor_class_supported(""));
+        }
         const auto api_now=core::SnapshotClock::now();
         const auto api_flat=snapshot(core::RuntimeVariant::flat,api_now);
         CHECK(integration::external_actor(api_flat,2,api_now,100)->form_id()==2);

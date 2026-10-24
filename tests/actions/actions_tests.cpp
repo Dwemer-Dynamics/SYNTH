@@ -4,6 +4,7 @@
 #include "runtime/pickup_progress.hpp"
 #include "runtime/wait_recovery.hpp"
 #include "client/action_inventory.hpp"
+#include "client/wait_action.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -40,6 +41,89 @@ struct Executor final : synth::actions::IInspectActorExecutor {
 
 int main() {
     try {
+        {
+            using namespace synth;
+            std::vector<std::string> flat_caps, vr_caps;
+            client::append_wait_capabilities(flat_caps, core::RuntimeVariant::flat);
+            client::append_wait_capabilities(vr_caps, core::RuntimeVariant::vr);
+            CHECK(flat_caps == std::vector<std::string>({"action.wait_here", "action.release_wait"}));
+            CHECK(vr_caps.empty());
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            core::CancellationSource turn{session.token()};
+            client::WaitActionLifetime lifetime{session.token()};
+            const auto now = core::SnapshotClock::now();
+            const auto pose = core::WorldPose{{}, core::UnitVector3::from({1,0,0}), core::UnitVector3::from({0,0,1})};
+            const auto player = core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a"};
+            const auto npc = core::ActorSnapshot{0x15,"Same name",{},"Fallout4.esm","save-a"};
+            const auto other = core::ActorSnapshot{0x16,"Same name",{},"Fallout4.esm","save-a"};
+            const auto scene = [&](core::RuntimeVariant lane, std::vector<core::ActorSnapshot> actors) {
+                return core::RuntimeSnapshot{core::Game::fallout4, lane, session.token().generation(), 12, now,
+                    pose, std::nullopt, std::nullopt, std::nullopt, player, std::move(actors), 123};
+            };
+            const auto snapshot = scene(core::RuntimeVariant::flat, {npc,other});
+            protocol_native::Action action{"action:wait", "idem:wait", "wait_here", "action.wait_here",
+                {"0x00000015","Fallout4.esm","save-a","Different display label"},
+                std::nullopt, json::Value{json::Value::Object{}}, 1000};
+            const auto prepared = client::prepare_wait_action(snapshot, action, turn.token(), lifetime.token(), now+10s);
+            CHECK(prepared.name == runtime::RuntimeActionName::wait_here && prepared.actor.form_id == 0x15);
+            CHECK(prepared.actor.origin_plugin == "Fallout4.esm" && prepared.actor.playthrough_id == "save-a");
+            CHECK(prepared.deadline == now+10s && prepared.action_id == action.action_id && !prepared.item && !prepared.recipient);
+            CHECK(prepared.wait_session && !prepared.wait_session->is_cancelled());
+            auto release = action; release.name = "release_wait"; release.capability = "action.release_wait";
+            CHECK(client::prepare_wait_action(snapshot, release, turn.token(), session.token(), now+10s).name == runtime::RuntimeActionName::release_wait);
+            const auto rejected = [&](const core::RuntimeSnapshot& captured, const protocol_native::Action& bad,
+                const core::CancellationToken& owner, core::SnapshotClock::time_point deadline) {
+                bool refused{};
+                try { (void)client::prepare_wait_action(captured, bad, owner, session.token(), deadline); }
+                catch (const std::invalid_argument&) { refused = true; }
+                CHECK(refused);
+            };
+            for (const auto* arguments : {R"({"target_name":"Same name"})", R"({"duration":500})", R"([])", R"(null)"}) {
+                auto bad = action; bad.arguments = json::parse(arguments); rejected(snapshot,bad,turn.token(),now+10s);
+            }
+            for (int variant=0; variant<9; ++variant) {
+                auto bad = action;
+                if (variant==0) bad.actor.form_id="0x00000014";
+                if (variant==1) bad.actor.form_id="0x00000017";
+                if (variant==2) bad.actor.form_id="0x00000000";
+                if (variant==3) bad.actor.origin_plugin="Other.esp";
+                if (variant==4) bad.actor.playthrough_id="save-b";
+                if (variant==5) bad.capability="action.release_wait";
+                if (variant==6) bad.name="wait";
+                if (variant==7) bad.action_id="";
+                if (variant==8) bad.target=bad.actor;
+                rejected(snapshot,bad,turn.token(),now+10s);
+            }
+            rejected(scene(core::RuntimeVariant::vr,{npc}),action,turn.token(),now+10s);
+            rejected(scene(core::RuntimeVariant::flat,{npc,npc}),action,turn.token(),now+10s);
+            rejected(snapshot,action,turn.token(),now);
+            core::CancellationSource foreign{core::RuntimeGeneration::from_value(2)};
+            rejected(snapshot,action,foreign.token(),now+10s);
+            turn.cancel();
+            CHECK(prepared.cancellation.is_cancelled() && !prepared.wait_session->is_cancelled());
+            rejected(snapshot,action,turn.token(),now+10s);
+            lifetime.stop();
+            CHECK(prepared.wait_session->is_cancelled() && !lifetime.token().is_cancelled());
+            const auto after_stop = lifetime.token();
+            session.cancel();
+            CHECK(after_stop.is_cancelled());
+            client::WaitActionReplayGuard replays;
+            CHECK(replays.claim(action));
+            CHECK(!replays.claim(action));
+            auto same_key=action; same_key.action_id="action:other";
+            CHECK(!replays.claim(same_key));
+            auto same_id=action; same_id.idempotency_key="idem:other";
+            CHECK(!replays.claim(same_id));
+            auto fresh=action; fresh.action_id="action:other"; fresh.idempotency_key="idem:other";
+            CHECK(replays.claim(fresh));
+            for (int i=0; i<2046; ++i) {
+                fresh.action_id="action:bounded:"+std::to_string(i); fresh.idempotency_key="idem:bounded:"+std::to_string(i);
+                CHECK(replays.claim(fresh));
+            }
+            fresh.action_id="action:full"; fresh.idempotency_key="idem:full";
+            CHECK(!replays.claim(fresh));
+            CHECK(!replays.claim(action));
+        }
         {
             synth::runtime::WaitHoldClock hold;
             const auto now = synth::core::SnapshotClock::now();

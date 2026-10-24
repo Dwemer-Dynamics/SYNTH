@@ -1,5 +1,7 @@
 #pragma once
 #include "core/save_context.hpp"
+#include "core/combat_contacts.hpp"
+#include "core/enemy_awareness.hpp"
 #include "core/quest_event_mailbox.hpp"
 #include "core/player_event_sampler.hpp"
 #include "client/actor_event_binding.hpp"
@@ -35,6 +37,27 @@ struct PackageState {
     bool available{};
     std::string form_id, origin_plugin, display_name, editor_id;
 };
+struct CombatTargetState {
+    std::string observation{"unavailable"};
+    std::optional<Identity> actor;
+    std::string race;
+};
+struct CombatContactState {
+    Identity actor, target;
+    std::string race;
+    double distance{};
+    bool hostile{}, in_combat{};
+    std::string line_of_sight;
+};
+struct VisibleEnemyState {
+    Identity actor;
+    std::string race;
+    double distance{};
+    bool hostile{},in_combat{};
+    std::string line_of_sight;
+};
+struct RecentEnemyState { Identity actor;std::string race,observation;std::uint64_t age_ms{}; };
+struct EnemyAwarenessState { std::vector<VisibleEnemyState> current;std::vector<RecentEnemyState> recent; };
 struct ActorState {
     Identity actor;
     std::string base_form_id, base_origin_plugin;
@@ -56,6 +79,10 @@ struct ActorState {
     std::string inventory_observation{"unavailable"};
     std::string faction_completeness;
     bool health_percent_available{}, action_points_percent_available{};
+    std::optional<CombatTargetState> combat_target;
+    std::optional<std::vector<CombatContactState>> combat_contacts;
+    std::optional<EnemyAwarenessState> enemy_awareness;
+    std::optional<bool> conversation_held;
 };
 struct WorldState {
     std::string location, cell, worldspace, weather;
@@ -142,7 +169,7 @@ struct Dialogue {
     std::optional<Speech> speech;
     std::optional<Identity> listener;
 };
-struct Status { std::string code, detail; bool rechat_scene{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}; };
 struct End { std::string status; };
 using Payload = std::variant<Start, Dialogue, Action, Status, End>;
 struct Line {
@@ -321,10 +348,14 @@ inline Line decode_line(std::string_view wire) {
                             arguments,integer(a,"deadline_ms")};
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
-            payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false};
+            payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
+            payload.find("combat_targets") ? required(payload,"combat_targets").as_bool() : false,
+            payload.find("ambient_npc") ? required(payload,"ambient_npc").as_bool() : false,
+            payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
+            payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -425,6 +456,24 @@ inline std::pair<std::string, std::string> inventory_action_result(
         truncated = true;
     }
 }
+inline json::Value combat_target_value(const CombatTargetState& value, const ActorState& owner) {
+    const auto parse_form = [](const std::string& form) {
+        std::uint32_t id{};
+        if (form.size() != 10 || !form.starts_with("0x")) throw std::invalid_argument{"invalid combat actor form"};
+        const auto parsed = std::from_chars(form.data() + 2, form.data() + form.size(), id, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != form.data() + form.size() || id == 0)
+            throw std::invalid_argument{"invalid combat actor form"};
+        return id;
+    };
+    core::CombatTargetSnapshot checked{value.observation, std::nullopt};
+    if (value.actor) checked.actor = core::CombatantIdentity{parse_form(value.actor->form_id), value.actor->origin_plugin,
+        value.actor->playthrough_id, value.actor->display_name, value.race};
+    if ((!value.actor && !value.race.empty()) || !checked.valid_for(parse_form(owner.actor.form_id),
+        owner.actor.origin_plugin, owner.actor.playthrough_id, owner.alive, owner.disabled, owner.in_combat))
+        throw std::invalid_argument{"invalid combat target observation"};
+    return json::Value{object({{"observation", value.observation},
+        {"actor", value.actor ? identity_value(*value.actor) : json::Value{}}, {"race", value.race}})};
+}
 inline json::Value actor_state_value(const ActorState& value) {
     json::Value::Array inventory;
     inventory.reserve(value.inventory.size());
@@ -445,7 +494,7 @@ inline json::Value actor_state_value(const ActorState& value) {
             {"rank", faction.rank},
         })});
     }
-    return json::Value{object({
+    auto result = object({
         {"actor", identity_value(value.actor)},
         {"base_form_id", value.base_form_id}, {"base_origin_plugin", value.base_origin_plugin},
         {"position", json::Value{object({{"x", value.x}, {"y", value.y}, {"z", value.z}})}},
@@ -476,7 +525,66 @@ inline json::Value actor_state_value(const ActorState& value) {
             {"display_name", value.current_package.display_name},
             {"editor_id", value.current_package.editor_id},
         })}},
-    })};
+    });
+    if (value.combat_target) result.emplace_back("combat_target", combat_target_value(*value.combat_target, value));
+    if (value.combat_contacts) {
+        if (!value.alive || value.disabled || value.actor.form_id=="0x00000014")
+            throw std::invalid_argument{"visual combat contacts require a live NPC observer"};
+        const auto numeric_form=[](const std::string& form) {
+            std::uint32_t id{};
+            if (form.size()!=10 || !form.starts_with("0x")) throw std::invalid_argument{"invalid combat contact form"};
+            const auto parsed=std::from_chars(form.data()+2,form.data()+form.size(),id,16);
+            if (parsed.ec!=std::errc{} || parsed.ptr!=form.data()+form.size() || !id)
+                throw std::invalid_argument{"invalid combat contact form"};
+            return id;
+        };
+        std::vector<core::CombatContactSnapshot> checked;
+        json::Value::Array contacts;
+        for (const auto& contact:*value.combat_contacts) {
+            checked.push_back({{numeric_form(contact.actor.form_id),contact.actor.origin_plugin,contact.actor.playthrough_id,
+                contact.actor.display_name,contact.race},
+                {numeric_form(contact.target.form_id),contact.target.origin_plugin,contact.target.playthrough_id,contact.target.display_name,{}},
+                contact.distance,contact.hostile,contact.in_combat,contact.line_of_sight=="visible"});
+            contacts.emplace_back(object({{"actor",identity_value(contact.actor)},{"target",identity_value(contact.target)},
+                {"race",contact.race},{"distance",contact.distance},{"hostile",contact.hostile},
+                {"in_combat",contact.in_combat},{"line_of_sight",contact.line_of_sight}}));
+        }
+        if (numeric_form(value.actor.form_id)==0x14 || !core::valid_combat_contacts(checked,numeric_form(value.actor.form_id),value.actor.origin_plugin,
+            value.actor.playthrough_id,value.alive,value.disabled)) throw std::invalid_argument{"invalid visual combat contacts"};
+        result.emplace_back("combat_contacts",std::move(contacts));
+    }
+    if (value.conversation_held) {
+        if (*value.conversation_held && (value.life_state!="restrained" || !value.alive || value.disabled || value.actor.form_id=="0x00000014"))
+            throw std::invalid_argument{"conversation hold requires its live restrained NPC"};
+        result.emplace_back("conversation_held",*value.conversation_held);
+    }
+    if (value.enemy_awareness) {
+        const auto numeric_form=[](const std::string& form) {
+            std::uint32_t id{};
+            if (form.size()!=10 || !form.starts_with("0x")) throw std::invalid_argument{"invalid enemy awareness form"};
+            const auto parsed=std::from_chars(form.data()+2,form.data()+form.size(),id,16);
+            if (parsed.ec!=std::errc{} || parsed.ptr!=form.data()+form.size() || !id) throw std::invalid_argument{"invalid enemy awareness form"};
+            return id;
+        };
+        const auto copied=[&](const Identity& actor,const std::string& race) {
+            return core::CombatantIdentity{numeric_form(actor.form_id),actor.origin_plugin,actor.playthrough_id,actor.display_name,race};
+        };
+        core::EnemyAwarenessSnapshot checked;checked.available=true;
+        json::Value::Array current,recent;
+        for (const auto& item:value.enemy_awareness->current) {
+            checked.current.push_back({copied(item.actor,item.race),item.distance,item.hostile,item.in_combat,item.line_of_sight=="visible"});
+            current.emplace_back(object({{"actor",identity_value(item.actor)},{"race",item.race},{"distance",item.distance},
+                {"hostile",item.hostile},{"in_combat",item.in_combat},{"line_of_sight",item.line_of_sight}}));
+        }
+        for (const auto& item:value.enemy_awareness->recent) {
+            checked.recent.push_back({copied(item.actor,item.race),item.observation,item.age_ms});
+            recent.emplace_back(object({{"actor",identity_value(item.actor)},{"race",item.race},{"observation",item.observation},{"age_ms",item.age_ms}}));
+        }
+        if (!core::valid_enemy_awareness(checked,numeric_form(value.actor.form_id),value.actor.playthrough_id,value.alive,value.disabled))
+            throw std::invalid_argument{"invalid enemy awareness"};
+        result.emplace_back("enemy_awareness",object({{"current",std::move(current)},{"recent",std::move(recent)}}));
+    }
+    return json::Value{std::move(result)};
 }
 inline json::Value world_state_value(const WorldState& value, bool include_scene = false) {
     auto result = object({
@@ -843,6 +951,25 @@ inline std::string encode_context(const EventContext& context, std::string playt
         for(const auto& state:actor_states) {
             if (state.inventory.size() > inventory_limit)
                 throw std::invalid_argument{"inventory exceeds context capability limit"};
+            if (state.combat_target && (context.protocol_version != 2 ||
+                std::ranges::find(context.capabilities, "context.combat_targets") == context.capabilities.end()))
+                throw std::invalid_argument{"combat target capability was not negotiated"};
+            if (state.combat_contacts && (context.protocol_version!=2 || context.runtime_variant!="flat" ||
+                std::ranges::find(context.capabilities,"context.combat_contacts")==context.capabilities.end() ||
+                std::ranges::find(context.capabilities,"context.combat_targets")==context.capabilities.end() ||
+                std::ranges::find(context.capabilities,"dialogue.turn_ownership")==context.capabilities.end()))
+                throw std::invalid_argument{"combat contacts capability was not negotiated"};
+            if (state.enemy_awareness && (context.protocol_version!=2 || context.runtime_variant!="flat" ||
+                std::ranges::find(context.capabilities,"context.enemy_awareness")==context.capabilities.end() ||
+                std::ranges::find(context.capabilities,"context.combat_targets")==context.capabilities.end() ||
+                std::ranges::find(context.capabilities,"dialogue.turn_ownership")==context.capabilities.end()))
+                throw std::invalid_argument{"enemy awareness capability was not negotiated"};
+            if (state.combat_contacts) for (const auto& contact:*state.combat_contacts) {
+                const auto& expected=contact.target.form_id==state.actor.form_id ? state.actor : player;
+                if (contact.target.form_id!=expected.form_id || contact.target.origin_plugin!=expected.origin_plugin ||
+                    contact.target.playthrough_id!=expected.playthrough_id)
+                    throw std::invalid_argument{"combat contact target is outside this frame"};
+            }
             states.emplace_back(actor_state_value(state));
         }
         payload.emplace_back("actor_states",std::move(states));

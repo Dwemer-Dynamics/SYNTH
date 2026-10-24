@@ -201,6 +201,9 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     catalog = load_json(catalog_path)
     payload_type = value.get("type")
     payload_schema = catalog.get("$defs", {}).get(payload_type)
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "status":
+        catalog_path = PROTOCOL / "v2/schemas/status.schema.json"
+        payload_schema = load_json(catalog_path)
     if value.get("schema") == "synth.event.v2" and payload_type == "control":
         catalog_path = PROTOCOL / "v2/schemas/control.schema.json"
         payload_schema = load_json(catalog_path)

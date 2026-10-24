@@ -25,6 +25,7 @@ EXPECTED_SUITES = (
     "audio",
     "presentation",
     "media-fetch",
+    "radio",
     "adapters",
 )
 OPTIONAL_PROTOCOL_SUITE = "protocol-native"
@@ -37,7 +38,7 @@ def read(relative: str) -> str:
 class BuildDefinitionTests(unittest.TestCase):
     def test_voice_import_revision_is_retired_with_the_session(self) -> None:
         host = read("src/flat/plugin_entry.cpp")
-        for entry in ("void retire_session()", "void invalidate_sessions()"):
+        for entry in ("void retire_session(", "void invalidate_sessions("):
             body = host.split(entry, 1)[1].split("\n}", 1)[0]
             self.assertIn("Chatbox::set_voice_session_available(false)", body)
         adoption = host.split("session = std::move(result->session);", 1)[1]
@@ -54,12 +55,13 @@ class BuildDefinitionTests(unittest.TestCase):
             self.assertLess(handoff.index("session.get() != owner"), handoff.index("session->submit_presentation_capture"))
         audio = read("src/audio/native_playback.hpp")
         pump = audio.split("bool pump(", 1)[1].split("void halt()", 1)[0]
-        self.assertLess(pump.index("queued_.front().caption->scene_ready"), pump.index("start(std::move(clip))"))
+        self.assertLess(pump.index("queued_.front().caption->scene_ready"), pump.index("start(std::move(clip)"))
         self.assertIn("active_->clip.caption->scene_rejected()", pump)
         for path in ("src/audio/native_playback.hpp", "src/presentation/dialogue_presentation.hpp"):
             self.assertNotIn("capture_actor_snapshot", read(path))
         session = read("src/client/plugin_session.hpp")
-        self.assertIn("!admission.matches(*snapshot,now)", session)
+        self.assertIn("admission.rejection_reason(snapshot.get(),now)", session)
+        self.assertIn("trace_->record(*reason,caption->generation", session)
         self.assertIn(".admission = std::move(admission)", session)
 
     def test_flat_spin_lock_avoids_rw_lock_relocation(self) -> None:
@@ -113,6 +115,7 @@ class BuildDefinitionTests(unittest.TestCase):
             r'if\(_synth_test_suite STREQUAL "native" OR\s*'
             r'_synth_test_suite STREQUAL "tasks" OR\s*'
             r'_synth_test_suite STREQUAL "lifecycle" OR\s*'
+            r'_synth_test_suite STREQUAL "radio" OR\s*'
             r'_synth_test_suite STREQUAL "adapters"\)'
             r'.*?target_link_libraries\("\$\{_synth_test_target\}" PRIVATE Threads::Threads\)',
             cmake,
@@ -779,7 +782,15 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('prefetch->append(line);', session)
         self.assertIn('if (prefetch->claim_media(line)) prepare_rechat_media(line, prefetch);', session)
         capture_target = session.split('rechat_capture_target() {', 1)[1].split('void submit_rechat_capture(', 1)[0]
-        self.assertIn('if (runtime_paused() || microphone_.recording()) return {};', capture_target)
+        self.assertIn('if (runtime_paused() || player_voice_active()) return {};', capture_target)
+        voice_priority = session.split('bool player_voice_active() const {', 1)[1].split('bool ambient_mode_ready()', 1)[0]
+        self.assertIn('ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_)', voice_priority)
+        ambient_voice = read('src/client/ambient_exchange.hpp').split('bool ambient_player_voice_active(', 1)[1].split('bool ambient_actor_class_supported(', 1)[0]
+        self.assertIn('return recording && (!passive_open_mic || voice_detected);', ambient_voice)
+        manual_voice = session.split('bool begin_voice_capture(', 1)[1].split('void cancel_voice_capture()', 1)[0]
+        self.assertIn('open_mic_passive_recording_ = false;', manual_voice)
+        passive_voice = session.split('MicrophoneEvent pump_open_microphone(', 1)[1].split('[[nodiscard]]', 1)[0]
+        self.assertIn('open_mic_passive_recording_ = true;', passive_voice)
         self.assertNotIn('is_cancelled() || runtime_paused()', capture_target)
         self.assertIn('diagnostics::ConversationStage::prefetch_received', session)
         deferred = session.split('else if (auto lines = deferred.prefetch->take(now))', 1)[1].split('if (runtime_paused_', 1)[0]
@@ -1077,7 +1088,9 @@ class WaitPackageGates(unittest.TestCase):
         tick = host.index('FlatWaitPackage::tick(now)')
         pump = host.index('void pump_runtime_impl()')
         self.assertLess(host.index('adopt_session_result(now)', pump), tick)
-        self.assertIn('if (session->external_ready())', host[tick-180:tick])
+        # Holds must be pumped while dialogue is active, once initialization is ready.
+        self.assertIn('if (session->connection_ready())', host[tick-180:tick])
+        self.assertNotIn('external_ready()', host[tick-180:tick])
         self.assertNotIn('ProcessLists::GetSingleton()', adapter)
         self.assertIn('release_legacy(actor);', admission)
 
@@ -1136,7 +1149,7 @@ class WaitPackageGates(unittest.TestCase):
         host = read('src/flat/plugin_entry.cpp')
         hotkey = host.split('hotkey_pressed(hotkeys.talk_to_npc)', 1)[1].split('hotkey_pressed(hotkeys.synth_control)', 1)[0]
         self.assertLess(hotkey.index('MenuFramework::available()'), hotkey.index('clipboard_text()'))
-        retirement = host.split('void retire_session() noexcept {', 1)[1].split('void invalidate_sessions()', 1)[0]
+        retirement = host.split('void retire_session(', 1)[1].split('void invalidate_sessions(', 1)[0]
         for reset in ('control_target.reset()', 'deferred_control_action.reset()', 'control_status_revision = 0'):
             self.assertIn(reset, retirement)
 

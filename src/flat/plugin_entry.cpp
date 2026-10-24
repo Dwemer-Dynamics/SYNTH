@@ -9,6 +9,8 @@
 #include "adapters/flat_fallout_runtime.hpp"
 #include "adapters/flat_dialogue_subtitles.hpp"
 #include "adapters/flat_rest_events.hpp"
+#include "adapters/flat_radio_probe.hpp"
+#include "radio/probe_host.hpp"
 #include "adapters/flat_quest_events.hpp" // Compile the guarded observer; activation waits for owned event transport.
 #include "adapters/flat_actor_events.hpp"
 #include "adapters/flat_inventory_changes.hpp"
@@ -26,6 +28,7 @@
 #include "input/press_gesture.hpp"
 #include "presentation/commonlib_face_animation.hpp"
 #include "adapters/flat_speech_animation.hpp"
+#include "adapters/flat_speech_exclusion.hpp"
 #include "adapters/commonlib_speech_facing.hpp"
 #include "adapters/flat_menu_pause.hpp"
 #include "adapters/native_fault_recorder.hpp"
@@ -79,6 +82,7 @@ synth::input::PressGesture pip_vision_gesture;
 synth::presentation::CommonlibFaceAnimation face_animation;
 synth::presentation::SpeechFacingOnce speech_facing;
 synth::adapters::FlatDialogueSubtitles dialogue_subtitles;
+synth::radio::ProbeHost radio_probe;
 
 void pump_runtime() noexcept;
 
@@ -217,7 +221,14 @@ void bind_runtime_to_game_thread() {
     runtime->set_capture_epoch_reader([] { return synth::adapters::FlatPickedReference::stamp(); });
     runtime->set_requested_actor_pump(synth::adapters::commonlib::requested_actor_snapshot);
     runtime->set_facing_pump(synth::adapters::commonlib::face_speech_listener);
+    runtime->set_conversation_hold_pump(synth::adapters::commonlib::FlatWaitPackage::update_conversation,
+        synth::adapters::commonlib::FlatWaitPackage::conversation_actions_ready);
+    synth::adapters::commonlib::conversation_hold_observer=synth::adapters::commonlib::FlatWaitPackage::conversation_held;
     runtime->set_speech_pump(synth::adapters::FlatSpeechAnimation::update);
+    runtime->set_speech_owner_pump(synth::adapters::FlatSpeechExclusion::update);
+    runtime->set_speech_spatial_pump(synth::adapters::commonlib::speech_spatial_snapshot);
+    runtime->set_radio_probe_pumps(synth::adapters::commonlib::FlatRadioProbe::capture,
+                                  synth::adapters::commonlib::FlatRadioProbe::execute);
     dispatcher = std::make_unique<synth::runtime::GameThreadDispatcher>(*runtime, 256);
     REX::INFO("SYNTH runtime: bound adapter to Fallout main thread");
 }
@@ -294,7 +305,7 @@ void log_conversation_trace() noexcept {
 
 // Session teardown cancels WinHTTP and joins task workers, so hand ownership to
 // the coordinator instead of performing that work inside the main-thread pump.
-void retire_session() noexcept {
+void retire_session(bool discard_speech = false) noexcept {
     synth::ui::Chatbox::set_voice_session_available(false);
     synth::ui::Chatbox::close();
     synth::ui::ControlMenu::invalidate();
@@ -312,6 +323,8 @@ void retire_session() noexcept {
     synth::integration::external_requests.set_available(false);
     synth::adapters::FlatRestEvents::invalidate();
     if (!session) return;
+    if (runtime && !session->stop_local_speech(*runtime, discard_speech))
+        REX::WARN("SYNTH speech: local ownership cleanup failed during retirement");
     session->request_stop();
     log_conversation_trace();
     if (session_host) {
@@ -321,7 +334,7 @@ void retire_session() noexcept {
     }
 }
 
-void invalidate_sessions() noexcept {
+void invalidate_sessions(bool discard_speech = false) noexcept {
     synth::ui::Chatbox::set_voice_session_available(false);
     synth::adapters::commonlib::FlatWaitPackage::retire();
     synth::ui::Chatbox::close();
@@ -341,7 +354,7 @@ void invalidate_sessions() noexcept {
     // Clear at the load boundary, never from an old session's asynchronous
     // destructor after the replacement has started queuing new work.
     if (dispatcher) dispatcher->discard_pending();
-    retire_session();
+    retire_session(discard_speech);
 }
 
 void queue_session_initialization(
@@ -511,6 +524,10 @@ void pump_runtime_impl() {
     }
     trace_pump_phase("dispatcher drain");
     (void)dispatcher->drain();
+    // Optional, explicitly armed station diagnostics are independent of server/dialogue readiness.
+    radio_probe.tick(*runtime, now);
+    if (const auto report = radio_probe.take_report(); !report.empty())
+        REX::INFO("SYNTH radio probe: {}", report);
     trace_pump_phase("menu and combat query");
     const auto menu_mode = synth::adapters::commonlib::menu_mode_active();
     if (!session || menu_mode) dialogue_subtitles.present({});
@@ -542,7 +559,7 @@ void pump_runtime_impl() {
     if (session) {
         // Wait-controller VM work belongs to an initialized gameplay session,
         // never the first post-load frame before stable bootstrap/adoption.
-        if (session->external_ready()) {
+        if (session->connection_ready()) {
             trace_pump_phase("wait controller");
             synth::adapters::commonlib::FlatWaitPackage::tick(now);
         }
@@ -574,7 +591,7 @@ void pump_runtime_impl() {
             if (session.get() != owner || runtime->generation() != generation) return;
             session->submit_presentation_capture(caption,snapshot);
         }
-        session->pump(runtime->generation().value());
+        session->pump(runtime->generation().value(), *runtime);
         log_conversation_trace();
         if (const auto target=session->rechat_capture_target()) {
             const auto* owner=session.get();
@@ -582,6 +599,17 @@ void pump_runtime_impl() {
             auto snapshot=runtime->capture_actor_snapshot(now,target->form_id);
             if (session.get()!=owner || runtime->generation()!=generation) return;
             session->submit_rechat_capture(std::move(snapshot),*target);
+        }
+        if (!menu_mode && !runtime_paused) {
+            if (const auto observer=session->enemy_awareness_capture_target(now,player_in_combat)) {
+                const auto* owner=session.get();const auto generation=runtime->generation();
+                const auto epoch=synth::adapters::FlatPickedReference::stamp();
+                const auto captured=synth::adapters::commonlib::background_enemy_awareness(*observer);
+                if (session.get()!=owner || runtime->generation()!=generation ||
+                    synth::adapters::FlatPickedReference::stamp()!=epoch ||
+                    lifecycle.state()!=synth::adapters::LifecycleState::ready) return;
+                session->observe_enemy_awareness(*observer,captured,generation.value(),now);
+            }
         }
         trace_pump_phase("face animation");
         const auto playback_frame = session->playback_frame();
@@ -1086,6 +1114,8 @@ void pump_runtime() noexcept {
 
 void apply_lifecycle(LifecycleAction action) {
     if (action == LifecycleAction::invalidate || action == LifecycleAction::invalidate_and_ready || action == LifecycleAction::stop)
+        radio_probe.invalidate();
+    if (action == LifecycleAction::invalidate || action == LifecycleAction::invalidate_and_ready || action == LifecycleAction::stop)
         synth::adapters::FlatMenuPause::sync(false);
     if (action == LifecycleAction::invalidate || action == LifecycleAction::invalidate_and_ready || action == LifecycleAction::stop)
         synth::adapters::FlatRestEvents::invalidate();
@@ -1097,7 +1127,7 @@ void apply_lifecycle(LifecycleAction action) {
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
         break;
     case LifecycleAction::invalidate:
-        invalidate_sessions();
+        invalidate_sessions(true);
         publish_ui_configuration();
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
@@ -1106,7 +1136,7 @@ void apply_lifecycle(LifecycleAction action) {
         (void)runtime->invalidate();
         break;
     case LifecycleAction::invalidate_and_ready:
-        invalidate_sessions();
+        invalidate_sessions(true);
         publish_ui_configuration();
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
@@ -1119,7 +1149,7 @@ void apply_lifecycle(LifecycleAction action) {
         if (dispatcher != nullptr) {
             dispatcher->stop_accepting(true);
         }
-        invalidate_sessions();
+        invalidate_sessions(true);
         publish_ui_configuration();
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
@@ -1180,6 +1210,7 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
     }
     if (action==LifecycleAction::invalidate || action==LifecycleAction::invalidate_and_ready || action==LifecycleAction::stop) {
         synth::integration::external_requests.set_available(false);
+        synth::radio::probe_mailbox.invalidate();
     }
     deferred_lifecycle.push(action);
 }

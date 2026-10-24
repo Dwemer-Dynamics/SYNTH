@@ -145,13 +145,15 @@ void log_conversation_trace() noexcept {
 }
 
 // Retire voice/network workers on the shared coordinator, never during a VR frame or save load.
-void invalidate_sessions() noexcept {
+void invalidate_sessions(bool discard_speech = false) noexcept {
     synth::integration::external_requests.set_available(false);
     pending_session_request = 0;
     runtime_disabled = false;
     if (session_host) session_host->invalidate();
     if (dispatcher) dispatcher->discard_pending();
     if (session) {
+        if (runtime && !session->stop_local_speech(*runtime, discard_speech))
+            spdlog::warn("SYNTHVR speech: local ownership cleanup failed during retirement");
         session->request_stop();
         log_conversation_trace();
         session_host->retire(std::move(session));
@@ -273,7 +275,7 @@ void pump_runtime_impl() {
             if (session.get() != owner || runtime->generation() != generation) return;
             session->submit_presentation_capture(caption,snapshot);
         }
-        session->pump(runtime->generation().value());
+        session->pump(runtime->generation().value(), *runtime);
         log_conversation_trace();
         if (const auto target=session->rechat_capture_target()) {
             const auto* owner=session.get();
@@ -475,7 +477,7 @@ void apply_lifecycle(LifecycleAction action) {
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
         break;
     case LifecycleAction::invalidate:
-        invalidate_sessions();
+        invalidate_sessions(true);
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
         profile_timer_paused_at = {};
@@ -483,7 +485,7 @@ void apply_lifecycle(LifecycleAction action) {
         (void)runtime->invalidate();
         break;
     case LifecycleAction::invalidate_and_ready:
-        invalidate_sessions();
+        invalidate_sessions(true);
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
         profile_timer_paused_at = {};
@@ -494,7 +496,7 @@ void apply_lifecycle(LifecycleAction action) {
         if (dispatcher != nullptr) {
             dispatcher->stop_accepting(true);
         }
-        invalidate_sessions();
+        invalidate_sessions(true);
         if (runtime) face_animation.reset(*runtime);
         pip_vision_gesture.reset();
         profile_timer_paused_at = {};
@@ -581,6 +583,7 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* load) {
     runtime = std::make_unique<synth::adapters::VrFalloutRuntime>(
         capture_values, present_notification, execute_runtime_action);
     runtime->set_actor_detail_pump(synth::adapters::commonlib::selected_actor_details);
+    runtime->set_speech_spatial_pump(synth::adapters::commonlib::speech_spatial_snapshot);
     runtime->set_requested_actor_pump(synth::adapters::commonlib::requested_actor_snapshot);
     runtime->set_facing_pump(synth::adapters::commonlib::face_speech_listener);
     spdlog::warn("SYNTH lipsync unavailable: VR facial ABI has not been independently verified; audio remains enabled");
