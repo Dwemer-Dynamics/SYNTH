@@ -1,6 +1,6 @@
 # SYNTH developer handoff
 
-Updated: 2026-10-06. This is the current entry point for SYNTH development. Older plans and
+Updated: 2026-10-15. This is the current entry point for SYNTH development. Older plans and
 audits under `docs/` are kept as feature evidence, and some carry a historical banner.
 
 ## Baseline
@@ -18,6 +18,9 @@ Start all work from `alpha` and target every PR at `alpha`. `synth` is the main/
 `dev` and `unstable` are reserved lanes. See [CONTRIBUTING.md](../CONTRIBUTING.md).
 The public client source comes from private cleanup `618e924`; the paired server comes from
 `c12fb1b`. Older hashes and branch names below identify historical development checkpoints.
+
+Temporary flat conversation holds and active-dialogue wait pumping are prepared in the testing candidate.
+See [CONVERSATION-HOLDS.md](CONVERSATION-HOLDS.md). Gameplay and installation remain open.
 
 ## Supported runtimes
 
@@ -46,8 +49,32 @@ through `SYNTH_custom.ini` alone.
 
 ## Build and test
 
+The current testing candidate connects explicit text/audio Wait Here and Release
+Wait to the existing flat wait controller. See [WAIT-ALIAS-CHAT.md](WAIT-ALIAS-CHAT.md).
+Normal new input preserves an accepted hold; Stop and load revoke it. VR remains
+unsupported for native wait execution. Automated validation and installation
+receipts must identify the exact candidate; these changes still require new flat
+gameplay evidence and do not change the previously observed control-menu result.
+
+Idle NPC exchanges reuse the configured bored timer, require acknowledged server
+support, STANDARD mode and two eligible nearby NPCs. Passive open-microphone
+listening permits the exchange; player speech, typing, menus and Stop take
+priority. See the paired server's native rechat ownership document for profile,
+listener and completed-parent proof. Close capture does not establish NPC-to-NPC
+line of sight or every vanilla speech state. Flat and VR gameplay remain open.
+
 See [README](../README.md#build-and-test) for the commands. Points to know:
 
+- Prepared Stop/save ancestry correction: a replacement session in the same
+  loaded world inherits the latest acknowledged context. Each existing session
+  keeps its copied parent immutable. Loading a different save still resets the
+  store and restores that save's own context; foreign-player and stale-writer
+  checks retain their boundaries. The flat return test exposed an older loaded
+  parent being reused after Stop, excluding a just-published NPC-pair result
+  from the next save. Native regression reproduces that failure and covers
+  same-world replacement, older disk saves, immutable bindings and stale writers.
+  Both native builds and package validation are required before installation;
+  installation and the corrected flat/VR return checks remain open.
 - The flat package needs compiled Papyrus in `out/wait-papyrus` (always) and in `out/papyrus`
   (for `SYNTHNative`, when present). Both are built with hash-pinned Caprica v0.1.5 against
   **your own** Fallout 4 binary script imports, which this repository does not contain. The
@@ -80,7 +107,7 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
   `Fallout4.esm` as its master. Never renumber or remove existing FormIDs, quest aliases,
   PACK/REFR records or the local-800 migration record. Saves refer to them.
 - Wait uses Papyrus `SetRestrained` with a game-thread check of the actor's life state.
-  Aliases 0–255 track wait subjects. Aliases 256–511 record only the restraint that SYNTH
+  Aliases 0â€“255 track wait subjects. Aliases 256â€“511 record only the restraint that SYNTH
   applied. Old package and marker records remain for save compatibility only. See
   [WAIT-ALIAS-CHAT.md](WAIT-ALIAS-CHAT.md).
 - Commit `231bbdb` (PKDT interrupt-override fix) and commit `f34da88` (restraint hold) must stay
@@ -98,7 +125,66 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
 
 ## Known gaps and deferred work
 
-- **No flat in-game or VR in-headset acceptance has been performed** for this baseline.
+- **Prepared NPC combat-target identification.** [COMBAT-TARGETS.md](COMBAT-TARGETS.md)
+  describes bounded native target-handle capture, explicit v2 acknowledgement and
+  response-speaker prompt ownership. Other targets do not become listeners or
+  history readers. Unknown or older observations cannot identify an opponent.
+  Reviewed installation and flat/VR gameplay acceptance remain open.
+
+- **NPC speech ownership (flat candidate).** [NPC-SPEECH-OWNERSHIP.md](NPC-SPEECH-OWNERSHIP.md)
+  records clip-lifetime ownership and the audited index-0 native voice Stop path.
+  The current actor's voice is stopped before SYNTH playback and on subsequent
+  owning pumps, independently of race, lipsync or facing. No actor speaking flag
+  or quest/scene state is changed. New native lines are stopped at the next pump;
+  zero-overlap voice-start prevention is not established. Flat audible overlap,
+  recovery and save/load acceptance remain open. VR NPC clips currently fall back
+  to text because its native voice ABI is unverified; narrator audio remains enabled.
+
+- **Optional native radio diagnostic prototype (flat test installation).**
+  [RADIO-PROTOTYPE.md](RADIO-PROTOTYPE.md) documents a separate original ESP,
+  two native scene media slots, a flat game-thread diagnostic bridge and A/B/A
+  changed-duration experiment. It is disabled by default and invalidates queued
+  commands on runtime generation changes. DCR insertion, live media rewrite and
+  provider generation remain unimplemented. The isolated flat test
+  reported missing station records: scene placement is corrected to FO4's
+  type-10 quest-child group, with unchanged FormIDs. Native lookup failures now
+  identify the specific record or validation boundary. Retest station discovery
+  and playback before extending integration. A subsequent saved-game run still
+  missed slot A in the global form map. The adapter also checks only the exact
+  owned scene in the bounded quest scene list and reports child-loading state
+  if absent; it does not promote or reset quests. A subsequent startup report
+  still had zero loaded quest scenes. The Papyrus enable command now checks
+  the latent Start result, running state and exact transmitter alias, with
+  on-screen failure/status notifications. The revised alias is optional and empty
+  at startup; the script fills only that alias with the exact owned transmitter,
+  rejecting a different existing reference and a generation change. This removes
+  mandatory engine alias filling from Start. A flat test on the same save verified
+  startup, exact alias assignment, loaded owned scenes and native enable success.
+  The preview was audible through Trinity Tower because the original 99.5
+  frequency overlapped its vanilla transmitter. The authored diagnostic
+  frequency is now 106.9, checked against the test profile's radio fields.
+  A flat retest confirmed discovery under the SYNTH station name, manual tuning
+  to 106.9 and audible slot B playback. A subsequent same-session baseline
+  confirmed A/B previews play and finish normally. Completion observations
+  exposed a diagnostic error: the radio action's sound ID is a descriptor FormID,
+  not a native audio handle, and completed actions reset their duration/ID fields.
+  The corrective native candidate uses audited, locked RadioManager queries and
+  releases actual listener handles for only the two owned scene keys. It preserves
+  opaque upper status flags, rejects uncertain or foreign audio state, and reports
+  pending/playing/paused busy state separately from audibility. The candidate needs
+  an in-game during-playback and completion retest before the controlled rewrite.
+  A/B/A rewriting and audible cache refresh
+  remain open. The original startup rejection reason was not emitted by the logs.
+  The VR
+  radio seam is unsupported. Default `SYNTH.esp` and package allowlists are unchanged.
+
+  The testing candidate also preserves the existing October 7 conversation
+  diagnostics, speech admission and voice sample fixes. Radio is additive to
+  those local behaviors; rebuilding and unit checks do not establish their
+  in-game acceptance.
+
+- **The complete flat acceptance matrix and VR in-headset acceptance remain open**
+  for this baseline. The optional radio startup/enable result above is narrower.
 - **VR runtime DLL imports (corrected in this cleanup).** The baseline `scripts/build-vr.ps1`
   used the dynamic `x64-windows` vcpkg triplet, so the baseline `SYNTHVR.dll` imported
   `spdlog.dll` and `fmt.dll`, which the VR package does not ship. The script, the CMake gate
@@ -119,7 +205,7 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
   Chatterbox, PocketTTS, Cartesia and Inworld.
 - Server native embedding-space work is deferred and is **not** alpha-ready. It lives on
   Synthserver `codex/dialectic-parity-core` at `3808838`. Its migration IDs
-  `20260908001`–`006` sort below the baseline's `20260909001`, so they must be renumbered
+  `20260908001`â€“`006` sort below the baseline's `20260909001`, so they must be renumbered
   before that work resumes. See the Synthserver handoff.
 - The flat package audit verifies only SYNTH-owned ESP/PEX bytes. A Script VM call or record
   behavior is proven only by in-game evidence.

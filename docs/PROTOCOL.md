@@ -273,6 +273,23 @@ interpreted as departure, death or world absence. Complete attests only this
 capture's discovery set. Deploy server first: older strict servers reject the new
 optional field until their coordinated schema/ingress update is installed.
 
+## Current NPC combat target observations
+
+Optional v2 capability `context.combat_targets` permits actor-state `combat_target`.
+Its closed fields are `observation` (`identified|none|unavailable`), `actor` (exact
+canonical identity with displayed name, or null) and `race` (captured label, or
+empty). Identified targets require a live, enabled combat owner, a distinct target
+in the same playthrough and a nonzero form ID. None/unavailable carries no identity.
+The observation never adds the opponent to audience, witnesses or history readers.
+
+The client sends this field only after a complete correlated v2 init explicitly
+acknowledges `combat_targets: true`. An older server leaves it omitted; v1 remains
+unchanged. Only the actual response speaker receives its own current observation,
+including a prepared NPC different from the scene focus. Generic prompt states and
+structured internal/history copies omit the field. Missing or ambiguous frames
+render unavailable, without substituting nearby names or older history. See
+[COMBAT-TARGETS.md](COMBAT-TARGETS.md) for capture and independent gameplay gates.
+
 ## Health and action-point observation availability (2026-09-05)
 
 Actor states accept optional booleans `health_percent_available` and

@@ -30,6 +30,7 @@ class FlatWaitPackage final {
         core::SnapshotClock::time_point next_verify{};
         bool verified{}, verification_reported{};
         std::optional<Observation> observation;
+        bool conversational{};
     };
     struct Job {
         runtime::WaitScriptReceipt receipt;
@@ -109,9 +110,69 @@ public:
         paused_at_.reset();
     }
 
+    static bool conversation_actions_ready() {
+        return std::ranges::none_of(leases_,[](const auto& lease){return lease.conversational && lease.actor;});
+    }
+    static bool conversation_held(std::uint32_t form) {
+        const auto found=std::ranges::find_if(leases_,[&](const auto& lease){return lease.form==form;});
+        const auto actor=found==leases_.end() ? RE::NiPointer<RE::Actor>{} : found->actor.get();
+        return actor && found->waiting && found->conversational && !actor->IsInCombat() &&
+            static_cast<RE::ACTOR_LIFE_STATE>(actor->lifeState)==RE::ACTOR_LIFE_STATE::kRestrained &&
+            !found->cancellation.is_cancelled() && found->verified;
+    }
+
+    // Same aliases, ownership receipts and load recovery as explicit Wait. Never replace an explicit hold.
+    static void update_conversation(std::span<const runtime::RuntimeConversationHold> holds,bool discard) {
+        if (discard) return; // The lifecycle reset recovers saved aliases in the next stable world.
+        const auto now=core::SnapshotClock::now();
+        const auto wanted=[&](const Lease& lease) {
+            const auto actor=lease.actor.get();
+            return actor && !actor->IsInCombat() && std::ranges::any_of(holds,[&](const auto& hold){
+                return !hold.cancellation.is_cancelled() && hold.actor.form_id==lease.form &&
+                    hold.actor.playthrough_id==playthrough_id() && origin_plugin(*actor)==hold.actor.origin_plugin;
+            });
+        };
+        for (auto& lease:leases_) if (lease.conversational && (!lease.waiting || !wanted(lease))) {
+            if (lease.waiting) { lease.waiting=false;lease.dirty=true;++lease.revision; }
+            std::scoped_lock lock{job_mutex_};
+            if (job_ && !job_->reset && job_->slot==static_cast<std::size_t>(&lease-leases_.data())) {
+                job_->receipt.revoke_install();
+                // Refresh does not move the anchor. Retire its ticket so a late VM callback
+                // cannot keep a failed conversation restrained for the 30-second job timeout.
+                // An initial install may still have a latent MoveTo and must drain normally.
+                if (job_->refresh) {
+                    job_.reset();
+                    next_sweep_=now;
+                    REX::INFO("SYNTH conversation hold: retired verification before release for {:08X}",lease.form);
+                }
+            }
+        }
+        for (const auto& hold:holds) {
+            if (hold.cancellation.is_cancelled() || hold.actor.form_id==0 || hold.actor.form_id==0x14 ||
+                hold.actor.playthrough_id!=playthrough_id()) continue;
+            auto found=std::ranges::find_if(leases_,[&](const auto& lease){return lease.form==hold.actor.form_id;});
+            if (found!=leases_.end()) continue; // Also let an outstanding release drain before reacquiring.
+            auto* actor=RE::TESForm::GetFormByID<RE::Actor>(hold.actor.form_id);
+            if (!actor || origin_plugin(*actor)!=hold.actor.origin_plugin || actor->IsInCombat() ||
+                actor->lifeState!=0 || actor->talkingToPlayer || actor->inSyncAnim ||
+                actor->DoGetSitSleepState()!=RE::SIT_SLEEP_STATE::kNormal ||
+                (actor->niFlags.flags & static_cast<std::uint32_t>(RE::Actor::BOOL_FLAGS::kScenePackage))!=0) continue;
+            runtime::RuntimeActionRequest request{runtime::RuntimeActionName::wait_here,hold.actor};
+            request.cancellation=hold.cancellation;request.deadline=now+std::chrono::seconds{2};
+            request.wait_session=hold.cancellation;
+            const auto result=apply(*actor,request);
+            if (result.status==runtime::RuntimeActionStatus::succeeded) {
+                found=std::ranges::find_if(leases_,[&](const auto& lease){return lease.form==hold.actor.form_id;});
+                if (found!=leases_.end()) found->conversational=true;
+            }
+        }
+    }
+
     static runtime::RuntimeActionResult apply(RE::Actor& actor, const runtime::RuntimeActionRequest& request) {
         using Status = runtime::RuntimeActionStatus;
         if (request.cancellation.is_cancelled() || core::SnapshotClock::now() >= request.deadline || menu_mode_active() ||
+            (request.wait_session && (request.wait_session->is_cancelled() ||
+                request.wait_session->generation() != request.cancellation.generation())) ||
             actor.GetFormID() == 0x14 || actor.IsDeleted() || actor.IsDisabled() || actor.IsDead(false) || !actor.Get3D())
             return {Status::unavailable, "Wait requires the selected live, loaded NPC"};
         auto* data = RE::TESDataHandler::GetSingleton();
@@ -134,7 +195,7 @@ public:
         const auto* cell = actor.GetParentCell();
         if (!cell) return {Status::unavailable, "NPC cell is unavailable"};
         const bool quarantined = lease->quarantined;
-        *lease = {handle, actor.GetFormID(), request.cancellation, actor.GetPosition(), cell->GetFormID(),
+        *lease = {handle, actor.GetFormID(), request.wait_session.value_or(request.cancellation), actor.GetPosition(), cell->GetFormID(),
                   ++revision_, !releasing, true, false};
         lease->quarantined = quarantined;
         {
@@ -217,7 +278,7 @@ public:
                     // Revoke the old job, clear its alias, but never reuse a marker that may still move.
                     lease.quarantined = true; lease.waiting = false; lease.dirty = true;
                 } else if (lease.revision == completed->revision) {
-                    if (completed->waiting && ok && !lease.hold_clock.started()) lease.hold_clock.start(now);
+                    if (completed->waiting && ok) { lease.verified=true; if (!lease.hold_clock.started()) lease.hold_clock.start(now); }
                     if (!completed->waiting && ok) {
                         const bool quarantined = lease.quarantined;
                         lease = {}; lease.quarantined = quarantined;
@@ -236,6 +297,7 @@ public:
                 auto& lease = leases_[slot];
                 const auto actor = lease.actor.get();
                 if (lease.actor && lease.waiting && (lease.cancellation.is_cancelled() || !actor ||
+                    (lease.conversational && actor->IsInCombat()) ||
                     actor->IsDeleted() || actor->IsDead(false) || actor->IsDisabled())) {
                     lease.waiting = false; lease.dirty = true; ++lease.revision;
                 }

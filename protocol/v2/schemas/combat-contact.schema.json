@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/combat-contact.schema.json",
+  "title": "NPC visual incoming-attacker observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "actor",
+    "target",
+    "race",
+    "distance",
+    "hostile",
+    "in_combat",
+    "line_of_sight"
+  ],
+  "properties": {
+    "actor": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        {
+          "required": [
+            "display_name"
+          ],
+          "properties": {
+            "form_id": {
+              "not": {
+                "enum": [
+                  "0x00000000",
+                  "0x00000014"
+                ]
+              }
+            },
+            "display_name": {
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            }
+          }
+        }
+      ]
+    },
+    "target": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        {
+          "required": [
+            "display_name"
+          ],
+          "properties": {
+            "display_name": {
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            }
+          }
+        }
+      ]
+    },
+    "race": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "distance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2000
+    },
+    "hostile": {
+      "const": true
+    },
+    "in_combat": {
+      "const": true
+    },
+    "line_of_sight": {
+      "const": "visible"
+    }
+  }
+}

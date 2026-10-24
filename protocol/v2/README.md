@@ -466,3 +466,44 @@ than two-second captures are discarded. Publication remains on the network worke
 and only scene_context_sequence advances; the original turn and parent stay bound.
 The server does not emit this acknowledgement and client defaults do not request it
 until combined activation checks pass.
+
+## Current combat target observations
+
+The optional capability `context.combat_targets` adds actor-state `combat_target`
+with closed fields `observation`, `actor` and `race`. Identified observations carry
+the exact current opponent identity, displayed name and optional captured race
+label. They require a live, enabled actor in combat and a distinct nonzero target
+in the same playthrough. `none` and `unavailable` carry null actor and empty race;
+neither proves combat ended or a kill. The target does not become an audience
+member, witness or history reader.
+
+A complete, correctly correlated init stream must explicitly acknowledge
+`combat_targets: true` before a client sends this optional field. Unsupported
+servers receive an ordinary context without it. v1 payloads are unchanged.
+The v2 status schema also preserves the existing optional `rechat_scene` boolean.
+
+Only the actual response speaker's current observation enters its dedicated
+prompt, including a prepared NPC different from the scene focus. Generic prompt
+states and structured internal/history copies omit all combat-target fields.
+Immutable context evidence and request-local raw state stay intact. Empty,
+ambiguous or old observations explicitly remain unavailable; they cannot infer
+an opponent from nearby hostility, other actors' targets or older dialogue.
+
+## Explicit NPC waiting
+
+`action.wait_here` and `action.release_wait` are optional flat-only capabilities for owned player text/audio input. `wait_here` and `release_wait` address only the captured NPC, have an empty arguments object and no target. They are unavailable to VR, narration and autonomous turns. Waiting is temporary (at most 90 seconds); release removes SYNTH waiting without recruiting a follower. Existing clients omit both capabilities and retain their earlier action set.
+
+## Bounded ambient NPC exchanges
+
+`dialogue.ambient_npc` opts an existing `bored` trigger into a public NPC-to-NPC origin. It requires `dialogue.turn_ownership`, `dialogue.rechat.ownership`, `dialogue.rechat.scene` and `dialogue.listener_identity`, plus explicit init acknowledgements `ambient_npc: true` and `rechat_scene: true`. It adds no trigger payload fields and does not fabricate a continuation parent. Older bored triggers retain their earlier behavior.
+
+The client admits at most one idle origin after its configured activity interval, with current nearby eligible NPCs, no active player input, action, response or speech, and ordinary Stop/pause/cancellation controls. The server independently requires an exact claimed owner and context received within ten seconds of its claim, current profiles for both distinct captured NPCs, calm living participants and a calm player, public Standard mode and a sixty-second same-session origin cooldown. Unknown visibility requires proximity within 784 world units; observed blocked sight is excluded. Participants must also be within 784 units of one another. These are proximity checks, not proof that all walls or vanilla speech are observable.
+
+The server owns the origin's exact speaker and listener. Model listener labels cannot redirect the emitted line to Player or another NPC, and frozen relationship routing uses that emitted line's actual hash and route. Only its real completed NPC line can authorize the existing finite profile-controlled continuation chain. Missing profiles suppress an origin; no provider profile generation or global-history fallback is used. Random continuation mode chooses among modes with an eligible captured reply, while explicit tight mode retains its addressee restriction. Private modes, probability, round limits and action policies remain in force.
+
+
+`context.combat_contacts` is a flat-only v2 extension requiring `context.combat_targets` and `dialogue.turn_ownership`, with explicit boolean `combat_contacts` init acknowledgement. Without the acknowledgement clients omit the optional actor-state array. Up to eight current visual incoming-attacker observations belong only to the containing NPC; they never add conversation audience or historical readers. Contacts identify exact loaded actors targeting that NPC or the captured player, with native hostility, combat, range and selected-observer visual detection proof. An empty list does not prove absence of attackers. Other NPCs, player-selected targets, old encounters and general creature lore cannot substitute for this observation. VR does not offer this capability.
+
+## NPC enemy awareness
+
+`context.enemy_awareness` is a flat-only v2 capability requiring `context.combat_targets` and `dialogue.turn_ownership`, with explicit boolean `enemy_awareness` init acknowledgement. The optional actor-state `enemy_awareness` object contains at most eight current visible hostiles and eight disjoint recent observations. Current observations require the containing NPC’s positive visual detection, native hostility, loaded same-area actors and distance at most 2000 game units. They do not require combat or a target on the player. Recent observations expire after 30000 monotonic milliseconds and belong only to the exact NPC and current session/generation/playthrough. `seen_dead` means an earlier observed hostile was subsequently visually observed dead; it establishes no killer, victory or continued visibility. Stop, load and retirement clear the local cache. None of these identities becomes audience, witness membership or a generic historical payload. Unsupported/VR clients omit the field. Empty arrays do not prove safety or absence of enemies.

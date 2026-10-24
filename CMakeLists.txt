@@ -35,6 +35,7 @@ if(SYNTH_BUILD_CORE_TESTS)
     audio
     presentation
     media-fetch
+    radio
     adapters)
   set(_synth_test_sources
     "tests/native/native_tests.cpp"
@@ -52,6 +53,7 @@ if(SYNTH_BUILD_CORE_TESTS)
     "tests/audio/audio_tests.cpp"
     "tests/presentation/presentation_tests.cpp"
     "tests/media_fetch/media_fetch_tests.cpp"
+    "tests/radio/radio_tests.cpp"
     "tests/adapters/adapters_tests.cpp")
 
   set(_synth_protocol_native_source "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_native/protocol_native_tests.cpp")
@@ -73,6 +75,7 @@ if(SYNTH_BUILD_CORE_TESTS)
     if(_synth_test_suite STREQUAL "native" OR
        _synth_test_suite STREQUAL "tasks" OR
        _synth_test_suite STREQUAL "lifecycle" OR
+       _synth_test_suite STREQUAL "radio" OR
        _synth_test_suite STREQUAL "adapters")
       target_link_libraries("${_synth_test_target}" PRIVATE Threads::Threads)
     endif()
@@ -88,6 +91,18 @@ if(SYNTH_BUILD_CORE_TESTS)
     endif()
     set_tests_properties("${_synth_test_target}" PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
   endforeach()
+
+  if(WIN32)
+    # Exercise the production playback header with deterministic fake device APIs.
+    add_executable(synth-native-playback-tests "tests/audio/native_playback_tests.cpp")
+    target_include_directories(synth-native-playback-tests BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/fake_windows")
+    target_link_libraries(synth-native-playback-tests PRIVATE synth_core)
+    if(MSVC)
+      target_compile_options(synth-native-playback-tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME synth-native-playback-tests COMMAND synth-native-playback-tests)
+    set_tests_properties(synth-native-playback-tests PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
 endif()
 
 if(SYNTH_BUILD_VR)
@@ -170,5 +185,9 @@ if(SYNTH_BUILD_VR)
     shell32 windowscodecs ole32 oleaut32 gdi32)
   target_compile_definitions(SYNTHVR PRIVATE SYNTH_WITH_F4SEVR=1 WIN32_LEAN_AND_MEAN NOMINMAX
     _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+  if(MSVC)
+    # The shared session templates exceed the standard COFF section limit.
+    target_compile_options(SYNTHVR PRIVATE /bigobj)
+  endif()
   set_target_properties(SYNTHVR PROPERTIES PREFIX "" OUTPUT_NAME "SYNTHVR")
 endif()

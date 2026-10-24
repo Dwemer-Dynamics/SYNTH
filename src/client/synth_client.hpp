@@ -129,6 +129,16 @@ public:
     [[nodiscard]] bool rechat_scene_ready() const noexcept {
         return rechat_scene_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool uses_ambient_npc_contract() const noexcept {
+        const auto has = [&](std::string_view capability) {
+            return std::ranges::find(options_.capabilities, capability) != options_.capabilities.end();
+        };
+        return uses_rechat_scene_contract() && has("dialogue.ambient_npc") &&
+            has("dialogue.turn_ownership") && has("dialogue.listener_identity");
+    }
+    [[nodiscard]] bool ambient_npc_ready() const noexcept {
+        return ambient_npc_negotiated_.load(std::memory_order_acquire) && rechat_scene_ready();
+    }
     [[nodiscard]] bool quest_events_ready() const noexcept {
         return quest_events_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -140,6 +150,15 @@ public:
     }
     [[nodiscard]] bool extended_inventory_ready() const noexcept {
         return extended_inventory_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool combat_targets_ready() const noexcept {
+        return combat_targets_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool combat_contacts_ready() const noexcept {
+        return combat_contacts_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
+    }
+    [[nodiscard]] bool enemy_awareness_ready() const noexcept {
+        return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
     }
     [[nodiscard]] bool action_inventory_ready() const noexcept {
         return action_inventory_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
@@ -226,6 +245,10 @@ public:
             context_sequence_ = 0;
             publication_sequence_ = 0;
             rechat_scene_negotiated_.store(false, std::memory_order_release);
+            combat_targets_negotiated_.store(false, std::memory_order_release);
+            combat_contacts_negotiated_.store(false, std::memory_order_release);
+            enemy_awareness_negotiated_.store(false, std::memory_order_release);
+            ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
             player_events_negotiated_.store(false, std::memory_order_release);
             actor_events_negotiated_.store(false, std::memory_order_release);
@@ -254,8 +277,25 @@ public:
                 std::holds_alternative<protocol_native::Start>(outcome.lines.front().payload) &&
                 std::holds_alternative<protocol_native::End>(outcome.lines.back().payload);
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
+            combat_targets_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->combat_targets &&
+                std::ranges::find(options_.capabilities, "context.combat_targets") != options_.capabilities.end(),
+                std::memory_order_release);
+            combat_contacts_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->combat_contacts && status->combat_targets &&
+                std::ranges::find(options_.capabilities,"context.combat_contacts")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"context.combat_targets")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"dialogue.turn_ownership")!=options_.capabilities.end(),std::memory_order_release);
+            enemy_awareness_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->enemy_awareness && status->combat_targets &&
+                std::ranges::find(options_.capabilities,"context.enemy_awareness")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"context.combat_targets")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"dialogue.turn_ownership")!=options_.capabilities.end(),std::memory_order_release);
             rechat_scene_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->rechat_scene && uses_rechat_scene_contract(),
+                std::memory_order_release);
+            ambient_npc_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->ambient_npc && uses_ambient_npc_contract(),
                 std::memory_order_release);
             const bool player_caps_support = supported_init && status->code == "init_player_caps_inventory_accepted" && uses_player_caps_contract();
             player_caps_negotiated_.store(player_caps_support, std::memory_order_release);
@@ -333,6 +373,9 @@ public:
         protocol_native::EventContext publication_context;
         bool tracking_supported{};
         bool inventory_supported{};
+        bool combat_targets_supported{};
+        bool combat_contacts_supported{};
+        bool enemy_awareness_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
@@ -356,6 +399,9 @@ public:
             publication_context = context(request_id, turn_id);
             tracking_supported = quest_tracking_ready();
             inventory_supported = extended_inventory_ready();
+            combat_targets_supported = combat_targets_ready();
+            combat_contacts_supported = combat_contacts_ready();
+            enemy_awareness_supported = enemy_awareness_ready();
         }
         // Game-thread readiness/interruption shares state_mutex_: do not hold it for snapshot copies or encoding.
         // request_mutex_ still serializes publication and initialization; send_event rechecks cancellation/retirement.
@@ -364,6 +410,9 @@ public:
         auto negotiated_states = actor_states;
         const std::size_t inventory_limit = inventory_supported ? 512 : 32;
         for (auto& state : negotiated_states) {
+            if (!combat_targets_supported) state.combat_target.reset();
+            if (!combat_contacts_supported) state.combat_contacts.reset();
+            if (!enemy_awareness_supported) state.enemy_awareness.reset();
             if (state.inventory.size() <= inventory_limit) continue;
             state.inventory.resize(inventory_limit);
             state.inventory_observation = "partial";
@@ -475,6 +524,8 @@ public:
                 throw std::invalid_argument{"quest reactions were not negotiated"};
             if (kind == "player_reaction" && !player_reactions_ready())
                 throw std::invalid_argument{"player reactions were not negotiated"};
+            if (kind == "bored" && std::ranges::find(options_.capabilities, "dialogue.ambient_npc") != options_.capabilities.end()
+                && !ambient_npc_ready()) throw std::invalid_argument{"ambient NPC exchange was not negotiated"};
             if (kind == "auto_greeting" && (!game_time_ticks || *game_time_ticks == 0)) {
                 throw std::invalid_argument{"auto greeting requires Fallout game time"};
             }
@@ -1156,6 +1207,10 @@ private:
     std::atomic_bool player_events_negotiated_{};
     std::atomic_bool actor_events_negotiated_{};
     std::atomic_bool extended_inventory_negotiated_{};
+    std::atomic_bool combat_targets_negotiated_{};
+    std::atomic_bool combat_contacts_negotiated_{};
+    std::atomic_bool enemy_awareness_negotiated_{};
+    std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};
     std::atomic_bool transfer_negotiated_{};

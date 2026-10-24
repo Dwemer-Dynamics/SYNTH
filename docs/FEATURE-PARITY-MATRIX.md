@@ -1,5 +1,13 @@
 # SYNTH feature parity matrix
 
+## Current testing candidate
+
+| Feature | Flat | VR |
+|---|---|---|
+| Dialogue Wait Here / Release Wait | Connected to existing 90-second controller; gameplay return check open | Native wait unsupported; capabilities absent |
+| Idle NPC exchange | Fresh two-NPC capture, acknowledged server extension and player-input priority; gameplay open | Same shared policy with fresh HMD requirement; headset acceptance open |
+| Silent open microphone | Passive capture permits idle/continued NPC exchange; detected speech still interrupts | Separate headset return check open |
+
 ## CHIM queue parity (2026-09-13)
 
 IMPLEMENTED / MANUAL ACCEPTANCE OPEN: one bounded speculative WAV is prepared on

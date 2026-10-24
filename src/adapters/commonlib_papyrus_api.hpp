@@ -3,6 +3,7 @@
 #include "integration/papyrus_requests.hpp"
 #if !defined(SYNTH_WITH_F4SEVR)
 #include "adapters/flat_wait_package.hpp"
+#include "adapters/commonlib_radio_probe_api.hpp"
 #endif
 
 namespace synth::adapters::commonlib {
@@ -43,6 +44,7 @@ inline bool bind_papyrus_api(RE::BSScript::IVirtualMachine* vm) noexcept try {
     bound &= bind("OpenPrompt", papyrus_open_prompt);
 #if !defined(SYNTH_WITH_F4SEVR)
     bound &= FlatWaitPackage::bind(*vm);
+    bound &= RadioProbeAPI::bind(*vm);
 #endif
 #if defined(SYNTH_WITH_F4SEVR)
     spdlog::info("SYNTH Papyrus native registration complete: {}", bound);

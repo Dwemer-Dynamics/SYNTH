@@ -19,7 +19,10 @@ enum class ConversationStage {
     prefetch_cancelled, prefetch_expired, prefetch_parent_discarded, prefetch_overflow, prefetch_incomplete,
     media_prepare_started, media_prepared, media_reused, media_failed,
     continuation_no_candidate, continuation_private, continuation_budget_exhausted, continuation_ineligible,
-    continuation_complete, continuation_failed, continuation_queue_full, continuation_scene_rejected
+    continuation_complete, continuation_failed, continuation_queue_full, continuation_scene_rejected,
+    presentation_missing_capture, presentation_owner_changed, presentation_stale_capture,
+    presentation_scene_changed, presentation_actor_missing, presentation_actor_identity_changed,
+    presentation_actor_unavailable, presentation_actor_out_of_range, presentation_actor_cancelled
 };
 
 [[nodiscard]] inline std::string_view stage_name(ConversationStage stage) noexcept {
@@ -29,7 +32,10 @@ enum class ConversationStage {
         "prefetch_cancelled","prefetch_expired","prefetch_parent_discarded","prefetch_overflow","prefetch_incomplete",
         "media_prepare_started","media_prepared","media_reused","media_failed",
         "continuation_no_candidate","continuation_private","continuation_budget_exhausted","continuation_ineligible",
-        "continuation_complete","continuation_failed","continuation_queue_full","continuation_scene_rejected"};
+        "continuation_complete","continuation_failed","continuation_queue_full","continuation_scene_rejected",
+        "presentation_missing_capture","presentation_owner_changed","presentation_stale_capture",
+        "presentation_scene_changed","presentation_actor_missing","presentation_actor_identity_changed",
+        "presentation_actor_unavailable","presentation_actor_out_of_range","presentation_actor_cancelled"};
     const auto index = static_cast<unsigned>(stage);
     return index < std::size(names) ? names[index] : "invalid";
 }

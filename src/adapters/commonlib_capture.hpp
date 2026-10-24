@@ -34,6 +34,7 @@
 
 namespace synth::adapters::commonlib {
 
+inline std::function<bool(std::uint32_t)> conversation_hold_observer;
 inline constexpr std::size_t maximum_nearby_actors = 64;
 #if defined(SYNTH_WITH_F4SEVR)
 inline constexpr std::size_t maximum_inventory_items = 32;
@@ -303,6 +304,34 @@ private:
 [[nodiscard]] inline std::string origin_plugin(const RE::TESForm& form) {
     const auto* file = form.GetFile(0);
     return file == nullptr ? std::string{} : std::string{file->GetFilename()};
+}
+
+// Lightweight active-clip capture. A loaded actor in the player's current physical area is required;
+// the immutable dialogue snapshot never substitutes for a missing current speaker or camera.
+[[nodiscard]] inline std::optional<runtime::RuntimeSpeechSpatial> speech_spatial_snapshot(const runtime::RuntimeSpeechOwner& owner) {
+#if !defined(SYNTH_WITH_F4SEVR)
+    const auto capture_owner = FlatPickedReference::stamp();
+#endif
+    const auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    const auto* camera = RE::PlayerCamera::GetSingleton();
+    if (!manager || manager->currentPlayerID == 0 || !player || !player->Get3D() || !camera || !camera->cameraRoot ||
+        owner.cancellation.is_cancelled() || owner.speaker.playthrough_id != playthrough_id() || menu_mode_active()) return {};
+    auto* actor = RE::TESForm::GetFormByID<RE::Actor>(owner.speaker.form_id);
+    if (!actor || actor == player || actor->IsDead(false) || actor->IsDisabled() || actor->IsDeleted() || !actor->Get3D() ||
+        origin_plugin(*actor) != owner.speaker.origin_plugin) return {};
+    const auto* player_cell = player->GetParentCell();
+    const auto* actor_cell = actor->GetParentCell();
+    if (!player_cell || !actor_cell || (player_cell != actor_cell && (player_cell->IsInterior() || actor_cell->IsInterior() ||
+        !player_cell->worldSpace || player_cell->worldSpace != actor_cell->worldSpace))) return {};
+    try {
+        auto result = runtime::RuntimeSpeechSpatial{point(actor->GetPosition()), pose(camera->cameraRoot->world), player_cell->IsInterior()};
+        if (!result.speaker_position.finite() || owner.cancellation.is_cancelled()) return {};
+#if !defined(SYNTH_WITH_F4SEVR)
+        if (capture_owner != FlatPickedReference::stamp()) return {};
+#endif
+        return result;
+    } catch (const std::invalid_argument&) { return {}; }
 }
 
 // One guarded scalar read; do not add discovery, inventory, quests, camera or deep actor capture here.
@@ -1071,6 +1100,185 @@ struct NearbyReferenceSnapshots final {
     return result;
 }
 
+// A bounded game-thread read of this actor's target, independent of the player's hostile actor list.
+// Resolve one pinned-runtime handle and copy identity only; never scan or deep-capture its inventory.
+[[nodiscard]] inline core::CombatTargetSnapshot combat_target_snapshot(const RE::Actor& owner,
+                                                                       const std::string& playthrough) {
+    if (owner.IsDead(false) || const_cast<RE::Actor&>(owner).IsDisabled()) return {};
+    if (!owner.IsInCombat()) return {"none", std::nullopt};
+    const auto handle = owner.currentCombatTarget;
+    if (!handle) return {"none", std::nullopt};
+    const auto target = handle.get();
+    if (!target || target.get() == &owner || target->IsDead(false) || target->IsDisabled() ||
+        target->IsDeleted() || !target->Get3D()) return {};
+    // A combat-active player can retain a friendly focus handle. Only this owner's
+    // hostile relation attests that its selected handle is an opponent.
+    if (!const_cast<RE::Actor&>(owner).GetHostileToActor(target.get())) return {};
+    const auto* owner_cell = owner.GetParentCell();
+    const auto* target_cell = target->GetParentCell();
+    if (!owner_cell || !target_cell || (owner_cell != target_cell &&
+        (owner_cell->IsInterior() || target_cell->IsInterior() || !owner_cell->worldSpace ||
+         owner_cell->worldSpace != target_cell->worldSpace))) return {};
+    auto plugin = origin_plugin(*target);
+    if (plugin.empty() && target->GetFormID() == 0x14) plugin = "Fallout4.esm";
+    auto name = bounded_label(target->GetDisplayFullName());
+    if (name.empty()) return {};  // An editor/form fallback is not a displayed opponent name.
+    auto race = target->race ? bounded_label(target->race->GetFullName()) : std::string{};
+    if (race.empty() && target->race) race = bounded_label(target->race->formEditorID.c_str());
+    core::CombatantIdentity identity{target->GetFormID(), std::move(plugin), playthrough, std::move(name), std::move(race)};
+    if (!identity.valid() || owner.currentCombatTarget != handle || !owner.IsInCombat()) return {};
+    return {"identified", std::move(identity)};
+}
+
+// Flat-only selected-speaker visual evidence. Hostile discovery supplies candidates,
+// not knowledge; this NPC must visually detect each live incoming attacker now.
+[[nodiscard]] inline std::vector<core::CombatContactSnapshot> combat_contacts_snapshot(
+    const RE::Actor& observer, const std::string& playthrough, RE::PlayerCharacter* player) {
+    std::vector<core::CombatContactSnapshot> result;
+#if !defined(SYNTH_WITH_F4SEVR)
+    if (!player || &observer == player || observer.IsDead(false) ||
+        const_cast<RE::Actor&>(observer).IsDisabled() || !observer.Get3D() ||
+        (!observer.IsInCombat() && !player->IsInCombat())) return result;
+    auto* lists=RE::ProcessLists::GetSingleton();
+    if (!lists) return result;
+    RE::BSScrapArray<RE::ActorHandle> candidates;
+    (void)lists->AreHostileActorsNear(&candidates);
+    const auto copy_identity=[&](const RE::Actor& value) {
+        auto plugin=origin_plugin(value);
+        if (plugin.empty() && value.GetFormID()==0x14) plugin="Fallout4.esm";
+        auto race=value.race ? bounded_label(value.race->formEditorID.c_str()) : std::string{};
+        return core::CombatantIdentity{value.GetFormID(),std::move(plugin),playthrough,
+            bounded_label(const_cast<RE::Actor&>(value).GetDisplayFullName()),std::move(race)};
+    };
+    const auto same_area=[&](const RE::Actor& value) {
+        const auto* a=observer.GetParentCell(); const auto* b=value.GetParentCell();
+        return a && b && (a==b || (!a->IsInterior() && !b->IsInterior() && a->worldSpace && a->worldSpace==b->worldSpace));
+    };
+    const auto observer_position=point(observer.GetPosition());
+    std::size_t inspected{};
+    for (const auto& handle:candidates) {
+        if (++inspected>64 || result.size()==8) break;
+        const auto attacker=handle.get();
+        if (!attacker || attacker.get()==&observer || attacker.get()==player || attacker->IsDead(false) ||
+            attacker->IsDisabled() || attacker->IsDeleted() || !attacker->Get3D() ||
+            !attacker->IsInCombat() || !same_area(*attacker)) continue;
+        const auto incoming=attacker->currentCombatTarget;
+        const auto target=incoming.get();
+        if (!target || (target.get()!=&observer && target.get()!=player) ||
+            !attacker->GetHostileToActor(target.get())) continue;
+        const auto position=point(attacker->GetPosition());
+        const auto dx=position.x-observer_position.x,dy=position.y-observer_position.y,dz=position.z-observer_position.z;
+        const auto distance=std::sqrt(dx*dx+dy*dy+dz*dz);
+        if (!std::isfinite(distance) || distance>2000.0) continue;
+        RE::DetectionData detection{};
+        const_cast<RE::Actor&>(observer).CalculateDetectionFormula(attacker.get(),&detection);
+        if (!detection.LOS || detection.detectionLevel.visualLevel<=0 || detection.targetInvisible) continue;
+        core::CombatContactSnapshot contact{copy_identity(*attacker),copy_identity(*target),distance,true,true,true};
+        if (!contact.valid_for(observer.GetFormID(),origin_plugin(observer),playthrough,true,false) ||
+            attacker->currentCombatTarget!=incoming || !attacker->IsInCombat() || attacker->IsDead(false)) continue;
+        if (std::ranges::any_of(result,[&](const auto& item) { return item.actor.form_id==contact.actor.form_id &&
+            item.actor.origin_plugin==contact.actor.origin_plugin; })) continue;
+        result.push_back(std::move(contact));
+    }
+#else
+    (void)observer; (void)playthrough; (void)player;
+#endif
+    return result;
+}
+
+// Broader flat-only nearby enemy observations, always owned by this selected NPC.
+// Process-list handles are discovery candidates only: every accepted actor needs positive NPC visual detection.
+[[nodiscard]] inline core::EnemyAwarenessSnapshot enemy_awareness_snapshot(
+    const RE::Actor& observer,const std::string& playthrough,RE::PlayerCharacter* player) {
+    core::EnemyAwarenessSnapshot result;
+#if !defined(SYNTH_WITH_F4SEVR)
+    if (!player || &observer==player || observer.IsDead(false) ||
+        const_cast<RE::Actor&>(observer).IsDisabled() || !observer.Get3D()) return result;
+    auto* lists=RE::ProcessLists::GetSingleton();
+    if (!lists) return result;
+    result.available=true;
+    const auto observer_position=point(observer.GetPosition());
+    const auto copy_identity=[&](const RE::Actor& value) {
+        auto plugin=origin_plugin(value);
+        auto race=value.race ? bounded_label(value.race->formEditorID.c_str()) : std::string{};
+        return core::CombatantIdentity{value.GetFormID(),std::move(plugin),playthrough,
+            bounded_label(const_cast<RE::Actor&>(value).GetDisplayFullName()),std::move(race)};
+    };
+    const auto same_area=[&](const RE::Actor& value) {
+        const auto* a=observer.GetParentCell();const auto* b=value.GetParentCell();
+        return a && b && (a==b || (!a->IsInterior() && !b->IsInterior() && a->worldSpace && a->worldSpace==b->worldSpace));
+    };
+    const auto consider=[&](const auto& handle) {
+        const auto actor=handle.get();
+        if (!actor || actor.get()==&observer || actor.get()==player || actor->IsDisabled() || actor->IsDeleted() ||
+            !actor->Get3D() || !same_area(*actor)) return;
+        const auto position=point(actor->GetPosition());
+        const auto dx=position.x-observer_position.x,dy=position.y-observer_position.y,dz=position.z-observer_position.z;
+        const auto distance=std::sqrt(dx*dx+dy*dy+dz*dz);
+        if (!std::isfinite(distance) || distance>2000.0) return;
+        RE::DetectionData detection{};
+        const_cast<RE::Actor&>(observer).CalculateDetectionFormula(actor.get(),&detection);
+        if (!detection.LOS || detection.detectionLevel.visualLevel<=0 || detection.targetInvisible) return;
+        auto identity=copy_identity(*actor);
+        if (!identity.valid()) return;
+        if (actor->IsDead(false)) {
+            if (result.observed_dead.size()<8 && !std::ranges::any_of(result.observed_dead,[&](const auto& old){return core::same_enemy(old,identity);}))
+                result.observed_dead.push_back(std::move(identity));
+            return;
+        }
+        bool hostile=actor->GetHostileToActor(const_cast<RE::Actor*>(&observer)) || actor->GetHostileToActor(player);
+        if (!hostile && actor->IsInCombat()) {
+            const auto target=actor->currentCombatTarget.get();
+            // The copied teammate flag is the same pinned native IsPlayerTeammate bit used in actor_snapshot.
+            hostile=target && target.get()!=actor.get() && !target->IsDead(false) && !target->IsDisabled() &&
+                !target->IsDeleted() && target->Get3D() && same_area(*target) &&
+                (target->niFlags.flags & (1u<<26))!=0 && actor->GetHostileToActor(target.get());
+        }
+        if (!hostile || result.current.size()==8 ||
+            std::ranges::any_of(result.current,[&](const auto& old){return core::same_enemy(old.actor,identity);})) return;
+        result.current.push_back({std::move(identity),distance,true,actor->IsInCombat(),true});
+    };
+    // Share at most 64 inspections across populated process tiers; rotate slices with monotonic time
+    // so a large high tier cannot permanently hide a companion's enemy or a low-tier loaded actor.
+    const std::array<std::size_t,4> sizes{lists->highActorHandles.size(),lists->middleHighActorHandles.size(),
+        lists->middleLowActorHandles.size(),lists->lowActorHandles.size()};
+    const auto epoch=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(core::SnapshotClock::now().time_since_epoch()).count());
+    const auto counts=core::enemy_awareness_scan_counts(sizes);
+    std::size_t tier{};
+    const auto scan=[&](const auto& handles) {
+        const auto size=static_cast<std::size_t>(handles.size());
+        const auto count=counts[tier++];
+        if (!size || !count) return;
+        auto index=static_cast<std::size_t>((epoch*count)%size);
+        for (std::size_t i=0;i<count;++i) {
+            consider(handles[static_cast<decltype(handles.size())>(index)]);
+            if (++index==size) index=0;
+        }
+    };
+    scan(lists->highActorHandles);scan(lists->middleHighActorHandles);
+    scan(lists->middleLowActorHandles);scan(lists->lowActorHandles);
+#else
+    (void)observer;(void)playthrough;(void)player;
+#endif
+    return result;
+}
+
+// Capture only the known observer's bounded evidence; no inventory, faction, quest or world snapshot.
+[[nodiscard]] inline core::EnemyAwarenessSnapshot background_enemy_awareness(const core::CombatantIdentity& owner) {
+#if !defined(SYNTH_WITH_F4SEVR)
+    if (owner.playthrough_id!=playthrough_id() || menu_mode_active()) return {};
+    auto* player=RE::PlayerCharacter::GetSingleton();
+    auto* actor=RE::TESForm::GetFormByID<RE::Actor>(owner.form_id);
+    if (!player || !actor || actor==player || actor->IsDead(false) || actor->IsDisabled() || actor->IsDeleted() ||
+        !actor->Get3D() || origin_plugin(*actor)!=owner.origin_plugin) return {};
+    const auto* a=actor->GetParentCell();const auto* b=player->GetParentCell();
+    if (!a || !b || (a!=b && (a->IsInterior() || b->IsInterior() || !a->worldSpace || a->worldSpace!=b->worldSpace))) return {};
+    return enemy_awareness_snapshot(*actor,owner.playthrough_id,player);
+#else
+    (void)owner;return {};
+#endif
+}
+
 [[nodiscard]] inline core::ActorSnapshot actor_snapshot(const RE::Actor& actor,
                                                         const std::string& playthrough,
                                                         RE::PlayerCharacter* player,
@@ -1146,7 +1354,11 @@ struct NearbyReferenceSnapshots final {
             actor.DoGetSprinting(), actor.talkingToPlayer != 0,
             RE::PowerArmor::ActorInPowerArmor(actor), std::move(package), base_form_id,
             std::move(base_plugin), std::move(inventory.second), std::move(faction_completeness),
-            health.has_value(), action_points.has_value(), conversation_area};
+            health.has_value(), action_points.has_value(), conversation_area,
+            combat_target_snapshot(actor, playthrough),
+            include_details ? combat_contacts_snapshot(actor,playthrough,player) : std::vector<core::CombatContactSnapshot>{},
+            include_details ? enemy_awareness_snapshot(actor,playthrough,player) : core::EnemyAwarenessSnapshot{},
+            conversation_hold_observer && conversation_hold_observer(actor.GetFormID())};
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.

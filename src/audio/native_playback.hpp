@@ -2,6 +2,8 @@
 
 #include "core/cancellation.hpp"
 #include "audio/speech_animation.hpp"
+#include "audio/speech_lease.hpp"
+#include "audio/active_spatial.hpp"
 #include "runtime/fallout_runtime.hpp"
 #include "presentation/dialogue_presentation.hpp"
 
@@ -17,6 +19,7 @@
 #include <xaudio2.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
@@ -50,6 +53,8 @@ struct NativeClip final {
     std::shared_ptr<const runtime::RuntimeFacingRequest> facing;
     presentation::DialogueCaptions::Caption caption;
     std::shared_ptr<const SpeechAnimation> lip_animation;
+    std::optional<runtime::RuntimeSpeechOwner> speech_owner;
+    std::optional<SpatialPlaybackSettings> spatial;
 };
 
 struct PlaybackFrame final {
@@ -107,67 +112,158 @@ public:
     }
 
     // Called on the game thread to retire completed voices and begin the next clip.
-    [[nodiscard]] bool pump(std::uint64_t current_generation,
-                            presentation::DialogueCaptions::Caption* failed_caption = nullptr) noexcept {
-        std::scoped_lock lock{mutex_};
-        if (terminal_) return true;
-        if (engine_state_ == EngineState::failed) {
-            // Drain one failed clip per frame instead of discarding its dialogue text.
-            if (!queued_.empty()) {
-                if (failed_caption) *failed_caption = queued_.front().caption;
-                queued_.pop_front();
+    [[nodiscard]] bool pump(std::uint64_t current_generation, const SpeechOwnerPump& owner_pump,
+                            presentation::DialogueCaptions::Caption* failed_caption = nullptr,
+                            core::SnapshotClock::time_point now = core::SnapshotClock::now()) noexcept {
+        try {
+            std::optional<NativeClip> playing;
+            std::optional<NativeClip> pending;
+            bool report_failure{};
+            {
+                std::scoped_lock lock{mutex_};
+                if (engine_state_ == EngineState::failed && !terminal_) {
+                    // Drain one failed clip per frame instead of discarding its dialogue text.
+                    if (!queued_.empty()) {
+                        if (failed_caption) *failed_caption = queued_.front().caption;
+                        queued_.pop_front();
+                    }
+                    if (!engine_failure_reported_) {
+                        engine_failure_reported_ = true;
+                        report_failure = true;
+                    }
+                } else if (engine_state_ == EngineState::ready && !terminal_) {
+                    if (active_ && (active_->clip.generation != current_generation ||
+                        (active_->clip.caption && active_->clip.caption->scene_rejected()) ||
+                        (active_->clip.cancellation.generation().valid() && active_->clip.cancellation.is_cancelled()))) {
+                        destroy_active();
+                    }
+                    if (active_) {
+                        if (active_->mix_failed) {
+                            if (failed_caption) *failed_caption = active_->clip.caption;
+                            destroy_active();
+                            report_failure = true;
+                        }
+                    }
+                    if (active_) {
+                        if (active_->clip.caption && !active_->clip.caption->scene_ready(core::SnapshotClock::now())) {
+                            if (active_->running) (void)active_->voice->Stop();
+                            active_->running = false;
+                            if (active_->clip.spatial) begin_spatial_wait(now);
+                            active_->scene_paused = true;
+                        } else {
+                            XAUDIO2_VOICE_STATE state{};
+                            active_->voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+                            if (state.BuffersQueued == 0) destroy_active(active_->ever_started);
+                        }
+                    }
+                    if (active_ && active_->awaiting_pose) {
+                        if (!paused_ && !active_->scene_paused && now > active_->wait_sample)
+                            active_->pose_wait_elapsed += now - active_->wait_sample;
+                        active_->wait_sample = now;
+                        if (active_->pose_wait_elapsed >= std::chrono::seconds{2}) {
+                            if (failed_caption) *failed_caption = active_->clip.caption;
+                            destroy_active();
+                            report_failure = true;
+                        }
+                    }
+                    while (!queued_.empty() && (queued_.front().generation != current_generation ||
+                        (queued_.front().caption && queued_.front().caption->scene_rejected()) ||
+                        (queued_.front().cancellation.generation().valid() && queued_.front().cancellation.is_cancelled()))) {
+                        if (queued_.front().caption)
+                            queued_.front().caption->mark_delivery(presentation::DialogueDelivery::discarded);
+                        queued_.pop_front();
+                    }
+                    if (active_) playing = active_->clip;
+                    else if (!paused_ && !queued_.empty() && (!queued_.front().caption ||
+                        queued_.front().caption->scene_ready(core::SnapshotClock::now()))) pending = queued_.front();
+                }
             }
-            if (!engine_failure_reported_) {
-                engine_failure_reported_ = true;
+            // Actor access is outside the playback mutex, and always precedes audio start/resume.
+            if (playing) {
+                if (npc_clip(*playing) && playing->speech_owner &&
+                    !speech_lease_.maintain(*playing->speech_owner, owner_pump)) {
+                    {
+                        std::scoped_lock lock{mutex_};
+                        if (active_ && same_clip(active_->clip, *playing)) {
+                            if (failed_caption) *failed_caption = active_->clip.caption;
+                            destroy_active();
+                        }
+                    }
+                    (void)speech_lease_.release(owner_pump);
+                    return false;
+                }
+                bool still_playing{};
+                {
+                    std::scoped_lock lock{mutex_};
+                    still_playing = active_ && same_clip(active_->clip, *playing);
+                    if (still_playing && !paused_ && active_->scene_paused &&
+                        (!active_->clip.caption || active_->clip.caption->scene_ready(core::SnapshotClock::now()))) {
+                        if (active_->clip.spatial) {
+                            // A fresh current pose, applied after this pump, owns every spatial resume.
+                            active_->scene_paused = false;
+                            begin_spatial_wait(now);
+                        } else if (FAILED(active_->voice->Start())) {
+                            if (failed_caption) *failed_caption = active_->clip.caption;
+                            destroy_active();
+                            report_failure = true;
+                        } else { active_->scene_paused = false; active_->running = true; }
+                    }
+                }
+                if (still_playing && !report_failure) return true;
+            }
+            if (!speech_lease_.release(owner_pump)) return false;
+            if (report_failure) return false;
+            if (!pending) return true;
+            if (npc_clip(*pending) && (!pending->speech_owner ||
+                !speech_lease_.maintain(*pending->speech_owner, owner_pump))) {
+                {
+                    std::scoped_lock lock{mutex_};
+                    if (!queued_.empty() && same_clip(queued_.front(), *pending)) {
+                        if (failed_caption) *failed_caption = queued_.front().caption;
+                        queued_.pop_front();
+                    }
+                }
+                (void)speech_lease_.release(owner_pump);
                 return false;
             }
-            return true;
-        }
-        if (engine_state_ != EngineState::ready) return true;
-        if (active_) {
-            if (active_->clip.generation != current_generation ||
-                (active_->clip.caption && active_->clip.caption->scene_rejected()) ||
-                (active_->clip.cancellation.generation().valid() && active_->clip.cancellation.is_cancelled())) {
+            bool started{};
+            {
+                std::scoped_lock lock{mutex_};
+                // Admission can invalidate or replace a session; commit only the exact copied candidate.
+                if (!terminal_ && !paused_ && !active_ && !queued_.empty() &&
+                    same_clip(queued_.front(), *pending) && queued_.front().generation == current_generation &&
+                    !queued_.front().cancellation.is_cancelled() && (!queued_.front().caption ||
+                    queued_.front().caption->scene_ready(core::SnapshotClock::now()))) {
+                    auto clip = std::move(queued_.front());
+                    queued_.pop_front();
+                    try { start(std::move(clip), now); started = true; }
+                    catch (...) {
+                        destroy_active();
+                        if (failed_caption) *failed_caption = pending->caption;
+                        report_failure = true;
+                    }
+                }
+            }
+            if (!started && !speech_lease_.release(owner_pump)) return false;
+            return !report_failure;
+        } catch (...) {
+            {
+                std::scoped_lock lock{mutex_};
+                if (failed_caption && active_) *failed_caption = active_->clip.caption;
                 destroy_active();
-            } else if (paused_) {
-                return true;
             }
+            (void)speech_lease_.release(owner_pump);
+            return false;
         }
-        if (active_) {
-            if (active_->clip.caption && !active_->clip.caption->scene_ready(core::SnapshotClock::now())) {
-                if (!active_->scene_paused) (void)active_->voice->Stop();
-                active_->scene_paused = true;
-                return true;
-            }
-            if (active_->scene_paused) { (void)active_->voice->Start(); active_->scene_paused = false; }
-            XAUDIO2_VOICE_STATE state{};
-            active_->voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            if (state.BuffersQueued == 0) {
-                destroy_active(true);
-            }
-        }
-        while (!queued_.empty() && (queued_.front().generation != current_generation ||
-               (queued_.front().caption && queued_.front().caption->scene_rejected()) ||
-               (queued_.front().cancellation.generation().valid() && queued_.front().cancellation.is_cancelled()))) {
-            if (queued_.front().caption)
-                queued_.front().caption->mark_delivery(presentation::DialogueDelivery::discarded);
-            queued_.pop_front();
-        }
-        if (paused_) return true;
-        if (!queued_.empty() && queued_.front().caption &&
-            !queued_.front().caption->scene_ready(core::SnapshotClock::now())) return true;
-        if (!active_ && !queued_.empty()) {
-            auto clip = std::move(queued_.front());
-            queued_.pop_front();
-            const auto caption = clip.caption;
-            try {
-                start(std::move(clip));
-            } catch (...) {
-                destroy_active();
-                if (failed_caption) *failed_caption = caption;
-                return false;
-            }
-        }
+    }
+
+    // Must run before transferring a session to its coordinator. Destructors never touch actors.
+    [[nodiscard]] bool stop_on_game_thread(const SpeechOwnerPump& owner_pump, bool discard = false) noexcept {
+        if (ownership_retired_) return true;
+        // Close admission before retirement: late workers/old pumps cannot acquire or clear a replacement.
+        halt();
+        if (!speech_lease_.release(owner_pump, discard)) return false;
+        ownership_retired_ = true;
         return true;
     }
 
@@ -191,18 +287,20 @@ public:
         destroy_active();
     }
 
-    void set_paused(bool paused) noexcept {
+    void set_paused(bool paused, core::SnapshotClock::time_point now = core::SnapshotClock::now()) noexcept {
         std::scoped_lock lock{mutex_};
         if (terminal_ || paused_ == paused) return;
         paused_ = paused;
         if (!active_) return;
         if (paused_) {
-            (void)active_->voice->Stop();
-        } else if (!active_->clip.caption || active_->clip.caption->scene_ready(core::SnapshotClock::now())) {
-            (void)active_->voice->Start();
+            if (active_->running) (void)active_->voice->Stop();
+            active_->running = false;
+            if (active_->clip.spatial) begin_spatial_wait(now);
         } else {
+            // Resume belongs to pump, after current native speech ownership has been maintained.
             active_->scene_paused = true;
         }
+        if (active_->awaiting_pose) active_->wait_sample = now;
     }
 
     [[nodiscard]] bool paused() const noexcept {
@@ -230,7 +328,7 @@ public:
     // Returns the current native voice envelope for game-thread facial animation.
     [[nodiscard]] std::optional<PlaybackFrame> active_frame() const noexcept {
         std::scoped_lock lock{mutex_};
-        if (!active_ || paused_ || terminal_ || active_->clip.cancellation.is_cancelled() || (active_->clip.caption &&
+        if (!active_ || !active_->running || paused_ || active_->scene_paused || terminal_ || active_->clip.cancellation.is_cancelled() || (active_->clip.caption &&
             !active_->clip.caption->scene_ready(core::SnapshotClock::now()))) return std::nullopt;
         XAUDIO2_VOICE_STATE state{};
         active_->voice->GetState(&state);
@@ -246,7 +344,117 @@ public:
                              active_->clip.caption, mouth, active_->clip.utterance_id, active_->clip.cancellation};
     }
 
+    // No game objects leave the adapter. Capture the exact speaker after releasing this lock.
+    [[nodiscard]] std::optional<ActiveSpatialRequest> active_spatial_request(std::uint64_t generation) const {
+        std::unique_lock lock{mutex_, std::try_to_lock};
+        if (!lock.owns_lock() || !spatial_ready(generation)) return std::nullopt;
+        return ActiveSpatialRequest{playback_session_, active_->playback_token,
+                                    *active_->clip.speech_owner, *active_->clip.spatial};
+    }
+
+    // Missing/stale poses stop sample consumption. A fresh fenced pose owns initial Start and every resume.
+    [[nodiscard]] bool set_spatial_mix(const ActiveSpatialRequest& request,
+                                      const std::optional<SpatialMix>& mix, std::uint64_t generation,
+                                      core::SnapshotClock::time_point now = core::SnapshotClock::now()) noexcept {
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock() || !spatial_ready(generation) ||
+                request.playback_session != playback_session_ || request.playback_token != active_->playback_token ||
+                !same_speech_owner(request.owner, *active_->clip.speech_owner) ||
+                request.settings != *active_->clip.spatial || request.owner.cancellation.is_cancelled() ||
+                (mix && !mix->valid())) return false;
+            XAUDIO2_VOICE_STATE state{};
+            active_->voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+            if (state.BuffersQueued == 0) return false;
+            if (active_->awaiting_pose && now >= active_->wait_sample &&
+                active_->pose_wait_elapsed + (now - active_->wait_sample) >= std::chrono::seconds{2}) {
+                (void)active_->voice->Stop();
+                active_->running = false;
+                active_->mix_failed = true;
+                return false;
+            }
+            if (!mix) {
+                if (active_->running && FAILED(active_->voice->Stop())) {
+                    active_->running = false;
+                    active_->mix_failed = true;
+                    return false;
+                }
+                active_->running = false;
+                begin_spatial_wait(now);
+                return true;
+            }
+            const auto next = *mix;
+            const auto matrix = point_source_matrix(active_->signal.channels, destination_channels_,
+                                                    destination_channel_mask_, next.pan);
+            if (!matrix || FAILED(active_->voice->SetOutputMatrix(mastering_, active_->signal.channels,
+                    destination_channels_, matrix->data())) || FAILED(active_->voice->SetVolume(next.volume))) {
+                (void)active_->voice->Stop();
+                active_->running = false;
+                active_->mix_failed = true; // pump retires ownership and enqueues truthful text fallback.
+                return false;
+            }
+            if (!active_->running) {
+                if (FAILED(active_->voice->Start())) {
+                    (void)active_->voice->Stop();
+                    active_->mix_failed = true;
+                    return false;
+                }
+                active_->running = true;
+                active_->ever_started = true;
+                if (active_->clip.caption) active_->clip.caption->mark_delivery(presentation::DialogueDelivery::playing);
+            }
+            active_->awaiting_pose = false;
+            active_->pose_wait_elapsed = core::SnapshotClock::duration{};
+            return true;
+        } catch (...) {
+            // An allocation/API exception must not leave a previous spatial mix consuming speech.
+            try {
+                std::scoped_lock lock{mutex_};
+                if (active_ && request.playback_session == playback_session_ &&
+                    request.playback_token == active_->playback_token && active_->clip.speech_owner &&
+                    same_speech_owner(request.owner, *active_->clip.speech_owner)) {
+                    (void)active_->voice->Stop();
+                    active_->running = false;
+                    active_->mix_failed = true;
+                }
+            } catch (...) {}
+            return false;
+        }
+    }
+
 private:
+    void begin_spatial_wait(core::SnapshotClock::time_point now) noexcept {
+        if (active_->awaiting_pose) return;
+        active_->awaiting_pose = true;
+        active_->pose_wait_elapsed = core::SnapshotClock::duration{};
+        active_->wait_sample = now;
+    }
+
+    [[nodiscard]] bool spatial_ready(std::uint64_t generation) const noexcept {
+        return active_ && !terminal_ && !paused_ && !active_->scene_paused && !active_->mix_failed && active_->clip.spatial &&
+            active_->clip.speech_owner && npc_clip(active_->clip) && active_->clip.generation == generation &&
+            !active_->clip.cancellation.is_cancelled() &&
+            (!active_->clip.caption || active_->clip.caption->scene_ready(core::SnapshotClock::now()));
+    }
+
+    [[nodiscard]] static std::uint64_t next_playback_session() {
+        static std::atomic<std::uint64_t> next{1};
+        auto value = next.load(std::memory_order_relaxed);
+        do {
+            if (value == std::numeric_limits<std::uint64_t>::max())
+                throw std::overflow_error{"audio playback session exhausted"};
+        } while (!next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed));
+        return value;
+    }
+    [[nodiscard]] static bool npc_clip(const NativeClip& clip) noexcept {
+        return clip.speaker_id != "narrator" && (!clip.speech_owner || clip.speech_owner->speaker.form_id != 0x14);
+    }
+
+    [[nodiscard]] static bool same_clip(const NativeClip& left, const NativeClip& right) noexcept {
+        return left.generation == right.generation && left.request_id == right.request_id &&
+            left.turn_id == right.turn_id && left.utterance_id == right.utterance_id &&
+            left.speaker_id == right.speaker_id && left.bytes == right.bytes;
+    }
     enum class EngineState : unsigned char { idle, initializing, ready, failed };
 
     struct WaveView final {
@@ -275,6 +483,10 @@ private:
         IXAudio2SourceVoice* voice{};
         WaveSignal signal;
         bool scene_paused{};
+        std::uint64_t playback_token{};
+        bool running{}, ever_started{}, awaiting_pose{}, mix_failed{};
+        core::SnapshotClock::time_point wait_sample{};
+        core::SnapshotClock::duration pose_wait_elapsed{};
     };
 
     // Owns COM and the XAudio2 engine for their complete lifetimes. Session
@@ -286,12 +498,14 @@ private:
         IXAudio2* engine{};
         IXAudio2MasteringVoice* mastering{};
         std::uint32_t destination_channels{};
+        DWORD destination_channel_mask{};
 
         if (com_ready && SUCCEEDED(XAudio2Create(&engine)) && engine != nullptr &&
             SUCCEEDED(engine->CreateMasteringVoice(&mastering)) && mastering != nullptr) {
             XAUDIO2_VOICE_DETAILS details{};
             mastering->GetVoiceDetails(&details);
             destination_channels = details.InputChannels;
+            (void)mastering->GetChannelMask(&destination_channel_mask);
         }
 
         if (engine == nullptr || mastering == nullptr || destination_channels == 0) {
@@ -312,12 +526,14 @@ private:
                 engine_ = engine;
                 mastering_ = mastering;
                 destination_channels_ = destination_channels;
+                destination_channel_mask_ = destination_channel_mask;
                 engine_state_ = EngineState::ready;
                 engine_condition_.notify_all();
                 engine_condition_.wait(lock, [this] { return terminal_; });
                 engine_ = nullptr;
                 mastering_ = nullptr;
                 destination_channels_ = 0;
+                destination_channel_mask_ = 0;
             }
         }
 
@@ -448,15 +664,30 @@ private:
         return std::sqrt(std::clamp((average - 0.008F) * 5.0F, 0.0F, 1.0F));
     }
 
-    void start(NativeClip clip) {
+    void start(NativeClip clip, core::SnapshotClock::time_point now) {
+        if (clip.spatial && (!clip.spatial->valid() || !clip.speech_owner || !npc_clip(clip) ||
+            clip.speech_owner->generation != clip.generation || clip.speech_owner->request_id != clip.request_id ||
+            clip.speech_owner->turn_id != clip.turn_id || clip.speech_owner->utterance_id != clip.utterance_id))
+            throw std::invalid_argument{"invalid spatial speech owner or settings"};
+        if (next_playback_token_ == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error{"audio playback token exhausted"};
         auto wave = parse_wave(*clip.bytes);
         auto* format = reinterpret_cast<const WAVEFORMATEX*>(wave.format.data());
         IXAudio2SourceVoice* voice{};
         if (FAILED(engine_->CreateSourceVoice(&voice, format)) || voice == nullptr)
             throw std::runtime_error{"XAudio2 source voice creation failed"};
-        const auto volume = std::clamp(clip.volume, 0.0F, 2.0F);
-        (void)voice->SetVolume(volume);
-        if (format->nChannels == 1 && destination_channels_ >= 2) {
+        const auto destroy_voice = [](IXAudio2SourceVoice* owned) { if (owned) owned->DestroyVoice(); };
+        std::unique_ptr<IXAudio2SourceVoice, decltype(destroy_voice)> voice_guard{voice, destroy_voice};
+        // Spatial speech is submitted without Start until the host supplies current fenced poses.
+        const auto volume = clip.spatial ? 0.0F : std::clamp(clip.volume, 0.0F, 2.0F);
+        const auto volume_result = voice->SetVolume(volume);
+        if (clip.spatial && FAILED(volume_result))
+            throw std::runtime_error{"spatial speech volume initialization failed"};
+        if (clip.spatial) {
+            const auto matrix = point_source_matrix(format->nChannels, destination_channels_, destination_channel_mask_, 0.0F);
+            if (!matrix || FAILED(voice->SetOutputMatrix(mastering_, format->nChannels, destination_channels_, matrix->data())))
+                throw std::runtime_error{"spatial speech channel layout is unsupported"};
+        } else if (format->nChannels == 1 && destination_channels_ >= 2) {
             std::vector<float> matrix(destination_channels_, 0.0F);
             const auto pan = std::clamp(clip.pan, -1.0F, 1.0F);
             matrix[0] = std::sqrt((1.0F - pan) * 0.5F);
@@ -475,15 +706,10 @@ private:
             total_samples - begin_samples,
             static_cast<std::uint64_t>(format->nSamplesPerSec) * clip.skip_end_ms / 1000ULL);
         if (begin_samples + end_samples >= total_samples) {
-            voice->DestroyVoice();
             throw std::invalid_argument{"configured TTS clip trim removes all audio"};
         }
         buffer.PlayBegin = static_cast<UINT32>(begin_samples);
         buffer.PlayLength = static_cast<UINT32>(total_samples - begin_samples - end_samples);
-        if (FAILED(voice->SubmitSourceBuffer(&buffer)) || FAILED(voice->Start())) {
-            voice->DestroyVoice();
-            throw std::runtime_error{"XAudio2 playback start failed"};
-        }
         WaveSignal signal;
         signal.data = clip.bytes->data();
         signal.data_offset = static_cast<std::size_t>(wave.audio - clip.bytes->data());
@@ -509,8 +735,18 @@ private:
                                                                        : SampleEncoding::signed_pcm)
                                         : SampleEncoding::unsupported;
         }
-        active_ = std::make_unique<Active>(Active{std::move(clip), voice, signal});
-        if (active_->clip.caption)
+        auto active = std::make_unique<Active>(Active{std::move(clip), voice, signal, false, ++next_playback_token_});
+        if (FAILED(voice->SubmitSourceBuffer(&buffer)))
+            throw std::runtime_error{"XAudio2 playback submit failed"};
+        if (!active->clip.spatial && FAILED(voice->Start()))
+            throw std::runtime_error{"XAudio2 playback start failed"};
+        active->running = !active->clip.spatial;
+        active->ever_started = active->running;
+        active->awaiting_pose = active->clip.spatial.has_value();
+        active->wait_sample = now;
+        active_ = std::move(active);
+        (void)voice_guard.release();
+        if (active_->running && active_->clip.caption)
             active_->clip.caption->mark_delivery(presentation::DialogueDelivery::playing);
     }
 
@@ -528,6 +764,9 @@ private:
     IXAudio2* engine_{};
     IXAudio2MasteringVoice* mastering_{};
     std::uint32_t destination_channels_{};
+    std::uint32_t destination_channel_mask_{};
+    const std::uint64_t playback_session_{next_playback_session()};
+    std::uint64_t next_playback_token_{};
     mutable std::mutex mutex_;
     std::condition_variable engine_condition_;
     std::thread engine_thread_;
@@ -537,6 +776,8 @@ private:
     bool engine_failure_reported_{};
     bool paused_{};
     bool terminal_{};
+    SpeechLease speech_lease_; // Game-thread only; never observed by speech/engine workers.
+    bool ownership_retired_{}; // Game-thread retirement is idempotent, including discard replays.
 };
 
 }  // namespace synth::audio

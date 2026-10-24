@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/status.schema.json",
+  "title": "SYNTH v2 status with optional negotiated init acknowledgements",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code"
+  ],
+  "properties": {
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "rechat_scene": {
+      "type": "boolean"
+    },
+    "combat_targets": {
+      "type": "boolean"
+    },
+    "ambient_npc": {
+      "type": "boolean"
+    },
+    "combat_contacts": {
+      "type": "boolean"
+    },
+    "enemy_awareness": {
+      "type": "boolean"
+    }
+  }
+}
