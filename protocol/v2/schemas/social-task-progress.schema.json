@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/social-task-progress.schema.json",
+  "title": "Fresh-generation claimed task progress",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "expected_revision",
+    "execution_id",
+    "phase"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^social:[0-9a-f]{32}$"
+    },
+    "expected_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "execution_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "phase": {
+      "enum": [
+        "started",
+        "arrived",
+        "spoken",
+        "cancelled",
+        "failed"
+      ]
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "line_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "line_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "spoken"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "proof"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "proof"
+          ]
+        }
+      }
+    }
+  ]
+}

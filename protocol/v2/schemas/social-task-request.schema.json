@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/social-task-request.schema.json",
+  "title": "Explicit player social instruction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "performer",
+    "recipient_name",
+    "topic",
+    "when",
+    "source_text"
+  ],
+  "properties": {
+    "performer": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "recipient_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "when": {
+      "enum": [
+        "now",
+        "on_return"
+      ]
+    },
+    "location_name": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 128
+    },
+    "source_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1200
+    }
+  }
+}

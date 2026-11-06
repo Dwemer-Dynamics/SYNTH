@@ -30,7 +30,8 @@
         "dialogue",
         "action",
         "status",
-        "response_end"
+        "response_end",
+        "social_task"
       ]
     },
     "line_id": {
@@ -75,6 +76,9 @@
           "type": "boolean"
         },
         "enemy_awareness": {
+          "type": "boolean"
+        },
+        "social_tasks": {
           "type": "boolean"
         }
       },
@@ -130,6 +134,80 @@
             "properties": {
               "action": {
                 "$ref": "wait-action.schema.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "action"
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "const": "attack"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "payload": {
+            "properties": {
+              "action": {
+                "$ref": "attack-action.schema.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "social_task"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "task"
+            ],
+            "properties": {
+              "task": {
+                "$ref": "social-task.schema.json"
               }
             }
           }

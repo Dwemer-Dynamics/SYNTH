@@ -37,8 +37,11 @@ enum class RuntimeActionName : unsigned char {
     give_item,
     give_caps,
     take_caps,
+    take_item,
+    open_inventory,
     wait_here,
     release_wait,
+    attack,
 };
 
 enum class RuntimeActionStatus : unsigned char {
@@ -54,6 +57,46 @@ struct RuntimeActorIdentity final {
     std::uint32_t form_id{};
     std::string origin_plugin;
     std::string playthrough_id;
+};
+
+enum class RuntimeSocialVisitStatus : unsigned char { pending, arrived, released, unavailable, failed };
+struct RuntimeSocialVisitRequest final {
+    std::string task_id, execution_id;
+    RuntimeActorIdentity actor, listener;
+    core::CancellationToken cancellation;
+    core::SnapshotClock::time_point deadline{};
+    bool release{};
+    [[nodiscard]] bool valid_ids() const noexcept {
+        const auto id=[](std::string_view value) {
+            const auto alphanumeric=[](unsigned char ch) {
+                return (ch>='a' && ch<='z') || (ch>='A' && ch<='Z') || (ch>='0' && ch<='9');
+            };
+            return !value.empty() && value.size()<=128 && alphanumeric(value.front()) && std::ranges::all_of(value,[&](unsigned char ch) {
+                return alphanumeric(ch) || ch=='-' || ch=='_' || ch==':' || ch=='.';
+            });
+        };
+        const auto actor_id=[](const RuntimeActorIdentity& value) {
+            return value.form_id!=0 && value.form_id!=0x14 && !value.origin_plugin.empty() && value.origin_plugin.size()<=255 &&
+                value.origin_plugin.find_first_of("/\\") == std::string::npos && !value.playthrough_id.empty() && value.playthrough_id.size()<=128;
+        };
+        return id(task_id) && id(execution_id) && actor_id(actor) && actor_id(listener) &&
+            actor.form_id!=listener.form_id && actor.playthrough_id==listener.playthrough_id;
+    }
+    [[nodiscard]] bool same_execution(const RuntimeSocialVisitRequest& other) const noexcept {
+        const auto same_actor=[](const RuntimeActorIdentity& a,const RuntimeActorIdentity& b) {
+            const auto fold=[](unsigned char ch) {return ch>='A' && ch<='Z'?ch+('a'-'A'):ch;};
+            return a.form_id==b.form_id && a.playthrough_id==b.playthrough_id &&
+                std::ranges::equal(a.origin_plugin,b.origin_plugin,[&](auto x,auto y){return fold(x)==fold(y);});
+        };
+        return valid_ids() && other.valid_ids() && task_id==other.task_id && execution_id==other.execution_id &&
+            same_actor(actor,other.actor) && same_actor(listener,other.listener) && cancellation.generation()==other.cancellation.generation();
+    }
+
+};
+struct RuntimeSocialVisitResult final {
+    RuntimeSocialVisitStatus status{RuntimeSocialVisitStatus::unavailable};
+    std::string task_id, execution_id, detail_code;
+    double distance{};
 };
 
 // Immutable preparation for the future multi-frame pickup adapter; not a capability or dispatch authorization.
@@ -100,9 +143,13 @@ struct RuntimeInventoryObservation final {
     }
 
     [[nodiscard]] bool valid_for(const RuntimeActionRequest& request) const noexcept {
-        return valid() && action_id == request.action_id && !request.cancellation.is_cancelled() && generation == request.cancellation.generation() &&
-            actor.form_id == request.actor.form_id && actor.origin_plugin == request.actor.origin_plugin &&
-            actor.playthrough_id == request.actor.playthrough_id;
+        return valid_for(request, request.actor);
+    }
+
+    [[nodiscard]] bool valid_for(const RuntimeActionRequest& request, const RuntimeActorIdentity& owner) const noexcept {
+        return valid() && action_id == request.action_id && !request.cancellation.is_cancelled() &&
+            generation == request.cancellation.generation() && actor.form_id == owner.form_id &&
+            actor.origin_plugin == owner.origin_plugin && actor.playthrough_id == owner.playthrough_id;
     }
 };
 
@@ -112,15 +159,45 @@ struct RuntimeTransferObservation final {
     RuntimeInventoryObservation recipient;
 
     [[nodiscard]] bool valid_for(const RuntimeActionRequest& request) const noexcept {
-        if ((request.name != RuntimeActionName::give_item && request.name != RuntimeActionName::give_caps &&
-             request.name != RuntimeActionName::take_caps) || !request.recipient ||
-            (request.name == RuntimeActionName::take_caps ? request.actor.form_id != 0x14 : request.actor.form_id == 0x14) ||
-            request.actor.form_id == request.recipient->form_id ||
-            request.actor.playthrough_id != request.recipient->playthrough_id || !donor.valid_for(request)) return false;
-        return recipient.valid() && recipient.generation == request.cancellation.generation() &&
-            recipient.action_id == request.action_id && recipient.actor.form_id == request.recipient->form_id &&
-            recipient.actor.origin_plugin == request.recipient->origin_plugin &&
-            recipient.actor.playthrough_id == request.recipient->playthrough_id;
+        const bool gift_menu = request.name == RuntimeActionName::open_inventory;
+        const bool player_donates = gift_menu || request.name == RuntimeActionName::take_caps ||
+            request.name == RuntimeActionName::take_item;
+        if ((!player_donates && request.name != RuntimeActionName::give_item &&
+             request.name != RuntimeActionName::give_caps) || !request.recipient) return false;
+        // The NPC operates the gift menu. Its inventory receives items from the player.
+        const auto& donor_owner = gift_menu ? *request.recipient : request.actor;
+        const auto& recipient_owner = gift_menu ? request.actor : *request.recipient;
+        return (donor_owner.form_id == 0x14) == player_donates &&
+            donor_owner.form_id != recipient_owner.form_id &&
+            donor_owner.playthrough_id == recipient_owner.playthrough_id &&
+            donor.valid_for(request, donor_owner) && recipient.valid_for(request, recipient_owner);
+    }
+};
+
+// Current physical wait evidence. Queue admission or an unowned restraint is never a successful hold.
+struct RuntimeWaitObservation final {
+    core::RuntimeGeneration generation;
+    RuntimeActorIdentity actor;
+    std::string action_id;
+    RuntimeActionName name{};
+    bool owned_hold{}, restrained{};
+    std::uint32_t owned_package{};
+    bool stationary{};
+    [[nodiscard]] bool valid_for(const RuntimeActionRequest& request) const noexcept {
+        const auto same_plugin=[](std::string_view a,std::string_view b) {
+            return std::ranges::equal(a,b,[](unsigned char x,unsigned char y) {
+                const auto fold=[](unsigned char c){return c>='A'&&c<='Z'?c+('a'-'A'):c;};
+                return fold(x)==fold(y);
+            });
+        };
+        return (name==RuntimeActionName::wait_here || name==RuntimeActionName::release_wait) && name==request.name &&
+            generation.valid() && generation==request.cancellation.generation() && !request.cancellation.is_cancelled() && !action_id.empty() && action_id.size()<=128 &&
+            action_id==request.action_id && actor.form_id!=0 && actor.form_id!=0x14 && actor.form_id==request.actor.form_id &&
+            !actor.origin_plugin.empty() && same_plugin(actor.origin_plugin,request.actor.origin_plugin) &&
+            !actor.playthrough_id.empty() && actor.playthrough_id==request.actor.playthrough_id;
+    }
+    [[nodiscard]] bool confirms_success(const RuntimeActionRequest& request) const noexcept {
+        return valid_for(request) && (name==RuntimeActionName::wait_here ? owned_hold && owned_package!=0 && stationary : !owned_hold && owned_package==0);
     }
 };
 
@@ -129,6 +206,12 @@ struct RuntimeActionResult final {
     std::string detail;
     std::optional<RuntimeInventoryObservation> inventory;
     std::optional<RuntimeTransferObservation> transfer;
+    // Async script admission is not completion; the worker polls again off the game thread.
+    bool pending{};
+    std::optional<RuntimeWaitObservation> wait{};
+    [[nodiscard]] bool verified_wait_for(const RuntimeActionRequest& request) const noexcept {
+        return !pending && status==RuntimeActionStatus::succeeded && wait && wait->confirms_success(request);
+    }
 };
 
 // Immutable, response-owned identities; no engine pointers or mutable target lookup.
@@ -143,6 +226,8 @@ struct RuntimeFacingRequest final {
 struct RuntimeConversationHold final {
     RuntimeActorIdentity actor;
     core::CancellationToken cancellation;
+    // Only explicit player input may temporarily bring a calm NPC toward the player.
+    bool approach_player{};
 };
 
 // Copied speech performance for the currently audible utterance; never an engine address.
@@ -185,6 +270,10 @@ public:
         RuntimeCapturePurpose purpose = RuntimeCapturePurpose::dialogue) = 0;
     [[nodiscard]] virtual RuntimeActionResult execute_action(
         const RuntimeActionRequest& request) = 0;
+    [[nodiscard]] virtual RuntimeSocialVisitResult social_visit(const RuntimeSocialVisitRequest& request) {
+        assert_game_thread();
+        return {RuntimeSocialVisitStatus::unavailable,request.task_id,request.execution_id,"unsupported_runtime",0};
+    }
     [[nodiscard]] virtual RuntimeActionResult face_speech_listener(
         const RuntimeFacingRequest& request) = 0;
     [[nodiscard]] virtual std::shared_ptr<const core::RuntimeSnapshot> capture_actor_snapshot(

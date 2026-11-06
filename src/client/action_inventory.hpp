@@ -55,7 +55,9 @@ struct ActionInventoryContinuation final {
     if (snapshot.variant()!=core::RuntimeVariant::flat || cancellation.is_cancelled() || snapshot.generation()!=cancellation.generation() ||
         !((action.name=="give_item_to" && action.capability=="action.give_item_to") ||
           (action.name=="give_caps_to" && action.capability=="action.give_caps_to") ||
-          (action.name=="take_caps_from_player" && action.capability=="action.take_caps_from_player")) || !action.target || action.action_id.empty())
+          (action.name=="take_caps_from_player" && action.capability=="action.take_caps_from_player") ||
+          (action.name=="take_item_from_player" && action.capability=="action.take_item_from_player") ||
+          (action.name=="open_inventory" && action.capability=="action.open_inventory")) || !action.target || action.action_id.empty())
         throw std::invalid_argument{"invalid transfer continuation owner"};
     const auto resolve = [&](const protocol_native::Identity& identity) {
         (void)protocol_native::identity(protocol_native::identity_value(identity));
@@ -79,7 +81,7 @@ struct ActionInventoryContinuation final {
     };
     const auto* performer=resolve(action.actor);
     const auto* target=resolve(*action.target);
-    const bool taking=action.name=="take_caps_from_player";
+    const bool taking=action.name=="take_caps_from_player" || action.name=="take_item_from_player" || action.name=="open_inventory";
     if (performer==&snapshot.player() || performer->form_id()==target->form_id() ||
         (taking && (target!=&snapshot.player() || target->form_id()!=0x14)))
         throw std::invalid_argument{"transfer requires an NPC performer and the exact distinct inventory target"};
@@ -93,8 +95,8 @@ struct ActionInventoryContinuation final {
     if (!action.arguments.is_object()) throw std::invalid_argument{"transfer arguments must be an object"};
     const auto* item=action.arguments.find("item");
     const auto* amount=action.arguments.find("amount");
-    const bool taking=action.name=="take_caps_from_player";
-    const bool caps=taking || action.name=="give_caps_to";
+    const bool taking=action.name=="take_caps_from_player" || action.name=="take_item_from_player" || action.name=="open_inventory";
+    const bool caps=action.name=="take_caps_from_player" || action.name=="give_caps_to";
     if (caps ? (!amount || action.arguments.as_object().size()!=1) :
         (!item || !item->is_string() || action.arguments.as_object().size()!=(amount?2:1)))
         throw std::invalid_argument{"caps require only an integer amount; items require item and optional integer amount"};
@@ -106,12 +108,26 @@ struct ActionInventoryContinuation final {
     }
     const auto selected=caps ? actions::select_caps_item(donor->inventory(),donor->inventory_observation()) :
         actions::select_equipment_item(donor->inventory(),donor->inventory_observation(),item->as_string());
-    if (!selected || selected->equipped || quantity==0 || quantity>1'000'000 || quantity>selected->count)
+    if (!selected || (selected->equipped && (taking || caps ||
+        (selected->form_type!=0x2B && selected->form_type!=0x1D))) ||
+        (!caps && selected->form_id==0xF && selected->origin_plugin=="Fallout4.esm") ||
+        quantity==0 || quantity>1'000'000 || quantity>selected->count)
         throw std::invalid_argument{"transfer item or quantity is unavailable in the captured inventory"};
-    return {taking ? runtime::RuntimeActionName::take_caps : caps ? runtime::RuntimeActionName::give_caps : runtime::RuntimeActionName::give_item,
+    return {taking ? (caps ? runtime::RuntimeActionName::take_caps : runtime::RuntimeActionName::take_item) : caps ? runtime::RuntimeActionName::give_caps : runtime::RuntimeActionName::give_item,
         {donor->form_id(),donor->origin_plugin(),donor->playthrough_id()},
         selected,cancellation,deadline,action.action_id,
         runtime::RuntimeActorIdentity{recipient->form_id(),recipient->origin_plugin(),recipient->playthrough_id()},static_cast<std::uint32_t>(quantity)};
+}
+
+// A general gift opens only the addressed NPC's exchange with the captured Player.
+[[nodiscard]] inline runtime::RuntimeActionRequest prepare_gift_menu_action(const core::RuntimeSnapshot& snapshot,
+    const protocol_native::Action& action,const core::CancellationToken& cancellation,core::SnapshotClock::time_point deadline) {
+    const auto [player,npc]=transfer_actors(snapshot,action,cancellation);
+    if(action.name!="open_inventory" || action.capability!="action.open_inventory" || !action.arguments.is_object() ||
+        !action.arguments.as_object().empty() || deadline<=snapshot.captured_at())
+        throw std::invalid_argument{"gift menu requires empty arguments and its owned deadline"};
+    return {runtime::RuntimeActionName::open_inventory,{npc->form_id(),npc->origin_plugin(),npc->playthrough_id()},std::nullopt,
+        cancellation,deadline,action.action_id,runtime::RuntimeActorIdentity{player->form_id(),player->origin_plugin(),player->playthrough_id()}};
 }
 
 struct ActionTransferContinuation final {
@@ -125,11 +141,14 @@ struct ActionTransferContinuation final {
     const core::CancellationToken& cancellation, const std::optional<runtime::RuntimeTransferObservation>& observed, bool extended) {
     if (!snapshot) throw std::invalid_argument{"transfer snapshot is absent"};
     const auto [donor,recipient]=transfer_actors(*snapshot,action,cancellation);
-    const bool taking=action.name=="take_caps_from_player";
-    runtime::RuntimeActionRequest owner{taking ? runtime::RuntimeActionName::take_caps :
+    const bool gift_menu=action.name=="open_inventory";
+    const bool taking=action.name=="take_caps_from_player" || action.name=="take_item_from_player" || gift_menu;
+    const auto* performer=gift_menu ? recipient : donor;
+    const auto* other=gift_menu ? donor : recipient;
+    runtime::RuntimeActionRequest owner{gift_menu ? runtime::RuntimeActionName::open_inventory : taking ? (action.name=="take_caps_from_player" ? runtime::RuntimeActionName::take_caps : runtime::RuntimeActionName::take_item) :
         action.name=="give_caps_to" ? runtime::RuntimeActionName::give_caps : runtime::RuntimeActionName::give_item,
-        {donor->form_id(),donor->origin_plugin(),donor->playthrough_id()},std::nullopt,cancellation,{},action.action_id,
-        runtime::RuntimeActorIdentity{recipient->form_id(),recipient->origin_plugin(),recipient->playthrough_id()}};
+        {performer->form_id(),performer->origin_plugin(),performer->playthrough_id()},std::nullopt,cancellation,{},action.action_id,
+        runtime::RuntimeActorIdentity{other->form_id(),other->origin_plugin(),other->playthrough_id()}};
     const bool owned=observed && observed->valid_for(owner);
     std::vector<core::InventoryItemSnapshot> donor_items,recipient_items;
     ActionTransferContinuation prepared{snapshot,{{taking?*action.target:action.actor,{},"unavailable"},

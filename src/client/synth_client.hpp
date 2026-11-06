@@ -129,6 +129,9 @@ public:
     [[nodiscard]] bool rechat_scene_ready() const noexcept {
         return rechat_scene_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool social_tasks_ready() const noexcept {
+        return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool uses_ambient_npc_contract() const noexcept {
         const auto has = [&](std::string_view capability) {
             return std::ranges::find(options_.capabilities, capability) != options_.capabilities.end();
@@ -210,6 +213,23 @@ public:
     [[nodiscard]] bool player_caps_ready() const noexcept {
         return player_caps_negotiated_.load(std::memory_order_acquire) && caps_ready();
     }
+    // Ordinary player items have a separate acknowledgement from currency and NPC inventory.
+    [[nodiscard]] bool uses_player_item_contract() const noexcept {
+        return uses_transfer_contract() &&
+            std::ranges::find(options_.capabilities, "action.take_item_from_player") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "action.player_item_inventory") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool player_item_ready() const noexcept {
+        return player_item_negotiated_.load(std::memory_order_acquire) && transfer_ready();
+    }
+    [[nodiscard]] bool uses_gift_menu_contract() const noexcept {
+        return uses_transfer_contract() &&
+            std::ranges::find(options_.capabilities,"action.open_inventory")!=options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities,"action.gift_menu_inventory")!=options_.capabilities.end();
+    }
+    [[nodiscard]] bool gift_menu_ready() const noexcept {
+        return gift_menu_negotiated_.load(std::memory_order_acquire) && transfer_ready();
+    }
     [[nodiscard]] bool player_reactions_ready() const noexcept {
         return player_reactions_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -245,6 +265,7 @@ public:
             context_sequence_ = 0;
             publication_sequence_ = 0;
             rechat_scene_negotiated_.store(false, std::memory_order_release);
+            social_tasks_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -258,6 +279,8 @@ public:
             transfer_negotiated_.store(false, std::memory_order_release);
             caps_negotiated_.store(false, std::memory_order_release);
             player_caps_negotiated_.store(false, std::memory_order_release);
+            player_item_negotiated_.store(false, std::memory_order_release);
+            gift_menu_negotiated_.store(false,std::memory_order_release);
             player_reactions_negotiated_.store(false, std::memory_order_release);
             quest_tracking_negotiated_.store(false, std::memory_order_release);
             quest_reactions_negotiated_.store(false, std::memory_order_release);
@@ -277,6 +300,11 @@ public:
                 std::holds_alternative<protocol_native::Start>(outcome.lines.front().payload) &&
                 std::holds_alternative<protocol_native::End>(outcome.lines.back().payload);
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
+            social_tasks_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->social_tasks &&
+                std::ranges::find(options_.capabilities,"social.tasks.v1")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"context.saved_anchor")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"context.location_identity")!=options_.capabilities.end(),std::memory_order_release);
             combat_targets_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->combat_targets &&
                 std::ranges::find(options_.capabilities, "context.combat_targets") != options_.capabilities.end(),
@@ -297,11 +325,15 @@ public:
             ambient_npc_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->ambient_npc && uses_ambient_npc_contract(),
                 std::memory_order_release);
-            const bool player_caps_support = supported_init && status->code == "init_player_caps_inventory_accepted" && uses_player_caps_contract();
+            const bool gift_menu_support=supported_init && status->code=="init_gift_menu_inventory_accepted" && uses_gift_menu_contract();
+            gift_menu_negotiated_.store(gift_menu_support,std::memory_order_release);
+            const bool player_item_support = supported_init && (gift_menu_support || status->code == "init_player_item_inventory_accepted") && uses_player_item_contract();
+            player_item_negotiated_.store(player_item_support, std::memory_order_release);
+            const bool player_caps_support = supported_init && (player_item_support || status->code == "init_player_caps_inventory_accepted") && uses_player_caps_contract();
             player_caps_negotiated_.store(player_caps_support, std::memory_order_release);
-            const bool caps_support = supported_init && (player_caps_support || status->code == "init_caps_inventory_accepted") && uses_caps_contract();
+            const bool caps_support = supported_init && (gift_menu_support || player_item_support || player_caps_support || status->code == "init_caps_inventory_accepted") && uses_caps_contract();
             caps_negotiated_.store(caps_support, std::memory_order_release);
-            const bool transfer_support = supported_init && (caps_support || status->code == "init_transfer_inventory_accepted") && uses_transfer_contract();
+            const bool transfer_support = supported_init && (gift_menu_support || player_item_support || caps_support || status->code == "init_transfer_inventory_accepted") && uses_transfer_contract();
             transfer_negotiated_.store(transfer_support, std::memory_order_release);
             const bool consumption_support = supported_init && (transfer_support || status->code == "init_consume_inventory_accepted") &&
                 uses_consumption_contract();
@@ -439,9 +471,16 @@ public:
         auto outcome = send_event(request_id, turn_id, generation, std::move(body),
                                   std::move(callback), true, "/main.php", {generation, 0, cancellation});
         if ((player_event || actor_events) && outcome.status == RequestStatus::complete) {
-            const auto* status = outcome.lines.size() == 3
-                ? std::get_if<protocol_native::Status>(&outcome.lines[1].payload) : nullptr;
-            if (!status || status->code != "context_accepted") {
+            std::size_t accepted{};
+            const bool valid=std::ranges::all_of(outcome.lines,[&](const auto& line) {
+                if(const auto* status=std::get_if<protocol_native::Status>(&line.payload)) {
+                    if(status->code!="context_accepted")return false;
+                    ++accepted;return true;
+                }
+                return std::holds_alternative<protocol_native::Start>(line.payload)||std::holds_alternative<protocol_native::End>(line.payload)||
+                    (social_tasks_ready()&&std::holds_alternative<protocol_native::SocialTaskOffer>(line.payload));
+            });
+            if (!valid || accepted!=1) {
                 outcome.status = RequestStatus::malformed_response;
                 outcome.detail = "native event context acknowledgement is missing";
             }
@@ -546,6 +585,24 @@ public:
         }
         const auto target = kind == "external_tts" ? "/processor/npc_tts_play.php" : "/main.php";
         return send_event(request_id, turn_id, generation, std::move(body), std::move(callback), true, target, binding, true);
+    }
+
+    [[nodiscard]] RequestOutcome social_task_progress(const runtime::SocialTaskCommand& command,
+                                                      LineCallback callback = {}, ContextBinding binding = {}) {
+        std::scoped_lock request_lock{request_mutex_};
+        std::string request_id,turn_id,body;
+        std::uint64_t generation{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            if (!social_tasks_ready()) throw std::invalid_argument{"saved social tasks were not negotiated"};
+            request_id=next_id("social");
+            turn_id=binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
+            generation=generation_;
+            body=protocol_native::encode_social_task_progress(context(request_id,turn_id,binding),command);
+        }
+        return send_event(request_id,turn_id,generation,std::move(body),std::move(callback),true,"/main.php",binding,
+            command.kind==runtime::SocialTaskCommandKind::arrived);
     }
 
     [[nodiscard]] RequestOutcome send_audio(const protocol_native::Media& media,
@@ -869,7 +926,7 @@ public:
                                                     LineCallback callback = {}, ContextBinding binding = {},
                                                     std::optional<protocol_native::ActionInventoryObservation> inventory = std::nullopt,
                                                     std::optional<protocol_native::ActionTransferObservation> transfer = std::nullopt,
-                                                    bool caps_transfer = false, bool player_caps_transfer = false) {
+                                                    bool caps_transfer = false, bool player_caps_transfer = false, bool player_item_transfer = false, bool gift_menu_transfer = false) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id;
         std::string turn_id;
@@ -884,6 +941,10 @@ public:
             if (caps_transfer && (!transfer || !caps_ready())) throw std::invalid_argument{"caps inventory support is not acknowledged or paired evidence is missing"};
             if (player_caps_transfer && (!caps_transfer || !transfer || !player_caps_ready()))
                 throw std::invalid_argument{"player caps support is not acknowledged or paired currency evidence is missing"};
+            if (gift_menu_transfer && (!transfer || !gift_menu_ready()))
+                throw std::invalid_argument{"gift menu support is not acknowledged or paired evidence is missing"};
+            if (player_item_transfer && (!transfer || !player_item_ready()))
+                throw std::invalid_argument{"player item support is not acknowledged or paired evidence is missing"};
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
             const auto bound_context = context(request_id, turn_id, binding);
@@ -1033,6 +1094,8 @@ private:
                     if (wire.empty()) continue;
                     if (ended) throw std::invalid_argument{"response continues after terminal line"};
                     auto line = protocol_native::decode_line(wire);
+                    if(std::holds_alternative<protocol_native::SocialTaskOffer>(line.payload)&&!social_tasks_ready())
+                        throw std::invalid_argument{"unnegotiated saved social task"};
                     if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload);
                         dialogue && dialogue->listener &&
                         (std::ranges::find(options_.capabilities, "dialogue.listener_identity") == options_.capabilities.end()
@@ -1216,10 +1279,13 @@ private:
     std::atomic_bool transfer_negotiated_{};
     std::atomic_bool caps_negotiated_{};
     std::atomic_bool player_caps_negotiated_{};
+    std::atomic_bool player_item_negotiated_{};
+    std::atomic_bool gift_menu_negotiated_{};
     std::atomic_bool player_reactions_negotiated_{};
     std::atomic_bool quest_tracking_negotiated_{};
     std::atomic_bool quest_reactions_negotiated_{};
     std::atomic_bool rechat_scene_negotiated_{};
+    std::atomic_bool social_tasks_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};

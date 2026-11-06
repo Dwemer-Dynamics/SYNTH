@@ -1,22 +1,45 @@
 # SYNTH open-alpha acceptance
 
-## Flat gameplay evidence — 24 October 2026
+## Generic gift inventory exchange
 
-- Codsworth and Jun completed a public NPC exchange; both movement holds released.
-- Both directional affinity-3 updates were readable before saving and after
-  reloading the new manual save. Loading an older save excluded the later updates;
-  the newer records remained intact. Jun was absent from that older scene, so his
-  exclusion was checked through saved ancestry rather than a live Jun reader.
-- Earlier quest-plan testing covered teaching Codsworth, a follow-up without the
-  quest title, revised recall after save/load, an uninformed Jun and an older save.
-  Formal whisper, cloned actors and overhearing still need separate coverage.
-- The normal launcher opened after the startup repair and Codsworth replied.
-  Server records confirmed the ChatGPT route and `gpt-6.1-sol` for that reply.
-  Other configured models and the existing server profile fallback remain available.
+- [x] Install the reviewed coordinated gift-menu DLL/PEX/backend update; installed hashes and server health verified.
+- [ ] Flat: "I have a gift for you" opens the exact addressed NPC's normal free
+  inventory exchange; the NPC can decline the offer in character.
+- [ ] Give a weapon and ammunition, close the menu, and verify both inventories,
+  the paired receipt, and personality-based gift-batch evidence.
+- [ ] Opening/closing without donating, cancellation/load, a busy NPC and wrong
+  menu ownership produce no received-gift credit.
+- [ ] Named offers including "I have a gift for you, X" continue to use the direct
+  exact observed Player-to-NPC transfer without opening the generic gift screen.
 
-This is flat alpha evidence. VR compiles but has no headset acceptance from this
-session. Broader scene/action transitions and sustained sessions remain open.
-Earlier unchecked scenarios below remain separate unless explicitly covered here.
+
+## Player-pack gifts
+
+- [x] Install the coordinated client/backend candidate after reviewing the concrete plan; all installed hashes and server health verified.
+- [ ] Flat: Jun takes the exact requested unequipped weapon from the player pack;
+  paired inventory counts and receipt agree with physical gameplay.
+- [ ] Compare different NPC reactions to gifts using their personalities/goals;
+  confirm lasting relationship evidence follows the verified handoff.
+- [ ] A failed/busy/quest-bound transfer produces no received gift; retrying the
+  same receipt produces no second relationship reward.
+
+
+## Equipped pistol transfer
+
+- [x] Jun equips and unequips Heavy 10mm Pistol with successful live-state/count receipts.
+- [x] With a weapon equipped, GiveItemTo transfers the exact weapon to the player:
+  Jun's Submachine Gun had equipped=true before the successful transfer, with
+  complete paired inventories showing donor zero and player one. Heavy 10mm Pistol
+  return also passed in its separate unequipped-start case.
+- [ ] Cancellation, busy/quest-bound actors and replaced/ambiguous instances
+  retain truthful failure and inventory observations in flat gameplay.
+
+## Manual diary shortcut and reader
+
+- [x] Flat: user confirms F6 requests the crosshair NPC's diary; Sturges' entry
+  completed on the first attempt in about 33 seconds, with valid published
+  ownership/hashes and dashboard visibility (4 November 2026).
+- [ ] VR: verify a controller-accessible diary request and saved entry in-headset.
 
 
 Status: **OPEN**. The optional flat radio startup and static A/B playback checks
@@ -24,6 +47,21 @@ have passed on the isolated test save. The broader baseline (client `f34da88`, s
 `bcb0c06`) remains unaccepted. Builds, unit tests, protocol fixtures and package audits are prerequisites. They do
 not count as in-game evidence. Record flat and VR results separately. A flat pass never implies a
 VR pass.
+
+## October 28 flat long-play feedback
+
+The user completed the 60-minute flat session using DeepSeek V4.1 Flash 1017 and
+Cartesia. Completion records the test duration; it does not accept the failures:
+conversation movement freezes, distant rechat, camera-dependent hearing, missing
+follower attack, late input subtitles, rejected actor batches and stale combat barks.
+Earlier accepted quest/relationship/save evidence remains accepted. VR is deferred
+for the current user test lane.
+
+Candidate fixes require a focused flat return check before acceptance. Recheck a
+walking native follower, a nearby speaker behind the player, separated settlement
+NPCs, a death/equipment event batch, an explicit hostile-target attack, early input
+subtitles and a short combat ending before the generated bark arrives. Ordinary
+NPC automatic approach remains separate from preserving existing native movement.
 
 ## Record with every run
 
@@ -77,6 +115,17 @@ Current command and conversation return checks:
       visibly stays put. A later player question must not release the hold.
 - [ ] Spoken/typed Release Wait, Stop, 90 seconds of unpaused gameplay and save/load
       each release only SYNTH's owned hold. A verbal promise is not execution proof.
+- [ ] Wait action admission remains pending until exact owned aliases, active SYNTH
+      package and stable stopped position are verified; old queued-success cannot establish waiting.
+- [ ] A walking follower can enter Wait after delayed script installation. The native
+      anchor is captured once from the observed owned package; later displacement,
+      Stop or reload cannot produce a false success or a late owned hold.
+- [ ] Release success proves empty owned aliases and fresh absence of SYNTH Wait
+      packages. Foreign restraint remains untouched and can still prevent normal movement.
+- [ ] A long menu pause preserves the remaining 90-second hold, and Stop/load cleanup
+      completes without a connected backend. A stale VM stack cannot reuse an alias.
+- [ ] After reload, prior verified waiting can be recalled as history while fresh
+      current state reports the owned hold released; the physical order is not replayed.
 - [ ] Open microphone completes STT and response binding without an immutable-owner
       mismatch; short valid speech remains accepted and provider errors remain visible.
 - [ ] With two eligible nearby NPCs, an idle NPC exchange starts and continues in
@@ -165,8 +214,37 @@ Stability:
 
 Wait/restraint is not implemented for VR.
 
-## Temporary conversation movement
+## Conversation movement and hearing
 
-- [ ] Flat addressed participants remain still while a reply or NPC exchange is pending; bystanders continue normal AI.
-- [ ] Temporary holds release at completion, cancellation, Stop, combat and before an action; explicit waits and save/load remain correct.
+The long-play session reproduced follower speech restraint and distant NPC rechat.
+The candidate preserves native AI movement during speech and checks mutual NPC
+proximity for every continuation. This requires new flat gameplay acceptance:
+
+- [x] User observed followers keep moving while talking after the first combined update; this evidence does not accept ordinary-NPC approach.
+- [ ] Repeat follower walking conversation after the continuous Follow/errand update without a SYNTH wait restraint.
+- [ ] Ordinary eligible NPCs hear typed and voice input from behind the player within the configured radius.
+- [ ] A Handy/Protectron/Assaultron/Eyebot/Sentry Bot can open typed chat and hear voice behind the player without a crosshair pick; an explicit eligible pick still wins.
+- [ ] Rechat stops when the next NPC is more than 784 units from the previous speaker.
+- [ ] Explicit Wait Here retains ownership; speech, Stop and save/load do not release somebody else's hold.
+- [x] Flat: Sturges physically approached the player during conversation; the user confirmed it and the log verifies the active owned package (4 November 2026).
+- [ ] An ordinary player-engaged NPC can continue walking with the player during conversation.
+- [ ] NPC rechat and combat barks never pull bystanders into player approach.
+- [ ] Approach stops/restores native AI on completion, Stop, combat, death, load and timeout; existing Wait ownership remains isolated.
+- [ ] Exterior walking crosses loaded cells in the same worldspace; entering a different interior releases the approach.
+- [ ] An unreachable NPC times out without teleporting, recruiting, or changing factions.
+- [x] Actual owned package activation is observed during Sturges approach; the current package matches the expected SYNTH approach package.
+
+Sturges now physically approaches the player during conversation, with the expected
+owned navigation package confirmed in the runtime log. The revised repeating
+Follow procedure resolves the tested approach failure. Walking together, cleanup,
+cell transitions and unreachable destinations remain separate unchecked cases above.
+
+Saved follower errands additionally require:
+
+- [ ] An explicit named recipient/topic is saved under the correct NPC and playthrough; ambiguous recipients are rejected.
+- [ ] A ready follower navigates to the exact loaded NPC; dialogue starts only after fresh owned-package arrival and mutual hearing checks.
+- [ ] A deferred return waits for departure and the exact saved location identity, then revalidates loaded actors before visiting.
+- [ ] Save/load and branching cannot replay a finished errand or let an old execution release a newer visit.
+- [ ] Stop, combat, unreachable target, scene change and a player action on the same performer cleanly release only the visit aliases and restore native follow AI.
+
 - [ ] NPC-to-NPC reply and fresh saved relationship publication pass after the exact paired update is installed.

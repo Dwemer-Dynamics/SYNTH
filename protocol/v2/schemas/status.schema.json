@@ -30,6 +30,9 @@
     },
     "enemy_awareness": {
       "type": "boolean"
+    },
+    "social_tasks": {
+      "type": "boolean"
     }
   }
 }

@@ -22,6 +22,7 @@
 #include "adapters/commonlib_external_requests.hpp"
 #include "adapters/commonlib_papyrus_api.hpp"
 #include "adapters/commonlib_save_context.hpp"
+#include "adapters/flat_social_visit.hpp"
 #include "runtime/game_thread_dispatcher.hpp"
 #include "client/plugin_session_host.hpp"
 #include "core/player_inventory_refresh.hpp"
@@ -76,6 +77,22 @@ synth::ui::ConfigSnapshot local_configuration;
 bool configuration_reconnect_pending{};
 std::optional<synth::integration::PromptTarget> control_target;
 std::optional<synth::ui::ControlRequest> deferred_control_action;
+std::uint64_t control_wait_serial{};
+struct PendingControlWait final {
+    synth::core::CancellationSource owner;
+    synth::runtime::RuntimeActionRequest request;
+    synth::integration::PromptTarget target;
+    synth::core::SnapshotClock::time_point next_poll{};
+    PendingControlWait(const synth::core::CancellationSource& cancellation,
+        synth::runtime::RuntimeActionRequest action,synth::integration::PromptTarget retained,
+        synth::core::SnapshotClock::time_point next)
+        :owner{cancellation},request{std::move(action)},target{std::move(retained)},next_poll{next} {}
+};
+std::optional<PendingControlWait> pending_control_wait;
+void cancel_control_wait() {
+    if(pending_control_wait)pending_control_wait->owner.cancel();
+    pending_control_wait.reset();
+}
 std::uint64_t control_status_revision{};
 bool trace_first_background_cycle{};
 synth::input::PressGesture pip_vision_gesture;
@@ -206,6 +223,10 @@ void present_notification(std::string_view message) {
 
 [[nodiscard]] synth::runtime::RuntimeActionResult execute_runtime_action(
     const synth::runtime::RuntimeActionRequest& request) {
+    if(request.name!=synth::runtime::RuntimeActionName::wait_here&&request.name!=synth::runtime::RuntimeActionName::release_wait &&
+        (synth::adapters::commonlib::FlatWaitPackage::action_actor_busy(request.actor.form_id) ||
+         (request.recipient&&synth::adapters::commonlib::FlatWaitPackage::action_actor_busy(request.recipient->form_id))))
+        return {synth::runtime::RuntimeActionStatus::unavailable,"actor's wait transition is still settling or releasing"};
     return synth::adapters::commonlib::execute_action(request);
 }
 
@@ -221,9 +242,11 @@ void bind_runtime_to_game_thread() {
     runtime->set_capture_epoch_reader([] { return synth::adapters::FlatPickedReference::stamp(); });
     runtime->set_requested_actor_pump(synth::adapters::commonlib::requested_actor_snapshot);
     runtime->set_facing_pump(synth::adapters::commonlib::face_speech_listener);
-    runtime->set_conversation_hold_pump(synth::adapters::commonlib::FlatWaitPackage::update_conversation,
-        synth::adapters::commonlib::FlatWaitPackage::conversation_actions_ready);
+    runtime->set_conversation_hold_pump(synth::adapters::commonlib::FlatConversationApproach::update,
+        synth::adapters::commonlib::FlatConversationApproach::actions_ready);
+    runtime->set_social_visit_pump(synth::adapters::commonlib::FlatSocialVisit::apply);
     synth::adapters::commonlib::conversation_hold_observer=synth::adapters::commonlib::FlatWaitPackage::conversation_held;
+    synth::adapters::commonlib::explicit_wait_observer=synth::adapters::commonlib::FlatWaitPackage::explicit_wait_observation;
     runtime->set_speech_pump(synth::adapters::FlatSpeechAnimation::update);
     runtime->set_speech_owner_pump(synth::adapters::FlatSpeechExclusion::update);
     runtime->set_speech_spatial_pump(synth::adapters::commonlib::speech_spatial_snapshot);
@@ -306,6 +329,7 @@ void log_conversation_trace() noexcept {
 // Session teardown cancels WinHTTP and joins task workers, so hand ownership to
 // the coordinator instead of performing that work inside the main-thread pump.
 void retire_session(bool discard_speech = false) noexcept {
+    cancel_control_wait();
     synth::ui::Chatbox::set_voice_session_available(false);
     synth::ui::Chatbox::close();
     synth::ui::ControlMenu::invalidate();
@@ -322,6 +346,9 @@ void retire_session(bool discard_speech = false) noexcept {
     synth::adapters::FlatPickedReference::invalidate();
     synth::integration::external_requests.set_available(false);
     synth::adapters::FlatRestEvents::invalidate();
+    synth::adapters::commonlib::FlatConversationApproach::update({},false);
+    synth::adapters::commonlib::FlatSocialVisit::cancel_all();
+    synth::adapters::commonlib::FlatWaitPackage::cancel_all();
     if (!session) return;
     if (runtime && !session->stop_local_speech(*runtime, discard_speech))
         REX::WARN("SYNTH speech: local ownership cleanup failed during retirement");
@@ -335,8 +362,13 @@ void retire_session(bool discard_speech = false) noexcept {
 }
 
 void invalidate_sessions(bool discard_speech = false) noexcept {
+    cancel_control_wait();
     synth::ui::Chatbox::set_voice_session_available(false);
     synth::adapters::commonlib::FlatWaitPackage::retire();
+    synth::adapters::commonlib::FlatAttackAction::retire();
+    synth::adapters::commonlib::FlatGiftMenu::retire();
+    synth::adapters::commonlib::FlatConversationApproach::retire();
+    synth::adapters::commonlib::FlatSocialVisit::retire();
     synth::ui::Chatbox::close();
     synth::ui::ControlMenu::invalidate();
     (void)synth::ui::Chatbox::take_voice_action();
@@ -530,6 +562,7 @@ void pump_runtime_impl() {
         REX::INFO("SYNTH radio probe: {}", report);
     trace_pump_phase("menu and combat query");
     const auto menu_mode = synth::adapters::commonlib::menu_mode_active();
+    if(menu_mode)synth::adapters::commonlib::FlatWaitPackage::note_menu_pause(now);
     if (!session || menu_mode) dialogue_subtitles.present({});
     if (menu_mode) synth::adapters::FlatPickedReference::invalidate();
     else synth::adapters::FlatPickedReference::arm();
@@ -543,6 +576,16 @@ void pump_runtime_impl() {
         runtime_ready_after = now + std::chrono::seconds{2};
         return;
     }
+    // Local alias recovery and release must not depend on a connected backend or another conversation.
+    // The world/menu dwell checks above already excluded unstable load frames.
+    if (!session || !session->connection_ready() || session->halting()) {
+        synth::adapters::commonlib::FlatConversationApproach::update({},false);
+        synth::adapters::commonlib::FlatSocialVisit::cancel_all();
+        synth::adapters::commonlib::FlatWaitPackage::cancel_all();
+    }
+    synth::adapters::commonlib::FlatWaitPackage::tick(now);
+    synth::adapters::commonlib::FlatConversationApproach::tick(now);
+    synth::adapters::commonlib::FlatSocialVisit::tick(now);
     trace_pump_phase("settings revision check");
     reload_settings_if_changed(now);
     trace_pump_phase("session adoption");
@@ -557,16 +600,14 @@ void pump_runtime_impl() {
         return;
     }
     if (session) {
-        // Wait-controller VM work belongs to an initialized gameplay session,
-        // never the first post-load frame before stable bootstrap/adoption.
-        if (session->connection_ready()) {
-            trace_pump_phase("wait controller");
-            synth::adapters::commonlib::FlatWaitPackage::tick(now);
-        }
         const auto& configuration = session->configuration();
         const auto runtime_paused = synth::ui::Chatbox::is_open() || synth::ui::ControlMenu::is_open() ||
             (configuration.behavior.pause_dialogue_in_menus && menu_mode);
-        if (synth::ui::Chatbox::take_stop_request()) session->stop_dialogue();
+        if (synth::ui::Chatbox::take_stop_request()) {
+            cancel_control_wait();
+            synth::adapters::commonlib::FlatWaitPackage::cancel_all();
+            session->stop_dialogue();
+        }
         session->set_composing(synth::ui::Chatbox::has_submission() || synth::ui::Chatbox::is_open());
         session->set_runtime_paused(runtime_paused);
         if (runtime_paused && profile_timer_paused_at.time_since_epoch().count() == 0) {
@@ -592,6 +633,13 @@ void pump_runtime_impl() {
             session->submit_presentation_capture(caption,snapshot);
         }
         session->pump(runtime->generation().value(), *runtime);
+        if (session->social_task_capture_due(now)) {
+            const auto* owner=session.get();
+            const auto generation=runtime->generation();
+            auto social_snapshot=runtime->capture_snapshot(now);
+            if (session.get()!=owner || runtime->generation()!=generation) return;
+            session->pump_social_tasks(std::move(social_snapshot),*runtime);
+        }
         log_conversation_trace();
         if (const auto target=session->rechat_capture_target()) {
             const auto* owner=session.get();
@@ -800,7 +848,7 @@ void pump_runtime_impl() {
             } else if (request->action == synth::ui::ControlAction::open_dashboard) {
                 session->open_control_panel();
                 synth::ui::ControlMenu::publish_status(controls.selection.mode, model, "Server dashboard opened in your browser");
-            } else if (!deferred_control_action) {
+            } else if (!deferred_control_action&&!pending_control_wait) {
                 deferred_control_action = request;
                 synth::ui::ControlMenu::publish_status(controls.selection.mode, model,
                     request->action == synth::ui::ControlAction::wait_here || request->action == synth::ui::ControlAction::release_wait
@@ -817,7 +865,8 @@ void pump_runtime_impl() {
             const auto waiting = request->action == synth::ui::ControlAction::wait_here ||
                 request->action == synth::ui::ControlAction::release_wait;
             const auto targeted = waiting ||
-                request->action == synth::ui::ControlAction::profile_target;
+                request->action == synth::ui::ControlAction::profile_target ||
+                request->action == synth::ui::ControlAction::diary_target;
             auto snapshot = targeted && target ? runtime->capture_actor_snapshot(now, target->form_id) : runtime->capture_snapshot(now);
             if (session.get() != owner || runtime->generation() != generation || request->generation != generation.value()) return;
             const synth::core::ActorSnapshot* actor{};
@@ -832,16 +881,44 @@ void pump_runtime_impl() {
             }
             if (targeted && !actor) present_notification("SYNTH control target is no longer available; no action performed");
             else if (waiting) {
-                const auto result = runtime->execute_action({request->action == synth::ui::ControlAction::release_wait
+                synth::core::CancellationSource wait_owner{target->session};
+                synth::runtime::RuntimeActionRequest action{request->action == synth::ui::ControlAction::release_wait
                     ? synth::runtime::RuntimeActionName::release_wait : synth::runtime::RuntimeActionName::wait_here,
-                    {target->form_id, target->origin_plugin, target->playthrough_id}, {}, target->session,
-                    now + std::chrono::seconds{2}, "control-wait"});
-                present_notification("SYNTH: " + result.detail);
+                    {target->form_id, target->origin_plugin, target->playthrough_id}, {}, wait_owner.token(),
+                    now + std::chrono::seconds{30}, "control-wait:"+std::to_string(generation.value())+":"+
+                        std::to_string(++control_wait_serial),{},1,session->wait_action_lifetime()};
+                pending_control_wait.emplace(wait_owner,std::move(action),*target,now);
+            } else if (request->action == synth::ui::ControlAction::diary_target) {
+                const auto accepted = session->request_npc_diary(snapshot, &*target);
+                present_notification(accepted ? "SYNTH diary requested for " + actor->name()
+                    : "SYNTH diary request is busy or unavailable");
             } else {
                 const auto scope = request->action == synth::ui::ControlAction::profile_target ? "target" :
                     request->action == synth::ui::ControlAction::profile_narrator ? "narrator" : "nearby";
                 const auto accepted = session->refresh_dynamic_profiles(snapshot, scope, actor ? actor->form_id() : 0);
                 present_notification(accepted ? "SYNTH profile refresh queued" : "SYNTH profile refresh unavailable");
+            }
+        }
+        if(pending_control_wait&&!menu_mode&&now>=pending_control_wait->next_poll) {
+            pending_control_wait->next_poll=now+std::chrono::milliseconds{100};
+            const auto* owner=session.get();const auto generation=runtime->generation();
+            const auto actor_snapshot=runtime->capture_actor_snapshot(now,pending_control_wait->request.actor.form_id);
+            if(session.get()!=owner||runtime->generation()!=generation)return;
+            const auto valid=actor_snapshot&&actor_snapshot->generation()==generation&&
+                !pending_control_wait->request.cancellation.is_cancelled()&&
+                pending_control_wait->request.cancellation.generation()==generation&&
+                std::ranges::any_of(actor_snapshot->actors(),[&](const auto& actor) {
+                    return pending_control_wait->target.matches(actor)&&actor.alive()&&!actor.disabled();
+                });
+            if(!valid) {
+                cancel_control_wait();present_notification("SYNTH wait cancelled: the selected actor or runtime changed");
+            } else {
+                const auto result=runtime->execute_action(pending_control_wait->request);
+                if(!result.pending) {
+                    present_notification("SYNTH: "+result.detail);cancel_control_wait();
+                } else if(now>=pending_control_wait->request.deadline) {
+                    cancel_control_wait();present_notification("SYNTH wait postcondition was not verified before its deadline");
+                }
             }
         }
         if (!menu_mode) {
@@ -980,7 +1057,8 @@ void pump_runtime_impl() {
             const auto untargeted = controls.selection.mode == "NARRATOR" || controls.selection.mode == "INJECTION_LOG";
             if (!target && !untargeted) {
                 present_notification("SYNTH: no eligible NPC within conversation range");
-            } else if (!(untargeted ? synth::ui::Chatbox::request_open() : synth::ui::Chatbox::request_open(*target))) {
+            } else if (!(untargeted ? synth::ui::Chatbox::request_open() :
+                synth::ui::Chatbox::request_open(*target,session->prepare_chat_targets(snapshot)))) {
                 if (synth::ui::MenuFramework::available()) {
                     present_notification("SYNTH chat is busy or still loading; no message was sent");
                 } else {
@@ -995,6 +1073,23 @@ void pump_runtime_impl() {
                 }
             }
         }
+        // Poll the edge even while blocked, so a held menu key never becomes a later request.
+        if (hotkey_pressed(hotkeys.write_diary) && !menu_mode && !regular_dialogue_blocked &&
+            !synth::ui::MenuFramework::input_captured()) {
+            const auto* owner = session.get();
+            const auto generation = runtime->generation();
+            const auto snapshot = runtime->capture_snapshot(now, synth::runtime::RuntimeCapturePurpose::dialogue);
+            if (session.get() != owner || runtime->generation() != generation) return;
+            const auto target = session->prepare_control_target(snapshot);
+            if (!snapshot || !snapshot->picked_actor_form_id() || !target ||
+                target->form_id != *snapshot->picked_actor_form_id()) {
+                present_notification("SYNTH: point at an eligible NPC to request a diary");
+            } else {
+                const auto accepted = session->request_npc_diary(snapshot, &*target);
+                present_notification(accepted ? "SYNTH diary requested for " + target->display_name
+                    : "SYNTH diary request is busy or unavailable");
+            }
+        }
         if (hotkey_pressed(hotkeys.synth_control) && !menu_mode) {
             const auto* owner = session.get();
             const auto generation = runtime->generation();
@@ -1007,6 +1102,8 @@ void pump_runtime_impl() {
             } else present_notification("SYNTH control menu unavailable; check F4SE Menu Framework");
         }
         if (session && hotkey_pressed(hotkeys.hard_halt)) {
+            cancel_control_wait();
+            synth::adapters::commonlib::FlatWaitPackage::cancel_all();
             session->hard_halt();
             voice_capture_down = false;
             pip_vision_gesture.reset();

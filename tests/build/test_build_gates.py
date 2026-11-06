@@ -600,6 +600,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
             "StopTalking",
             "PipVision",
             "OpenMicMute",
+            "WriteDiary",
         ):
             with self.subTest(hotkey=key):
                 self.assertIn(f'"{key}"', catalog)
@@ -623,7 +624,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         # Unbound is the shipped default for every hotkey.
         hotkeys = shipped.split("[Hotkeys]", 1)[1].split("[AutoActivate]", 1)[0]
         bindings = [line for line in hotkeys.splitlines() if "=" in line]
-        self.assertEqual(len(bindings), 7)
+        self.assertEqual(len(bindings), 8)
         for line in bindings:
             with self.subTest(line=line):
                 self.assertTrue(line.strip().endswith("=0"))
@@ -704,7 +705,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         worker = session.split("bool queue_context_trigger(", 1)[1].split("static std::string make_runtime_session_id", 1)[0]
         self.assertIn("snapshot->captured_at() > std::chrono::seconds{2}", worker)
         self.assertIn('kind=="player_reaction"', worker)
-        self.assertIn("handle_line(line, snapshot, cancellation, !one_shot)", worker)
+        self.assertIn('handle_line(line, snapshot, cancellation, !one_shot, {}, combat_bark)', worker)
         entry = read("src/flat/plugin_entry.cpp")
         self.assertLess(entry.index("const auto player_history ="), entry.index("const auto player_reaction ="))
         self.assertLess(entry.index("const auto player_reaction ="), entry.index("const auto quest_reaction ="))
@@ -765,7 +766,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("client_.publish_context(0,", publication)
         self.assertNotIn("selected_target(snapshot", publication)
         self.assertIn('}, pending.binding, std::move(inventory), std::move(transfer),', session)
-        self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player")', session)
+        self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory")', session)
         self.assertIn("handle_line(continuation, continuation_snapshot, cancellation)", session)
         self.assertIn("pending_rechat_ = PendingRechat{*actor, snapshot,", session)
         self.assertIn("response_binding(line, cancellation)", session)
@@ -776,7 +777,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("deadline, begin_player_turn(actor_key(target)),", text_turn)
         self.assertIn("deadline, voice_turn_,", voice)
         self.assertIn("voice_turn_ = begin_player_turn();", session)
-        self.assertEqual(session.count("track_activity(active_responses_,"), 8)  # Includes deferred prefetch delivery.
+        # Includes deferred prefetch delivery and the separately owned social-task progress response.
+        self.assertEqual(session.count("track_activity(active_responses_,"), 9)
         self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
         self.assertIn('pending_actions_.empty() && !rechat_capture_', session)
         self.assertIn('prefetch->append(line);', session)
@@ -857,12 +859,38 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('(action.name=="consume" && client_.consumption_ready())', execution)
         native = read("src/adapters/commonlib_actions.hpp")
         self.assertIn("case runtime::RuntimeActionName::consume:", native)
-        self.assertIn("REL::ID(2698330)", native)
-        self.assertIn("engine_thread == 0 || engine_thread != REX::W32::GetCurrentThreadId()", native)
-        self.assertLess(native.index("engine_thread == 0"), native.index("actor->DrinkPotion("))
-        self.assertLess(native.index("now() >= request.deadline"), native.index("actor->DrinkPotion("))
+        self.assertNotIn("actor->DrinkPotion(", native)
+        self.assertNotIn("REL::ID(2698330)", native)
+        self.assertIn("main->threadID != REX::W32::GetCurrentThreadId()", native)
+        self.assertIn("REL::ID(2231345)", native)
+        self.assertIn("REL::ID(2226295)", native)
+        self.assertLess(native.index("main->threadID == 0"), native.index("cast(consumable_caster, &parameters)"))
+        self.assertLess(native.index("now() >= request.deadline"), native.index("cast(consumable_caster, &parameters)"))
         self.assertIn("actions::consumption_postcondition(before->items, after->items, item)", native)
         self.assertIn("return finish(std::move(result))", native)
+
+    def test_diary_menu_uses_the_retained_target_and_existing_owned_request(self) -> None:
+        menu = read("src/ui/control_menu.hpp")
+        self.assertIn('Write Diary  [', menu)
+        self.assertIn('control_submit(ControlAction::diary_target, target)', menu)
+        entry = read("src/flat/plugin_entry.cpp")
+        execution = entry.split("if (deferred_control_action && !menu_mode", 1)[1].split("if(pending_control_wait", 1)[0]
+        self.assertIn("request->action == synth::ui::ControlAction::diary_target", execution)
+        self.assertIn("target->session.generation() == generation", execution)
+        self.assertLess(execution.index("targeted && !actor"), execution.index("session->request_npc_diary(snapshot, &*target)"))
+        self.assertIn("request->generation != generation.value()", execution)
+
+    def test_diary_hotkey_keeps_crosshair_identity_and_blocks_menu_input(self) -> None:
+        entry = read("src/flat/plugin_entry.cpp")
+        execution = entry.split("if (hotkey_pressed(hotkeys.write_diary)", 1)[1].split(
+            "if (hotkey_pressed(hotkeys.synth_control)", 1)[0]
+        for guard in ("!menu_mode", "!regular_dialogue_blocked", "!synth::ui::MenuFramework::input_captured()",
+                      "session.get() != owner || runtime->generation() != generation",
+                      "!snapshot->picked_actor_form_id()", "target->form_id != *snapshot->picked_actor_form_id()"):
+            self.assertIn(guard, execution)
+        self.assertLess(execution.index("target->form_id !="),
+                        execution.index("session->request_npc_diary(snapshot, &*target)"))
+        self.assertIn("RuntimeCapturePurpose::dialogue", execution)
 
     def test_all_native_commands_use_checked_wrapper(self) -> None:
         direct_command = re.compile(r"(?m)^\s*(?:&\s*)?(git|cmake|ctest|xmake)\b")
@@ -907,7 +935,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("bytes[0xC83] != 1", transfer)
         self.assertIn("bytes + 0x38", transfer)
         self.assertIn("currency != object", transfer)
-        self.assertIn("const bool taking = request.name == runtime::RuntimeActionName::take_caps", transfer)
+        self.assertIn("const bool taking_caps = request.name == runtime::RuntimeActionName::take_caps", transfer)
         self.assertIn("taking ? actor != player : actor == player", transfer)
         self.assertIn("RuntimeActionName::give_caps || taking", transfer)
         self.assertLess(transfer.index("currency != object"), transfer.index("actor->RemoveItem(remove)"))
@@ -915,10 +943,35 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("result.transfer->recipient", transfer)
         self.assertNotIn("AddObjectToContainer(", transfer)
 
+    def test_equipped_transfer_has_one_immediate_owned_unequip_before_remove(self) -> None:
+        native = read("src/adapters/commonlib_actions.hpp")
+        transfer = native.split("case runtime::RuntimeActionName::give_item: {", 1)[1].split(
+            "case runtime::RuntimeActionName::equip_item:", 1)[0]
+        unequip = transfer.index("equipment->UnequipObject(")
+        verify = transfer.index("actions::transfer_unequip_postcondition(")
+        remove = transfer.index("actor->RemoveItem(remove)")
+        self.assertLess(unequip, verify)
+        self.assertLess(verify, remove)
+        self.assertIn("stack.index, false, false, true, true, nullptr", transfer)
+        self.assertIn("unequipped->stacks[*refreshed].extra != stack.extra", transfer)
+        self.assertIn("candidate->IsEquipped() == item.equipped", transfer)
+        self.assertIn("request.name != runtime::RuntimeActionName::give_item", transfer)
+        self.assertLess(transfer.index("quest-alias inventory cannot be transferred"), unequip)
+        resumed = transfer[verify:remove]
+        self.assertIn("before = std::move(unequipped)", resumed)
+        self.assertIn("validate_stack()", resumed)
+        self.assertIn("return finish(*invalid)", resumed)
+        self.assertIn("validate_owner()", transfer[unequip:verify])
+        self.assertIn("now() >= request.deadline", transfer[unequip:verify])
+        self.assertIn("request.cancellation.is_cancelled()", transfer[unequip:verify])
+        self.assertIn("epoch != FlatPickedReference::stamp()", transfer[unequip:verify])
+        self.assertIn("return finish(std::move(result))", transfer)
+        self.assertIn("const auto finish =", transfer)
+
     def test_native_inventory_postconditions_recheck_load_boundary(self) -> None:
         native = read("src/adapters/commonlib_actions.hpp")
         transfer = native.split("(void)actor->RemoveItem(remove);", 1)[1].split("return result;", 1)[0]
-        equipment = native.split("const bool accepted = consume ?", 1)[1].split("return finish(std::move(result));", 1)[0]
+        equipment = native.split("bool accepted{};", 1)[1].split("return finish(std::move(result));", 1)[0]
         for body, reader in ((transfer, "actor"), (transfer, "recipient"), (equipment, "actor")):
             with self.subTest(reader=reader, equipment=body is equipment):
                 self.assertRegex(body, r"epoch == FlatPickedReference::stamp\(\) && !menu_mode_active\(\)\s*"
@@ -1028,96 +1081,101 @@ class WaitPackageGates(unittest.TestCase):
         self.assertIn('menu_mode ? std::nullopt : synth::ui::Chatbox::take_submission()', pump)
         self.assertIn('caption ? caption->facing', pump)
 
-    def test_wait_is_owned_general_npc_package_and_not_companion_actor_value(self):
-        adapter = read('src/adapters/flat_wait_package.hpp')
-        action = read('src/adapters/commonlib_actions.hpp')
-        session = read('src/client/plugin_session.hpp')
-        selection = session[session.index('prepare_control_target('):session.index('bool request_control(')]
-        admission = adapter[adapter.index('static runtime::RuntimeActionResult apply'):adapter.index('static void tick')]
-        self.assertNotIn('waitingForPlayer', action)
-        for forbidden in ('teammate', 'IsInCombat', 'kScenePackage', 'hostile_to_player'):
-            self.assertNotIn(forbidden, admission)
-            self.assertNotIn(forbidden, selection)
-        self.assertNotIn('PutCreatedPackage', adapter)
-        self.assertIn('if (owned) actor.currentProcess->SetRunOncePackage(nullptr, &actor)', adapter)
-        self.assertIn('holder.package == old', adapter)
-        self.assertIn('lease.cancellation.is_cancelled()', adapter)
-        self.assertIn('lease.hold_clock.expired(now)', adapter)
-        self.assertIn('lease.hold_clock.pause(now - *paused_at_)', adapter)
-        script = read('scripts/papyrus/SYNTHWait.psc')
-        self.assertIn('target.ForceRefTo(subject)', script)
-        self.assertNotIn('anchor.SetPosition', script)
-        self.assertNotIn('anchor.MoveTo', script)
-        self.assertIn('subject.GetParentCell() == startCell', script)
-        self.assertNotIn('subject.MoveTo', script)
-        self.assertIn('target.Clear()', script)
-        self.assertIn('subject.StopCombat()', script)
-        self.assertIn('subject.SetRestrained(True)', script)
-        self.assertIn('RE::ACTOR_LIFE_STATE::kRestrained', adapter)
-        self.assertIn('previous.EvaluatePackage(True)', script)
-        hold = script.split('Bool Function HoldActor(', 1)[1].split('EndFunction', 1)[0]
-        self.assertLess(hold.index('If subject.SetRestrained(True)'), hold.index('restraintOwner.ForceRefTo(subject)'))
-        self.assertIn('subject.SetRestrained(False)', hold)  # Roll back a failed ownership receipt.
-        release = script.split('Bool Function ReleaseRestraint(', 1)[1].split('EndFunction', 1)[0]
-        self.assertIn('restraintOwner.GetActorReference()', release)
-        self.assertIn('previous.SetRestrained(False)', release)
-        self.assertLess(release.index('previous.SetRestrained(False)'), release.index('restraintOwner.Clear()'))
-        self.assertEqual(script.count('ReleaseRestraint(ticket, restraintOwner)'), 2)
-        refresh = script.split('Function RefreshByFormIds(', 1)[1].split('EndFunction', 1)[0]
-        self.assertNotIn('MoveTo', refresh)
-        self.assertIn('target.GetReference() == subject && Current(ticket)', refresh)
-        self.assertIn('Observed(ticket, activeId, expectedId, evidenceFlags, subject.GetSitState(), distance)', refresh)
-        self.assertIn('owner.IsRunning()', refresh)
-        self.assertIn('anchor.GetParentCell() == subject.GetParentCell()', refresh)
-        self.assertIn('completed->observation != lease.observation', adapter)
-        observation = adapter.split('static void observed(', 1)[1].split('// Migration only:', 1)[0]
-        self.assertIn('job_->receipt.current(ticket)', observation)
-        self.assertNotIn('RE::', observation)
-        self.assertNotIn('REX::', observation)
-        self.assertIn('std::chrono::seconds{30}', adapter)
-        self.assertIn('lease.quarantined = true', adapter)
-        self.assertIn('lease.revision == completed->revision', adapter)
-        self.assertIn('job_->started += now - *paused_at_', adapter)
-        self.assertIn('lease == leases_.end()', adapter)
-        self.assertIn('0xD34620', adapter)
-        self.assertIn('"SYNTH.esp"', adapter)
-        host = read('src/flat/plugin_entry.cpp')
-        self.assertIn('const auto targeted = waiting ||', host)
-        self.assertIn('RuntimeActionName::release_wait', host)
-        self.assertIn('FlatWaitPackage::retire()', host)
-        tick = host.index('FlatWaitPackage::tick(now)')
-        pump = host.index('void pump_runtime_impl()')
-        self.assertLess(host.index('adopt_session_result(now)', pump), tick)
-        # Holds must be pumped while dialogue is active, once initialization is ready.
-        self.assertIn('if (session->connection_ready())', host[tick-180:tick])
-        self.assertNotIn('external_ready()', host[tick-180:tick])
-        self.assertNotIn('ProcessLists::GetSingleton()', adapter)
-        self.assertIn('release_legacy(actor);', admission)
+    def test_wait_requires_owned_alias_package_and_physical_completion(self):
+        adapter=read('src/adapters/flat_wait_package.hpp')
+        script=read('scripts/papyrus/SYNTHWait.psc')
+        for forbidden in ('PutCreatedPackage','SetPlayerTeammate','ProcessLists::GetSingleton()'):
+            self.assertNotIn(forbidden,adapter)
+        self.assertIn('return pending(releasing?',adapter)
+        self.assertIn('same_wait_request(command->second.request,request)',adapter)
+        self.assertIn('value.package_owned=value.owned_package!=0&&value.owned_package==lease.package',adapter)
+        self.assertIn('const auto active=active_package_id(actor)',adapter)
+        self.assertIn('lease.settling&&lease.position_guard.anchored()&&lease.settle_clock.observe(state,now)',adapter)
+        self.assertIn('lease.position_guard.interrupted(state)',adapter)
+        self.assertIn('lease.position_guard.observe_active_package(state,owner_current)',adapter)
+        self.assertNotIn('!state.actor_available||!state.same_cell||!std::isfinite(state.distance)||state.distance>64',adapter)
+        self.assertIn('result.wait->confirms_success(request)',adapter)
+        self.assertIn('state.released()',adapter)
+        self.assertIn('lease.hold_clock.expired(now)',adapter)
+        self.assertIn('lease.hold_clock.pause(now-*paused_at_)',adapter)
+        self.assertIn('holder.package == old',adapter)
+        self.assertIn('if (owned) actor.currentProcess->SetRunOncePackage(nullptr, &actor)',adapter)
+        hold=script.split('Bool Function HoldActor(',1)[1].split('EndFunction',1)[0]
+        self.assertIn('Return False',hold)
+        self.assertNotIn('SetRestrained',hold)
+        self.assertNotIn('SetRestrained(True)',script)
+        for method in ('Apply','ReleaseByFormIds','RefreshByFormIds'):
+            function=script.split('Function '+method+'(',1)[1].split('EndFunction',1)[0]
+            self.assertNotIn('SetRestrained',function)
+            self.assertNotIn('ReleaseRestraint(',function)
+        self.assertEqual(script.count('ReleaseRestraint(ticket, restraintOwner)'),1)
+        for forbidden in ('subject.MoveTo','anchor.MoveTo','SetPlayerTeammate','SetFactionRank'):
+            self.assertNotIn(forbidden,script)
 
-    def test_wait_dispatch_never_uses_native_form_object_packing(self):
-        adapter = read('src/adapters/flat_wait_package.hpp')
-        dispatch = adapter.split('bool queued{};', 1)[1].split('NativeFaultRecorder::phase', 1)[0]
-        self.assertIn('"ResetByFormId", callback, ticket, owner_id)', dispatch)
-        self.assertIn('"ApplyByFormIds", callback, ticket, static_cast<std::int32_t>(slot)', dispatch)
-        self.assertIn('owner_id, actor_id, anchor_id, cell_id,', dispatch)
-        self.assertIn('"RefreshByFormIds", callback, ticket,', dispatch)
-        for borrowed in ('actor.get()', 'callback, ticket, owner)', 'owner, actor', 'anchor, cell'):
-            self.assertNotIn(borrowed, dispatch)
-        for form in ('owner', 'actor', 'anchor', 'cell'):
-            self.assertIn(f'std::bit_cast<std::int32_t>({form}->GetFormID())', adapter)
-        script = read('scripts/papyrus/SYNTHWait.psc')
-        for name in ('ApplyByFormIds', 'ResetByFormId'):
-            function = script.split(f'Function {name}(', 1)[1].split('EndFunction', 1)[0]
-            signature = function.split(') Global', 1)[0]
-            for object_type in ('Quest ', 'Actor ', 'ObjectReference ', 'Cell '):
-                self.assertNotIn(object_type, signature)
-            self.assertLess(function.index('If Current(ticket)'), function.index('Game.GetForm'))
-            self.assertIn('Finished(ticket, False)', function)
-        for field, kind in (('ownerId', 'Quest'), ('subjectId', 'Actor'), ('anchorId', 'ObjectReference'), ('cellId', 'Cell')):
-            self.assertIn(f'Game.GetForm({field}) as {kind}', script)
-        # Preserve old signatures for saved stacks; their existing receipt checks reject stale work.
-        self.assertIn('Function Reset(String ticket, Quest owner) Global', script)
-        self.assertIn('Function Apply(String ticket, Int slot, Quest owner, Actor subject, ObjectReference anchor, Cell startCell,', script)
+    def test_wait_dispatch_is_scalar_and_release_preserves_original_identity(self):
+        adapter=read('src/adapters/flat_wait_package.hpp')
+        dispatch=adapter.split('bool queued{};',1)[1].split('NativeFaultRecorder::phase',1)[0]
+        for method in ('ResetByFormId','ApplyByFormIds','RefreshByFormIds','ReleaseByFormIds'):
+            self.assertIn('"'+method+'",callback,ticket',dispatch)
+        self.assertIn('std::bit_cast<std::int32_t>(lease.form)',adapter)
+        for borrowed in ('actor.get()', 'callback,ticket,owner)', 'owner,actor', 'anchor,cell'):
+            self.assertNotIn(borrowed,dispatch)
+        script=read('scripts/papyrus/SYNTHWait.psc')
+        for method in ('ApplyByFormIds','ResetByFormId','ReleaseByFormIds'):
+            function=script.split('Function '+method+'(',1)[1].split('EndFunction',1)[0]
+            signature=function.split(') Global',1)[0]
+            for borrowed in ('Quest ','Actor ','ObjectReference ','Cell '):
+                self.assertNotIn(borrowed,signature)
+            self.assertLess(function.index('If Current(ticket)'),function.index('Game.GetForm'))
+        release=script.split('Function ReleaseByFormIds(',1)[1].split('EndFunction',1)[0]
+        self.assertIn('previous.GetFormID() == subjectId',release)
+        self.assertIn('legacyOwner.GetReference() == None',release)
+        self.assertIn('target.GetReference() == None && legacyOwner.GetReference() == None',release)
+        self.assertIn('Function Reset(String ticket, Quest owner) Global',script)
+        self.assertIn('Function Apply(String ticket, Int slot, Quest owner, Actor subject, ObjectReference anchor, Cell startCell,',script)
+
+    def test_wait_vm_timeout_cannot_release_or_reuse_an_undrained_stack(self):
+        source=read('src/adapters/flat_wait_package.hpp')
+        timeout=source.split('std::optional<Job> completed;bool draining{},warn{};',1)[1].split('if(completed)',1)[0]
+        self.assertIn('if(!job_->receipt.done())',timeout)
+        self.assertIn('job_->receipt.revoke_install()',timeout)
+        self.assertIn('else {completed=std::move(job_);job_.reset();}',timeout)
+        self.assertIn('if(draining)',timeout)
+        self.assertIn('return;',timeout)
+        callback=source.split('static void finished(',1)[1].split('static void observed(',1)[0]
+        self.assertIn('job_->ticket==ticket',callback)
+        self.assertIn('else recovery_requested_=true',callback)
+        self.assertNotIn('job_.reset()',callback)
+        self.assertIn('static void cancel_all()',source)
+        self.assertIn('static void note_menu_pause(',source)
+
+    def test_stale_wait_stack_cannot_clear_restraint_without_a_current_receipt(self):
+        script=read('scripts/papyrus/SYNTHWait.psc')
+        hold=script.split('Bool Function HoldActor(',1)[1].split('EndFunction',1)[0]
+        for branch in hold.split('If !Current(ticket)\n')[1:]:
+            self.assertNotIn('SetRestrained(False)',branch.split('EndIf',1)[0],
+                'Known blocking race: a restored/cancelled stack can clear newer or foreign restraint')
+        legacy=script.split('Bool Function ReleaseRestraint(',1)[1].split('EndFunction',1)[0]
+        before=legacy.split('previous.SetRestrained(False)',1)[0]
+        self.assertIn('If !Current(ticket) || restraintOwner.GetReference() != previous',before)
+        self.assertEqual(script.count('SetRestrained(False)'),1)
+
+    def test_wait_reset_is_native_verified_before_admission(self):
+        source=read('src/adapters/flat_wait_package.hpp')
+        inventory=source.split('static std::optional<AliasInventory> alias_inventory()',1)[1].split('static void request_recovery(',1)[0]
+        self.assertIn('const TryReadLock lock{owner->aliasAccessLock}',inventory)
+        self.assertIn('owner->aliasedHandles.size()>512',inventory)
+        self.assertIn('references.size()>1',inventory)
+        self.assertNotIn('GetAliasedRef',inventory)
+        reset=source.split('if(completed->reset)',1)[1].split('} else {',1)[0]
+        self.assertIn('initialized_=false;reset_verifying_=ok',reset)
+        self.assertNotIn('initialized_=ok',source)
+        self.assertIn('reset_clock_.observe(state,now)',source)
+        self.assertIn('remember_recovery_actors(*inventory)',source)
+        self.assertIn('if(owned&&*owned!=0){request_recovery(actor);return {};}',source)
+        self.assertIn('if(!*aliases){request_recovery();return {};}',source)
+        self.assertIn('reset&&reset_refresh_actor_!=0',source)
+        self.assertIn('Unexpected saved Wait alias requires recovery',source)
 
     def test_manual_chat_captures_identity_before_pause_and_revalidates_on_send(self):
         for lane in ('flat', 'vr'):
@@ -1131,7 +1189,7 @@ class WaitPackageGates(unittest.TestCase):
         host = read('src/flat/plugin_entry.cpp')
         hotkey = host.split('hotkey_pressed(hotkeys.talk_to_npc)', 1)[1].split('hotkey_pressed(hotkeys.synth_control)', 1)[0]
         self.assertLess(hotkey.index('prepare_chat_target(snapshot)'), hotkey.index('Chatbox::request_open'))
-        self.assertIn('Chatbox::request_open(*target)', hotkey)
+        self.assertIn('Chatbox::request_open(*target,session->prepare_chat_targets(snapshot))', hotkey)
         self.assertIn('target.manual_chat', host)
         self.assertIn('session->submit_text(snapshot, std::move(submission->text), &target)', host)
         self.assertIn('capture_actor_snapshot(now,target.form_id)', host)
@@ -1164,6 +1222,16 @@ class WaitPackageGates(unittest.TestCase):
                           'voice_target_.reset()', 'external_owner_.end("")'):
             self.assertIn(operation, cancellation)
 
+    def test_conversation_does_not_acquire_wait_package(self):
+        package = read('src/adapters/flat_wait_package.hpp')
+        speech = package.split('static void update_conversation(', 1)[1].split('static runtime::RuntimeActionResult apply(', 1)[0]
+        self.assertNotIn('RuntimeActionName::wait_here', speech)
+        self.assertNotIn('apply(*actor', speech)
+        self.assertIn('if(lease.conversational&&lease.actor)close(lease,', speech)
+        cleanup=package.split('static void close(',1)[1].split('static void complete_command(',1)[0]
+        self.assertIn('lease.waiting=false', cleanup)
+        self.assertIn('job_->receipt.revoke_install()', cleanup)
+
     def test_conversation_fallback_does_not_change_command_targeting(self):
         session = read('src/client/plugin_session.hpp')
         prepare = session.split('prepare_chat_target(const Snapshot& snapshot)', 1)[1].split('bool submit_text', 1)[0]
@@ -1173,7 +1241,7 @@ class WaitPackageGates(unittest.TestCase):
         conversation = session.split('std::optional<context::TargetContext> conversation_target(', 1)[1].split(
             'std::optional<context::TargetContext> selected_target(', 1)[0]
         for guard in ('conversation_area_available()', 'retained->matches(actor)',
-                      'retained->session.is_cancelled()', 'nearby_conversation_audible', 'distance > range'):
+                      'retained->session.is_cancelled()', 'player_speech_audible', 'distance > range'):
             self.assertIn(guard, conversation)
         command = session.split('std::optional<context::TargetContext> selected_target(', 1)[1].split(
             'std::optional<context::TargetContext> pointed_subject(', 1)[0]
@@ -1183,3 +1251,47 @@ class WaitPackageGates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConversationApproachGates(unittest.TestCase):
+    def test_owned_cleanup_pumps_without_a_network_session_after_world_dwell(self):
+        source=read('src/flat/plugin_entry.cpp')
+        retirement=source[source.index('void retire_session('):source.index('void invalidate_sessions(')]
+        self.assertLess(retirement.index('FlatConversationApproach::update({},false)'),retirement.index('if (!session) return;'))
+        pump=source[source.index('void pump_runtime_impl()'):source.index('void pump_runtime() noexcept',source.index('void pump_runtime_impl()'))]
+        cleanup=pump.index('FlatConversationApproach::tick(now)')
+        self.assertEqual(1,pump.count('FlatConversationApproach::tick(now)'))
+        self.assertLess(pump.index('world_ready_for_capture()'),cleanup)
+        self.assertLess(pump.index('if (!session && menu_mode)'),cleanup)
+        self.assertLess(cleanup,pump.index('adopt_session_result(now)'))
+        self.assertIn('!session || !session->connection_ready() || session->halting()',pump[:cleanup])
+
+    def test_approach_is_player_input_only_and_actions_revoke_before_queueing(self):
+        source=read('src/client/plugin_session.hpp')
+        self.assertEqual(2,source.count('hold_conversation_actor(target,cancellation,controls.mode)'))
+        self.assertIn('conversation_approach_mode(mode)',source)
+        actions=source[source.index('const auto* action = std::get_if<protocol_native::Action>'):source.index('// Continuations retain the same rollback owner')]
+        self.assertLess(actions.index('conversation_holds_.suspend(cancellation)'),actions.index('pending_actions_.push_back'))
+        modes=read('src/client/conversation_holds.hpp')
+        self.assertIn('entry.hold.approach_player=entry.hold.approach_player || approach_player',modes)
+
+    def test_vm_timeout_does_not_drop_undrained_alias_ownership(self):
+        source=read('src/adapters/flat_conversation_approach.hpp')
+        timeout=source[source.index('bool draining{}, report_timeout{}'):source.index('if (completed) {')]
+        self.assertIn('if (!job_->receipt.done())',timeout)
+        self.assertIn('job_->receipt.revoke_install()',timeout)
+        self.assertIn('else {completed=std::move(job_);job_.reset();}',timeout)
+        self.assertIn('if (draining)',timeout)
+        self.assertIn('return; // No alias release or reuse',timeout)
+
+    def test_unknown_saved_completion_requests_recovery_without_replacing_a_live_owner(self):
+        source=read('src/adapters/flat_conversation_approach.hpp')
+        callback=source[source.index('static void finished('):source.index('static void observed(')]
+        self.assertIn('job_->ticket==ticket',callback)
+        self.assertIn('else recovery_requested_=true',callback)
+        self.assertNotIn('job_.reset()',callback)
+        recovery=source[source.index('if (recovery_requested_) {'):source.index('// EvaluatePackage may finish')]
+        self.assertIn('if (job_ && !job_->receipt.done())',recovery)
+        self.assertIn('job_->receipt.revoke_install()',recovery)
+        self.assertIn('controller_.reset();initialized_=false',recovery)
+        self.assertIn('if (recovery_requested_) return;',source)

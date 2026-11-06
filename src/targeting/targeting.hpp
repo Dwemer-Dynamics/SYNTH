@@ -43,11 +43,19 @@ namespace synth::targeting {
     std::ranges::transform(race, race.begin(), [](const unsigned char value) {
         return static_cast<char>(std::tolower(value));
     });
+    // Native robot race IDs do not consistently contain "robot". These are the
+    // same conversational classes supported by NPC exchanges, not every creature.
+    if (race.find("feral") != std::string::npos) return false;
     return race.find("human") != std::string::npos ||
            race.find("ghoul") != std::string::npos ||
            race.find("supermutant") != std::string::npos ||
            race.find("synth") != std::string::npos ||
-           race.find("robot") != std::string::npos;
+           race.find("robot") != std::string::npos ||
+           race.find("handy") != std::string::npos ||
+           race.find("protectron") != std::string::npos ||
+           race.find("assaultron") != std::string::npos ||
+           race.find("eyebot") != std::string::npos ||
+           race.find("sentrybot") != std::string::npos;
 }
 
 struct Ray final {
@@ -116,6 +124,14 @@ struct SelectionBounds final {
     double actor_distance, std::optional<bool> line_of_sight) noexcept {
     return std::isfinite(actor_distance) && actor_distance >= 0 && actor_distance <= range &&
         (actor_distance <= proximity || line_of_sight.value_or(false));
+}
+
+// Speech hearing uses the configured radius in the captured physical area. Camera
+// direction/unknown visual LOS must not shrink it to the automatic activation radius.
+// This is proximity hearing, not an occlusion measurement.
+[[nodiscard]] inline bool player_speech_audible(double range, double actor_distance) noexcept {
+    return std::isfinite(range) && range > 0 && std::isfinite(actor_distance) &&
+        actor_distance >= 0 && actor_distance <= range;
 }
 
 [[nodiscard]] inline bool snapshot_identity_matches(const core::RuntimeSnapshot& snapshot,
@@ -305,9 +321,9 @@ private:
     if (snapshot.variant() == core::RuntimeVariant::flat) {
         selected = select_flat_crosshair(snapshot, playthrough, bounds, direct_eligible);
     } else {
-        if (!snapshot.hmd_pose()) return {.status = TargetingStatus::unavailable_pose};
+        if (!snapshot.hmd_pose()) return {.status = TargetingStatus::unavailable_pose, .target = std::nullopt};
         if (!snapshot.hmd_pose()->fresh_at(now) || snapshot.hmd_pose()->frame() != snapshot.frame())
-            return {.status = TargetingStatus::stale_pose};
+            return {.status = TargetingStatus::stale_pose, .target = std::nullopt};
         origin = snapshot.hmd_pose()->pose().position();
         selected = select_vr_controller_ray(snapshot, playthrough, Hand::right, now, bounds, direct_eligible);
         if (!selected.target) selected = select_vr_hmd_gaze(snapshot, playthrough, now, bounds, direct_eligible);

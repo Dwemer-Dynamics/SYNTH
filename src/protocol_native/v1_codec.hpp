@@ -5,6 +5,7 @@
 #include "core/quest_event_mailbox.hpp"
 #include "core/player_event_sampler.hpp"
 #include "client/actor_event_binding.hpp"
+#include "runtime/social_task_codec.hpp"
 
 #include "json/json.hpp"
 
@@ -83,12 +84,14 @@ struct ActorState {
     std::optional<std::vector<CombatContactState>> combat_contacts;
     std::optional<EnemyAwarenessState> enemy_awareness;
     std::optional<bool> conversation_held;
+    std::optional<bool> wait_held;
 };
 struct WorldState {
     std::string location, cell, worldspace, weather;
     bool interior{};
     std::uint64_t game_time_ticks{};
     std::optional<core::SceneIdentity> scene;
+    std::optional<core::LocationIdentity> location_ref;
 };
 struct LoadedPlugin {
     std::string plugin_name, form_id_prefix;
@@ -169,9 +172,10 @@ struct Dialogue {
     std::optional<Speech> speech;
     std::optional<Identity> listener;
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}; };
+struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
-using Payload = std::variant<Start, Dialogue, Action, Status, End>;
+using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
 struct Line {
     std::string line_id, request_id, turn_id, runtime_variant;
     std::uint64_t generation{};
@@ -347,15 +351,21 @@ inline Line decode_line(std::string_view wire) {
                             text(a,"capability"),identity(required(a,"actor")),std::move(target),
                             arguments,integer(a,"deadline_ms")};
     }
+    else if(type=="social_task") {
+        if (line.protocol_version!=2 || line.runtime_variant!="flat") throw std::invalid_argument{"social tasks require v2 flat responses"};
+        closed_object(payload,{"task"});
+        line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
+    }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
             payload.find("combat_targets") ? required(payload,"combat_targets").as_bool() : false,
             payload.find("ambient_npc") ? required(payload,"ambient_npc").as_bool() : false,
             payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
-            payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false};
+            payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
+            payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -558,6 +568,11 @@ inline json::Value actor_state_value(const ActorState& value) {
             throw std::invalid_argument{"conversation hold requires its live restrained NPC"};
         result.emplace_back("conversation_held",*value.conversation_held);
     }
+    if (value.wait_held) {
+        if (*value.wait_held && ((value.life_state!="alive"&&value.life_state!="restrained") || !value.alive || value.disabled || value.actor.form_id=="0x00000014"))
+            throw std::invalid_argument{"explicit wait requires its live owned NPC"};
+        result.emplace_back("wait_held",*value.wait_held);
+    }
     if (value.enemy_awareness) {
         const auto numeric_form=[](const std::string& form) {
             std::uint32_t id{};
@@ -586,7 +601,7 @@ inline json::Value actor_state_value(const ActorState& value) {
     }
     return json::Value{std::move(result)};
 }
-inline json::Value world_state_value(const WorldState& value, bool include_scene = false) {
+inline json::Value world_state_value(const WorldState& value, bool include_scene = false, bool include_location = false) {
     auto result = object({
         {"location", value.location}, {"cell", value.cell},
         {"worldspace", value.worldspace}, {"weather", value.weather},
@@ -604,6 +619,13 @@ inline json::Value world_state_value(const WorldState& value, bool include_scene
             {"cell", reference(scene.cell_form_id, scene.cell_origin_plugin)},
             {"worldspace", value.interior ? json::Value{nullptr}
                 : reference(scene.worldspace_form_id, scene.worldspace_origin_plugin)}})});
+    }
+    if (include_location && value.location_ref) {
+        if (!value.location_ref->valid()) throw std::invalid_argument{"invalid canonical location identity"};
+        char form[11]{};
+        std::snprintf(form, sizeof(form), "0x%08X", value.location_ref->form_id);
+        result.emplace_back("location_ref", json::Value{object({{"form_id", std::string{form}},
+            {"origin_plugin", value.location_ref->origin_plugin}})});
     }
     return json::Value{std::move(result)};
 }
@@ -694,7 +716,8 @@ inline std::string encode_event(const EventContext& context, std::string type, j
         throw std::invalid_argument{"unsupported event protocol version"};
     if (context.protocol_version == 2) {
         const bool bound = type == "input_text" || type == "input_audio" || type == "activate"
-            || type == "trigger" || type == "profile_refresh" || type == "diary_request" || type == "action_result";
+            || type == "trigger" || type == "profile_refresh" || type == "diary_request" || type == "action_result"
+            || type == "social_task_request" || type == "social_task_progress";
         if (context.context_sequence > 9'007'199'254'740'991ULL
             || (bound ? context.context_sequence == 0 : context.context_sequence != 0))
             throw std::invalid_argument{"event context binding is invalid"};
@@ -706,6 +729,29 @@ inline std::string encode_event(const EventContext& context, std::string type, j
         {"runtime_version",context.runtime_version},{"capabilities",std::move(caps)},{"payload",std::move(payload)}});
     if (context.protocol_version == 2) fields.emplace_back("context_sequence", context.context_sequence);
     return json::write(json::Value{std::move(fields)})+"\n";
+}
+inline std::string encode_social_task_progress(const EventContext& context,const runtime::SocialTaskCommand& command) {
+    if (context.protocol_version!=2 || context.runtime_variant!="flat" ||
+        std::ranges::find(context.capabilities,"social.tasks.v1")==context.capabilities.end() ||
+        !runtime::social_task_valid(command.task) || !runtime::social_id(command.execution_id))
+        throw std::invalid_argument{"invalid social progress owner"};
+    std::string phase;
+    switch (command.kind) {
+        case runtime::SocialTaskCommandKind::claim: phase="started";break;
+        case runtime::SocialTaskCommandKind::arrived: phase="arrived";break;
+        case runtime::SocialTaskCommandKind::spoken: phase="spoken";break;
+        case runtime::SocialTaskCommandKind::failed: phase="failed";break;
+        case runtime::SocialTaskCommandKind::cancelled: phase="cancelled";break;
+        default: throw std::invalid_argument{"navigation is not a social progress event"};
+    }
+    auto payload=object({{"task_id",command.task.task_id},{"expected_revision",command.task.revision},
+        {"execution_id",command.execution_id},{"phase",phase}});
+    if (command.kind==runtime::SocialTaskCommandKind::spoken) {
+        if (!runtime::social_id(command.proof_request_id) || !runtime::social_id(command.proof_line_id))
+            throw std::invalid_argument{"social delivery has no presentation proof"};
+        payload.emplace_back("proof",json::Value{object({{"request_id",command.proof_request_id},{"line_id",command.proof_line_id}})});
+    }
+    return encode_event(context,"social_task_progress",json::Value{std::move(payload)});
 }
 inline std::string encode_init(const EventContext& context, std::string locale, bool hmd_pose_fresh=false,
                                const std::vector<LoadedPlugin>& loaded_plugins = {}) {
@@ -949,6 +995,9 @@ inline std::string encode_context(const EventContext& context, std::string playt
         const std::size_t inventory_limit = context.protocol_version == 2 && context.runtime_variant == "flat" &&
             std::ranges::find(context.capabilities, "context.inventory_512") != context.capabilities.end() ? 512 : 32;
         for(const auto& state:actor_states) {
+            if (state.wait_held && (context.protocol_version!=2 || context.runtime_variant!="flat" ||
+                std::ranges::find(context.capabilities,"context.wait_state")==context.capabilities.end()))
+                throw std::invalid_argument{"explicit wait state capability was not negotiated"};
             if (state.inventory.size() > inventory_limit)
                 throw std::invalid_argument{"inventory exceeds context capability limit"};
             if (state.combat_target && (context.protocol_version != 2 ||
@@ -975,7 +1024,9 @@ inline std::string encode_context(const EventContext& context, std::string playt
         payload.emplace_back("actor_states",std::move(states));
     }
     if(world) payload.emplace_back("world",world_state_value(*world, context.protocol_version == 2 &&
-        std::ranges::find(context.capabilities, "dialogue.rechat.scene") != context.capabilities.end()));
+        std::ranges::find(context.capabilities, "dialogue.rechat.scene") != context.capabilities.end(),
+        context.protocol_version == 2 && context.runtime_variant == "flat" &&
+        std::ranges::find(context.capabilities, "context.location_identity") != context.capabilities.end()));
     json::Value::Array quests;
     const bool tracking = context.protocol_version == 2 && context.runtime_variant == "flat" &&
         std::ranges::find(context.capabilities, "context.quest_tracking") != context.capabilities.end();

@@ -24,6 +24,8 @@ struct SceneAdmission final {
     using Clock = core::SnapshotClock;
     std::shared_ptr<const core::RuntimeSnapshot> original;
     std::vector<integration::PromptTarget> actors;
+    // A combat bark must still belong to active combat when its speech reaches presentation.
+    std::uint32_t combat_speaker_form_id{};
     std::atomic_bool rejected{};
     std::atomic<std::int64_t> verified_until{};
 
@@ -50,6 +52,8 @@ struct SceneAdmission final {
             if (found == snapshot->actors().end()) return Stage::presentation_actor_missing;
             if (!retained.matches(*found)) return Stage::presentation_actor_identity_changed;
             if (!targeting::dialogue_actor_available(*found))
+                return Stage::presentation_actor_unavailable;
+            if (found->form_id() == combat_speaker_form_id && !found->in_combat())
                 return Stage::presentation_actor_unavailable;
             if (targeting::distance(snapshot->player_pose().position(),found->position()) > targeting::SelectionBounds{}.maximum_distance)
                 return Stage::presentation_actor_out_of_range;

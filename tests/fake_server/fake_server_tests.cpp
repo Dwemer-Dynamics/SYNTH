@@ -29,12 +29,16 @@ public:
     bool player_support{};
     bool player_reaction_support{};
     bool actor_support{};
+    bool social_support{};
+    std::optional<synth::runtime::SocialTaskDescriptor> social_offer;
     bool inventory_support{};
     bool action_inventory_support{};
     bool consumption_support{};
     bool transfer_support{};
     bool caps_support{};
     bool player_caps_support{};
+    bool player_item_support{};
+    bool gift_menu_support{};
     bool rechat_scene_support{};
     bool combat_targets_support{};
     std::optional<synth::json::Value> combat_contacts_ack;
@@ -77,10 +81,11 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
-            const auto code = player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
+        if ((social_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+            const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
+            if(social_support)payload.emplace_back("social_tasks",true);
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
             if (combat_targets_support) payload.emplace_back("combat_targets",true);
             if (combat_contacts_ack) payload.emplace_back("combat_contacts",*combat_contacts_ack);
@@ -102,6 +107,8 @@ public:
             body += line("status", json::Value{protocol_native::object({{"code", audio_ack}})});
         if ((actor_support || player_support) && protocol_native::text(event, "type") == "context" && !player_ack.empty())
             body += line("status", json::Value{protocol_native::object({{"code", player_ack}})});
+        if(social_offer&&protocol_native::text(event,"type")=="context")
+            body+=line("social_task",json::Value{protocol_native::object({{"task",runtime::encode_social_task(*social_offer)}})});
         body += line("response_end", json::Value{protocol_native::object({
             {"status", fault == Fault::failed ? "error" : "complete"}})}, true);
         if (fault == Fault::truncated) body.pop_back();
@@ -674,17 +681,17 @@ int main() {
             std::vector<std::string> caps{"context.combat_contacts","context.combat_targets","dialogue.turn_ownership"};
             if (mode==4) caps.erase(caps.begin());
             if (mode==5) caps.pop_back();
-            SynthClient client{wire,SessionOptions{.runtime_session_id="session:contacts",.runtime_variant=mode==6?"vr":"flat",
+            SynthClient contacts_client{wire,SessionOptions{.runtime_session_id="session:contacts",.runtime_variant=mode==6?"vr":"flat",
                 .client_version="test",.runtime_version="1.11.240",.capabilities=caps,.protocol_version=2}};
-            const auto init=client.initialize(1,false);
+            const auto init=contacts_client.initialize(1,false);
             CHECK((init.status==RequestStatus::complete)==(mode!=7));
-            CHECK(client.combat_contacts_ready()==(mode==0));
+            CHECK(contacts_client.combat_contacts_ready()==(mode==0));
             if (mode==7) continue;
             synth::protocol_native::ActorState observed;
             observed.actor=actor;observed.alive=true;
             observed.combat_contacts=std::vector<synth::protocol_native::CombatContactState>{{
                 {"0x002377B6","Fallout4.esm","save:one","Mole Rat"},player,"MoleratRace",350,true,true,"visible"}};
-            CHECK(client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
+            CHECK(contacts_client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
             const auto event=synth::json::parse(wire.requests.back().body);
             const auto& payload=synth::protocol_native::required(event,"payload");
             const auto& state=synth::protocol_native::required(payload,"actor_states").as_array().front();
@@ -692,8 +699,8 @@ int main() {
             CHECK(synth::protocol_native::required(payload,"audience").as_array().size()==1);
             CHECK(observed.combat_contacts->size()==1);
             wire.combat_contacts_ack=false;
-            CHECK(client.initialize(2,false).status==RequestStatus::complete);
-            CHECK(!client.combat_contacts_ready());
+            CHECK(contacts_client.initialize(2,false).status==RequestStatus::complete);
+            CHECK(!contacts_client.combat_contacts_ready());
         }
         // Broader observations require their own explicit ACK; contacts ACK alone cannot enable them.
         for (int mode=0;mode<9;++mode) {
@@ -702,15 +709,15 @@ int main() {
             std::vector<std::string> caps{"context.enemy_awareness","context.combat_targets","dialogue.turn_ownership"};
             if(mode==4)caps.erase(caps.begin());
             if(mode==5)caps.pop_back();
-            SynthClient client{wire,SessionOptions{.runtime_session_id="session:awareness",.runtime_variant=mode==6?"vr":"flat",
+            SynthClient awareness_client{wire,SessionOptions{.runtime_session_id="session:awareness",.runtime_variant=mode==6?"vr":"flat",
                 .client_version="test",.runtime_version="1.11.240",.capabilities=caps,.protocol_version=static_cast<std::uint32_t>(mode==8?1:2)}};
-            const auto init=client.initialize(1,false);
+            const auto init=awareness_client.initialize(1,false);
             CHECK((init.status==RequestStatus::complete)==(mode!=7 && mode!=8));
-            CHECK(client.enemy_awareness_ready()==(mode==0));
+            CHECK(awareness_client.enemy_awareness_ready()==(mode==0));
             if(mode==7 || mode==8)continue;
             synth::protocol_native::ActorState observed;observed.actor=actor;observed.alive=true;
             observed.enemy_awareness=synth::protocol_native::EnemyAwarenessState{{{{"0x002377B6","Fallout4.esm","save:one","Mole Rat"},"MoleratRace",350,true,false,"visible"}}, {}};
-            CHECK(client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
+            CHECK(awareness_client.publish_context(0,"save:one",player,actor,{actor},{observed},std::nullopt,{}, {}, {}).status==RequestStatus::complete);
             const auto event=synth::json::parse(wire.requests.back().body);
             const auto& payload=synth::protocol_native::required(event,"payload");
             const auto& state=synth::protocol_native::required(payload,"actor_states").as_array().front();
@@ -718,8 +725,8 @@ int main() {
             CHECK(synth::protocol_native::required(payload,"audience").as_array().size()==1);
             CHECK(observed.enemy_awareness->current.size()==1);
             wire.enemy_awareness_ack=false;
-            CHECK(client.initialize(2,false).status==RequestStatus::complete);
-            CHECK(!client.enemy_awareness_ready());
+            CHECK(awareness_client.initialize(2,false).status==RequestStatus::complete);
+            CHECK(!awareness_client.enemy_awareness_ready());
         }
         const std::vector<std::string> ambient_caps{"dialogue.ambient_npc", "dialogue.turn_ownership",
             "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity"};
@@ -1345,6 +1352,32 @@ int main() {
             CHECK(player_client.initialize(2,false).status==RequestStatus::malformed_response);
             CHECK(!player_client.player_events_ready());
         }
+        for(int mode=0;mode<4;++mode) {
+            BindingEchoTransport wire;wire.player_support=true;wire.social_support=mode!=1;
+            SessionOptions options{.runtime_session_id="session:social-ack",.runtime_variant=mode==2?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities={"context.player_events","social.tasks.v1",
+                    "context.saved_anchor","context.location_identity"},.protocol_version=2};
+            if(mode==3)options.capabilities.pop_back();
+            SynthClient social_client{wire,options};
+            CHECK(social_client.initialize(1,false).status==RequestStatus::complete);
+            CHECK(social_client.social_tasks_ready()==(mode==0));
+            wire.social_offer=synth::runtime::SocialTaskDescriptor{"social:0123456789abcdef0123456789abcdef",1,
+                {0x15,"Fallout4.esm","save:one"},{0x16,"Fallout4.esm","save:one"},"the water pump","now","","ready",{},{},"Codsworth","Jun"};
+            const auto published=social_client.publish_context(0,"save:one",{"0x00000014","Fallout4.esm","save:one","Player"},
+                {},{},{},{},{},{},{ });
+            CHECK(published.status==(mode==0?RequestStatus::complete:RequestStatus::malformed_response));
+            if(mode==0) {
+                const auto now=synth::core::SnapshotClock::now();
+                synth::core::PlayerEventSample before{synth::core::RuntimeGeneration::initial(),synth::core::RuntimeVariant::flat,
+                    0x14,"Fallout4.esm","save:one",now,100,10,true};
+                auto after=before;after.observed_at+=std::chrono::seconds{1};after.game_time_ticks=101;after.level=11;
+                const synth::protocol_native::NativePlayerEvent observed{{1,synth::core::PlayerEventKind::level_up,before,after},200};
+                const auto with_event=[&] {return social_client.publish_context(0,"save:one",{"0x00000014","Fallout4.esm","save:one","Player"},
+                    {},{},{},{},{},{},{},{},{},{},{},{},{},{},std::nullopt,observed);};
+                CHECK(with_event().status==RequestStatus::complete); // ACK plus authoritative offer, not fixed three lines.
+                wire.player_ack="wrong_ack";CHECK(with_event().status==RequestStatus::malformed_response);
+            }
+        }
         for (int mode=0;mode<7;++mode) {
             BindingEchoTransport wire;wire.actor_support=mode!=0;
             SessionOptions options{.runtime_session_id="session:actor-event",.runtime_variant=mode==3?"vr":"flat",
@@ -1704,6 +1737,116 @@ int main() {
             CHECK(candidate.initialize(3,false).status!=RequestStatus::complete && !candidate.player_caps_ready());
             wire.fault=BindingEchoTransport::Fault::none;
             CHECK(candidate.initialize(4,false).status==RequestStatus::complete && candidate.player_caps_ready());
+        }
+        // Player payments cannot borrow NPC-giving-caps readiness, including after a save-generation change.
+        for (int mode=0;mode<28;++mode) {
+            BindingEchoTransport wire;wire.player_item_support=mode==0 || mode>=6;
+            wire.caps_support=mode==1;wire.transfer_support=mode==2;
+            wire.consumption_support=mode==3;wire.action_inventory_support=mode==4;
+            SessionOptions options{.runtime_session_id="player-items:ready",.runtime_variant=mode==14?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",
+                .capabilities={"action.player_item_inventory","action.take_item_from_player","action.caps_inventory","action.give_caps_to",
+                    "action.transfer_inventory","action.give_item_to","action.inventory_observation","dialogue.turn_ownership"},
+                .protocol_version=mode==15?1ULL:2ULL};
+            if(mode>=6 && mode<=11) options.capabilities.erase(options.capabilities.begin()+(mode<=7 ? mode-6 : mode-4));
+            if(mode>=16 && mode<=22) wire.fault=std::array{BindingEchoTransport::Fault::truncated,BindingEchoTransport::Fault::sequence,
+                BindingEchoTransport::Fault::timeout,BindingEchoTransport::Fault::failed,BindingEchoTransport::Fault::http_error,
+                BindingEchoTransport::Fault::version,BindingEchoTransport::Fault::duplicate_id}[mode-16];
+            if(mode==23) for(const auto* cap:{"action.consume","action.consume_inventory","context.inventory_512","context.actor_events"})
+                options.capabilities.emplace_back(cap);
+            if(mode>=24) wire.fault=std::array{BindingEchoTransport::Fault::request,BindingEchoTransport::Fault::turn,
+                BindingEchoTransport::Fault::generation,BindingEchoTransport::Fault::variant}[mode-24];
+            SynthClient candidate{wire,options};CHECK(!candidate.player_item_ready());
+            const auto payment_initialized=candidate.initialize(1,false);const bool ready=mode==0 || mode==12 || mode==13 || mode==23;
+            CHECK(candidate.player_item_ready()==ready);
+            CHECK(candidate.caps_ready()==(ready || mode==1));
+            CHECK(candidate.transfer_ready()==(ready || mode==1 || mode==2));
+            CHECK(candidate.consumption_ready()==(mode==23));
+            if(mode==23) CHECK(candidate.extended_inventory_ready() && candidate.actor_events_ready());
+            if(payment_initialized.status!=RequestStatus::complete) continue;
+            const auto scene=candidate.publish_context(0,"save:one",player,actor,{}, {},std::nullopt,{}, {},{});
+            const synth::protocol_native::ActionTransferObservation observed{{player,{},"unavailable"},{actor,{},"complete"}};
+            const auto before=wire.requests.size();bool refused=false;
+            try{(void)candidate.send_action_result("payment:action","payment:key","failed","unknown",{},scene.context_binding,std::nullopt,observed,false,false,true);}
+            catch(const std::invalid_argument&){refused=true;}
+            CHECK(refused==!ready);CHECK(wire.requests.size()==before+(ready?1:0));
+            if(!ready)continue;
+            const auto payment_result=synth::protocol_native::required(synth::protocol_native::required(synth::json::parse(wire.requests.back().body),"payload"),"result");
+            CHECK(synth::protocol_native::text(payment_result,"schema")=="synth.action.transfer-result.v2");
+            const auto donor=synth::protocol_native::required(synth::protocol_native::required(payment_result,"inventory"),"actor");
+            const auto receiver=synth::protocol_native::required(synth::protocol_native::required(payment_result,"recipient_inventory"),"actor");
+            CHECK(synth::protocol_native::text(donor,"form_id")==player.form_id);
+            CHECK(synth::protocol_native::text(receiver,"form_id")==actor.form_id);
+            for(bool missing_pair:{false,true}) {
+                bool missing=false;const auto sent=wire.requests.size();
+                try{(void)candidate.send_action_result("payment:missing","payment:missing-key","failed","missing evidence",{},scene.context_binding,
+                    std::nullopt,std::nullopt,false,false,true);}
+                catch(const std::invalid_argument&){missing=true;}
+                CHECK(missing && wire.requests.size()==sent);
+            }
+            CHECK(candidate.hard_halt().status==RequestStatus::complete && !candidate.player_item_ready());
+            wire.player_item_support=false;wire.caps_support=true;
+            wire.before_reply=[&]{CHECK(!candidate.player_item_ready() && !candidate.caps_ready());};
+            CHECK(candidate.initialize(2,false).status==RequestStatus::complete && !candidate.player_item_ready() && candidate.caps_ready());
+            wire.before_reply={};wire.player_item_support=true;wire.fault=BindingEchoTransport::Fault::failed;
+            CHECK(candidate.initialize(3,false).status!=RequestStatus::complete && !candidate.player_item_ready());
+            wire.fault=BindingEchoTransport::Fault::none;
+            CHECK(candidate.initialize(4,false).status==RequestStatus::complete && candidate.player_item_ready());
+        }
+        // A gift inventory menu needs its own ACK; the ordinary item transfer ACK grants no menu authority.
+        for (int mode=0;mode<28;++mode) {
+            BindingEchoTransport wire;wire.gift_menu_support=mode==0 || mode>=6;
+            wire.caps_support=mode==1;wire.transfer_support=mode==2;
+            wire.consumption_support=mode==3;wire.action_inventory_support=mode==4;
+            SessionOptions options{.runtime_session_id="gift-menu:ready",.runtime_variant=mode==14?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",
+                .capabilities={"action.gift_menu_inventory","action.open_inventory","action.caps_inventory","action.give_caps_to",
+                    "action.transfer_inventory","action.give_item_to","action.inventory_observation","dialogue.turn_ownership"},
+                .protocol_version=mode==15?1ULL:2ULL};
+            if(mode>=6 && mode<=11) options.capabilities.erase(options.capabilities.begin()+(mode<=7 ? mode-6 : mode-4));
+            if(mode>=16 && mode<=22) wire.fault=std::array{BindingEchoTransport::Fault::truncated,BindingEchoTransport::Fault::sequence,
+                BindingEchoTransport::Fault::timeout,BindingEchoTransport::Fault::failed,BindingEchoTransport::Fault::http_error,
+                BindingEchoTransport::Fault::version,BindingEchoTransport::Fault::duplicate_id}[mode-16];
+            if(mode==23) for(const auto* cap:{"action.consume","action.consume_inventory","context.inventory_512","context.actor_events"})
+                options.capabilities.emplace_back(cap);
+            if(mode>=24) wire.fault=std::array{BindingEchoTransport::Fault::request,BindingEchoTransport::Fault::turn,
+                BindingEchoTransport::Fault::generation,BindingEchoTransport::Fault::variant}[mode-24];
+            SynthClient candidate{wire,options};CHECK(!candidate.gift_menu_ready());
+            const auto payment_initialized=candidate.initialize(1,false);const bool ready=mode==0 || mode==12 || mode==13 || mode==23;
+            CHECK(candidate.gift_menu_ready()==ready);
+            CHECK(candidate.caps_ready()==(ready || mode==1));
+            CHECK(candidate.transfer_ready()==(ready || mode==1 || mode==2));
+            CHECK(candidate.consumption_ready()==(mode==23));
+            if(mode==23) CHECK(candidate.extended_inventory_ready() && candidate.actor_events_ready());
+            if(payment_initialized.status!=RequestStatus::complete) continue;
+            const auto scene=candidate.publish_context(0,"save:one",player,actor,{}, {},std::nullopt,{}, {},{});
+            const synth::protocol_native::ActionTransferObservation observed{{player,{},"unavailable"},{actor,{},"complete"}};
+            const auto before=wire.requests.size();bool refused=false;
+            try{(void)candidate.send_action_result("payment:action","payment:key","failed","unknown",{},scene.context_binding,std::nullopt,observed,false,false,false,true);}
+            catch(const std::invalid_argument&){refused=true;}
+            CHECK(refused==!ready);CHECK(wire.requests.size()==before+(ready?1:0));
+            if(!ready)continue;
+            const auto payment_result=synth::protocol_native::required(synth::protocol_native::required(synth::json::parse(wire.requests.back().body),"payload"),"result");
+            CHECK(synth::protocol_native::text(payment_result,"schema")=="synth.action.transfer-result.v2");
+            const auto donor=synth::protocol_native::required(synth::protocol_native::required(payment_result,"inventory"),"actor");
+            const auto receiver=synth::protocol_native::required(synth::protocol_native::required(payment_result,"recipient_inventory"),"actor");
+            CHECK(synth::protocol_native::text(donor,"form_id")==player.form_id);
+            CHECK(synth::protocol_native::text(receiver,"form_id")==actor.form_id);
+            for(bool missing_pair:{false,true}) {
+                bool missing=false;const auto sent=wire.requests.size();
+                try{(void)candidate.send_action_result("payment:missing","payment:missing-key","failed","missing evidence",{},scene.context_binding,
+                    std::nullopt,std::nullopt,false,false,false,true);}
+                catch(const std::invalid_argument&){missing=true;}
+                CHECK(missing && wire.requests.size()==sent);
+            }
+            CHECK(candidate.hard_halt().status==RequestStatus::complete && !candidate.gift_menu_ready());
+            wire.gift_menu_support=false;wire.caps_support=true;
+            wire.before_reply=[&]{CHECK(!candidate.gift_menu_ready() && !candidate.caps_ready());};
+            CHECK(candidate.initialize(2,false).status==RequestStatus::complete && !candidate.gift_menu_ready() && candidate.caps_ready());
+            wire.before_reply={};wire.gift_menu_support=true;wire.fault=BindingEchoTransport::Fault::failed;
+            CHECK(candidate.initialize(3,false).status!=RequestStatus::complete && !candidate.gift_menu_ready());
+            wire.fault=BindingEchoTransport::Fault::none;
+            CHECK(candidate.initialize(4,false).status==RequestStatus::complete && candidate.gift_menu_ready());
         }
         std::cout << "fake server tests passed (" << checks << " checks)\n";
         return 0;

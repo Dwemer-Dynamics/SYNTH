@@ -270,6 +270,12 @@ public:
         const runtime::RuntimeActionRequest& request) final {
         assert_game_thread();
         const auto owner_generation = generation();
+        if(request.cancellation.generation().valid() &&
+            (request.cancellation.generation()!=owner_generation || request.cancellation.is_cancelled()))
+            return {runtime::RuntimeActionStatus::unavailable,"action runtime generation or owner is no longer current"};
+        if((request.name==runtime::RuntimeActionName::wait_here||request.name==runtime::RuntimeActionName::release_wait) &&
+            !request.cancellation.generation().valid())
+            return {runtime::RuntimeActionStatus::rejected,"wait action has no runtime generation owner"};
         const std::array actors{request.actor.form_id, request.recipient ? request.recipient->form_id : 0U};
         const auto reservation = reserve_action_actors(std::span{actors}.first(request.recipient ? 2 : 1), owner_generation);
         if (!reservation) return {runtime::RuntimeActionStatus::rejected, "action actors are invalid or reserved by another operation"};
@@ -285,6 +291,16 @@ public:
             (void)release_action_actors(*reservation, owner_generation);
             throw;
         }
+    }
+
+    void set_social_visit_pump(std::function<runtime::RuntimeSocialVisitResult(const runtime::RuntimeSocialVisitRequest&)> pump) {
+        assert_game_thread();social_visit_pump_=std::move(pump);
+    }
+    [[nodiscard]] runtime::RuntimeSocialVisitResult social_visit(const runtime::RuntimeSocialVisitRequest& request) final {
+        assert_game_thread();
+        if (!request.valid_ids() || request.cancellation.generation()!=generation() || !social_visit_pump_)
+            return {runtime::RuntimeSocialVisitStatus::unavailable,request.task_id,request.execution_id,"runtime_owner_unavailable",0};
+        return social_visit_pump_(request);
     }
 
     void set_conversation_hold_pump(std::function<void(std::span<const runtime::RuntimeConversationHold>,bool)> pump,
@@ -430,6 +446,7 @@ private:
     CapturePump capture_pump_;
     PresentationPump presentation_pump_;
     ActionPump action_pump_;
+    std::function<runtime::RuntimeSocialVisitResult(const runtime::RuntimeSocialVisitRequest&)> social_visit_pump_;
     std::function<void(std::span<const runtime::RuntimeConversationHold>,bool)> conversation_hold_pump_;
     std::function<bool()> conversation_action_ready_pump_;
     std::function<runtime::RuntimeActionResult(const runtime::RuntimeFacingRequest&)> facing_pump_;

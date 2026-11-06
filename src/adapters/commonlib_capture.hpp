@@ -35,6 +35,7 @@
 namespace synth::adapters::commonlib {
 
 inline std::function<bool(std::uint32_t)> conversation_hold_observer;
+inline std::function<std::optional<bool>(std::uint32_t)> explicit_wait_observer;
 inline constexpr std::size_t maximum_nearby_actors = 64;
 #if defined(SYNTH_WITH_F4SEVR)
 inline constexpr std::size_t maximum_inventory_items = 32;
@@ -216,9 +217,13 @@ private:
     core::SceneIdentity scene{cell->GetFormID(), space ? space->GetFormID() : 0,
         cell_file ? std::string{cell_file->GetFilename()} : std::string{},
         space_file ? std::string{space_file->GetFilename()} : std::string{}};
+    const auto* location_file = current_location ? current_location->GetFile(0) : nullptr;
+    core::LocationIdentity location_ref{current_location ? current_location->GetFormID() : 0,
+        location_file ? std::string{location_file->GetFilename()} : std::string{}};
     return core::WorldState{std::move(location), std::move(cell_name), std::move(worldspace),
                             std::move(weather), interior, ticks,
-                            scene.valid(interior) ? std::optional{std::move(scene)} : std::nullopt};
+                            scene.valid(interior) ? std::optional{std::move(scene)} : std::nullopt,
+                            location_ref.valid() ? std::optional{std::move(location_ref)} : std::nullopt};
 }
 
 [[nodiscard]] inline std::vector<core::LoadedPlugin> loaded_plugins() {
@@ -1238,25 +1243,37 @@ struct NearbyReferenceSnapshots final {
             std::ranges::any_of(result.current,[&](const auto& old){return core::same_enemy(old.actor,identity);})) return;
         result.current.push_back({std::move(identity),distance,true,actor->IsInCombat(),true});
     };
-    // Share at most 64 inspections across populated process tiers; rotate slices with monotonic time
-    // so a large high tier cannot permanently hide a companion's enemy or a low-tier loaded actor.
+    // Do not make a follower's already selected combat target wait for the rotating process window.
+    // Discovery near the player supplies handles only; consider() still requires THIS NPC's positive
+    // visual detection and all ordinary liveness, distance, identity and hostile-relation checks.
+    std::array<RE::ActorHandle,8> priority{};
+    std::size_t priority_size{};
+    const auto prioritize=[&](const RE::ActorHandle& handle) {
+        if (!handle || priority_size==priority.size() ||
+            std::find(priority.begin(),priority.begin()+priority_size,handle)!=priority.begin()+priority_size) return;
+        priority[priority_size++]=handle;
+    };
+    prioritize(observer.currentCombatTarget);
+    RE::BSScrapArray<RE::ActorHandle> discovered;
+    (void)lists->AreHostileActorsNear(&discovered);
+    for (const auto& handle:discovered) {
+        if (priority_size==priority.size()) break;
+        prioritize(handle);
+    }
+    // Keep the combined priority and rotating process scan within the same 64-inspection budget.
     const std::array<std::size_t,4> sizes{lists->highActorHandles.size(),lists->middleHighActorHandles.size(),
         lists->middleLowActorHandles.size(),lists->lowActorHandles.size()};
     const auto epoch=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(core::SnapshotClock::now().time_since_epoch()).count());
-    const auto counts=core::enemy_awareness_scan_counts(sizes);
-    std::size_t tier{};
-    const auto scan=[&](const auto& handles) {
-        const auto size=static_cast<std::size_t>(handles.size());
-        const auto count=counts[tier++];
-        if (!size || !count) return;
-        auto index=static_cast<std::size_t>((epoch*count)%size);
-        for (std::size_t i=0;i<count;++i) {
-            consider(handles[static_cast<decltype(handles.size())>(index)]);
-            if (++index==size) index=0;
+    const auto handle_at=[&](std::size_t tier,std::size_t index)->RE::ActorHandle {
+        switch (tier) {
+        case 0: return lists->highActorHandles[static_cast<decltype(lists->highActorHandles.size())>(index)];
+        case 1: return lists->middleHighActorHandles[static_cast<decltype(lists->middleHighActorHandles.size())>(index)];
+        case 2: return lists->middleLowActorHandles[static_cast<decltype(lists->middleLowActorHandles.size())>(index)];
+        default: return lists->lowActorHandles[static_cast<decltype(lists->lowActorHandles.size())>(index)];
         }
     };
-    scan(lists->highActorHandles);scan(lists->middleHighActorHandles);
-    scan(lists->middleLowActorHandles);scan(lists->lowActorHandles);
+    core::visit_enemy_awareness_candidates<RE::ActorHandle>(
+        std::span<const RE::ActorHandle>{priority.data(),priority_size},sizes,epoch,handle_at,consider);
 #else
     (void)observer;(void)playthrough;(void)player;
 #endif
@@ -1358,7 +1375,8 @@ struct NearbyReferenceSnapshots final {
             combat_target_snapshot(actor, playthrough),
             include_details ? combat_contacts_snapshot(actor,playthrough,player) : std::vector<core::CombatContactSnapshot>{},
             include_details ? enemy_awareness_snapshot(actor,playthrough,player) : core::EnemyAwarenessSnapshot{},
-            conversation_hold_observer && conversation_hold_observer(actor.GetFormID())};
+            conversation_hold_observer && conversation_hold_observer(actor.GetFormID()),
+            explicit_wait_observer ? explicit_wait_observer(actor.GetFormID()) : std::nullopt};
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.

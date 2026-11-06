@@ -40,7 +40,9 @@
         "diary_request",
         "action_result",
         "cancel",
-        "halt"
+        "halt",
+        "social_task_request",
+        "social_task_progress"
       ]
     },
     "session_id": {
@@ -825,7 +827,9 @@
               "trigger",
               "profile_refresh",
               "diary_request",
-              "action_result"
+              "action_result",
+              "social_task_request",
+              "social_task_progress"
             ]
           }
         }
@@ -1182,6 +1186,281 @@
             "contains": {
               "const": "context.enemy_awareness"
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "social_task_request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "social.tasks.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "social-task-request.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "social_task_progress"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "social.tasks.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "social-task-progress.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "world"
+            ],
+            "properties": {
+              "world": {
+                "required": [
+                  "location_ref"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "context.location_identity"
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "wait-state-capability",
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "actor_states"
+            ],
+            "properties": {
+              "actor_states": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "wait_held"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "context.wait_state"
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "verified-wait-flat",
+      "if": {
+        "properties": {
+          "capabilities": {
+            "anyOf": [
+              {
+                "contains": {
+                  "const": "context.wait_state"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.wait_verified"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "contains": {
+              "const": "dialogue.turn_ownership"
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "player-item-inventory-capability",
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "action.player_item_inventory"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "action.take_item_from_player"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.transfer_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.give_item_to"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.inventory_observation"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "gift-menu-inventory-capability",
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "action.gift_menu_inventory"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "action.open_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.transfer_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.give_item_to"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.inventory_observation"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
           }
         }
       }

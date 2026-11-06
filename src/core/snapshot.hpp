@@ -132,6 +132,17 @@ struct SceneIdentity final {
     bool operator==(const SceneIdentity&) const = default;
 };
 
+struct LocationIdentity final {
+    std::uint32_t form_id{};
+    std::string origin_plugin;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return form_id != 0 && !origin_plugin.empty() && origin_plugin.size() <= 255 &&
+            origin_plugin.find_first_of("/\\") == std::string::npos;
+    }
+    bool operator==(const LocationIdentity&) const = default;
+};
+
 struct WorldState final {
     std::string location;
     std::string cell;
@@ -140,6 +151,7 @@ struct WorldState final {
     bool interior{};
     std::uint64_t game_time_ticks{};
     std::optional<SceneIdentity> scene;
+    std::optional<LocationIdentity> location_ref;
 };
 
 struct LoadedPlugin final {
@@ -333,7 +345,8 @@ public:
                   bool conversation_area_available = false,
                   CombatTargetSnapshot combat_target = {},
                   std::vector<CombatContactSnapshot> combat_contacts = {},
-                  EnemyAwarenessSnapshot enemy_awareness = {}, bool conversation_held = false)
+                  EnemyAwarenessSnapshot enemy_awareness = {}, bool conversation_held = false,
+                  std::optional<bool> wait_held = std::nullopt)
         : form_id_{form_id},
           name_{std::move(name)},
           position_{position},
@@ -372,7 +385,7 @@ public:
           health_percent_available_{health_percent_available},
           action_points_percent_available_{action_points_percent_available},
           conversation_area_available_{conversation_area_available},
-          combat_target_{std::move(combat_target)}, combat_contacts_{std::move(combat_contacts)}, enemy_awareness_{std::move(enemy_awareness)}, conversation_held_{conversation_held} {
+          combat_target_{std::move(combat_target)}, combat_contacts_{std::move(combat_contacts)}, enemy_awareness_{std::move(enemy_awareness)}, conversation_held_{conversation_held}, wait_held_{wait_held} {
         const auto valid_plugin = !origin_plugin_.empty() && origin_plugin_.size() <= 255 &&
                                   origin_plugin_.find_first_of("/\\") == std::string::npos &&
                                   (origin_plugin_.ends_with(".esm") || origin_plugin_.ends_with(".esp") ||
@@ -448,6 +461,7 @@ public:
     [[nodiscard]] const std::vector<CombatContactSnapshot>& combat_contacts() const noexcept { return combat_contacts_; }
 
     [[nodiscard]] bool conversation_held() const noexcept { return conversation_held_; }
+    [[nodiscard]] std::optional<bool> wait_held() const noexcept { return wait_held_; }
     [[nodiscard]] const EnemyAwarenessSnapshot& enemy_awareness() const noexcept { return enemy_awareness_; }
     [[nodiscard]] ActorSnapshot with_enemy_awareness(EnemyAwarenessSnapshot value) const {
         if (!valid_enemy_awareness(value,form_id_,playthrough_id_,alive_,disabled_))
@@ -592,6 +606,7 @@ private:
     std::vector<CombatContactSnapshot> combat_contacts_;
     EnemyAwarenessSnapshot enemy_awareness_;
     bool conversation_held_{};
+    std::optional<bool> wait_held_;
 };
 
 class RuntimeSnapshot final {

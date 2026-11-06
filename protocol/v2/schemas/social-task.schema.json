@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/social-task.schema.json",
+  "title": "Save-scoped follower conversation task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "revision",
+    "performer",
+    "recipient",
+    "topic",
+    "when",
+    "location_name",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.social.task.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^social:[0-9a-f]{32}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "performer": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "recipient": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "when": {
+      "enum": [
+        "now",
+        "on_return"
+      ]
+    },
+    "location_name": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 128
+    },
+    "location_ref": {
+      "$ref": "context.schema.json#/$defs/scene_reference"
+    },
+    "status": {
+      "enum": [
+        "waiting_departure",
+        "waiting_return",
+        "ready",
+        "travelling",
+        "arrived",
+        "conversing",
+        "completed",
+        "cancelled",
+        "failed"
+      ]
+    },
+    "execution_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "when": {
+            "const": "on_return"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "location_ref"
+        ]
+      }
+    }
+  ]
+}

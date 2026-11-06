@@ -3,6 +3,7 @@
 #include "protocol_native/v1_codec.hpp"
 #include "runtime/fallout_runtime.hpp"
 #include <charconv>
+#include <cstdio>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -47,7 +48,41 @@ inline void append_wait_capabilities(std::vector<std::string>& capabilities, cor
     if (variant == core::RuntimeVariant::flat) {
         capabilities.push_back("action.wait_here");
         capabilities.push_back("action.release_wait");
+        capabilities.push_back("action.wait_verified");
+        capabilities.push_back("context.wait_state");
     }
+}
+
+// Reuse the existing bounded action-detail receipt, as ReadQuests does. A native
+// queue acceptance or another actor's observation cannot become a remembered success.
+[[nodiscard]] inline std::string verified_wait_result(const protocol_native::Action& action,
+    const runtime::RuntimeActionRequest& request, const runtime::RuntimeWaitObservation& observed) {
+    if (!observed.confirms_success(request) || action.action_id!=request.action_id ||
+        action.capability!="action."+action.name ||
+        action.name!=(request.name==runtime::RuntimeActionName::wait_here?"wait_here":"release_wait") ||
+        action.actor.playthrough_id!=request.actor.playthrough_id)
+        throw std::invalid_argument{"wait result has no owned physical postcondition"};
+    if(action.name=="wait_here" && ((observed.owned_package&0x00ffffffU)<0x900U ||
+        (observed.owned_package&0x00ffffffU)>0x9ffU || (observed.owned_package>>24)==0xffU))
+        throw std::invalid_argument{"wait result does not identify an authored SYNTH wait package"};
+    std::uint32_t form{};
+    const auto& id=action.actor.form_id;
+    if(id.size()!=10||!id.starts_with("0x"))throw std::invalid_argument{"invalid wait result actor"};
+    const auto parsed=std::from_chars(id.data()+2,id.data()+id.size(),form,16);
+    if(parsed.ec!=std::errc{}||parsed.ptr!=id.data()+id.size()||form!=request.actor.form_id||
+        !std::ranges::equal(action.actor.origin_plugin,request.actor.origin_plugin,[](unsigned char a,unsigned char b) {
+            const auto fold=[](unsigned char c){return c>='A'&&c<='Z'?c+('a'-'A'):c;};return fold(a)==fold(b);
+        }))throw std::invalid_argument{"wait result actor identity differs"};
+    char package[11]{};
+    std::snprintf(package,sizeof(package),"0x%08X",observed.owned_package);
+    auto encoded=json::write(json::Value{protocol_native::object({
+        {"schema","synth.action.wait.result.v1"},{"action_id",action.action_id},{"action",action.name},
+        {"actor",protocol_native::identity_value(action.actor)},{"owned_hold",observed.owned_hold},
+        {"restrained",observed.restrained},{"owned_package",package},{"stationary",observed.stationary},
+        {"lease_ms",90000},{"reload_policy","release_owned_hold"}
+    })});
+    if(encoded.size()>1024)throw std::invalid_argument{"wait physical receipt exceeds detail budget"};
+    return encoded;
 }
 
 // Execute under the requesting turn, then retain the existing bounded hold under its runtime session.

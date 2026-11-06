@@ -152,6 +152,21 @@ enum class PickupReferenceState : unsigned char { unavailable, present, retired 
            before_named == after_named && (equip ? equipped == 1 : equipped == 0);
 }
 
+// Flat UnequipObject can return false despite completing the removal. Only an
+// observed equipped-to-unequipped transition may override that return value.
+[[nodiscard]] inline bool equipment_operation_confirmed(
+    std::span<const core::InventoryItemSnapshot> before,
+    std::span<const core::InventoryItemSnapshot> after,
+    const core::InventoryItemSnapshot& selected, bool equip, bool accepted) {
+    if (!accepted) {
+        if (equip || !selected.equipped || !std::ranges::any_of(before, [&](const auto& item) {
+                return item.form_id == selected.form_id && item.origin_plugin == selected.origin_plugin &&
+                       item.display_name == selected.display_name && item.equipped;
+            })) return false;
+    }
+    return equipment_postcondition(before, after, selected, equip);
+}
+
 // A consume receipt requires one observed ALCH item to disappear, with every other named stack preserved.
 [[nodiscard]] inline bool consumption_postcondition(
     std::span<const core::InventoryItemSnapshot> before,
@@ -183,6 +198,42 @@ enum class PickupReferenceState : unsigned char { unavailable, present, retired 
         if (count != 0) return false;
     }
     return true;
+}
+
+// A transfer may first unequip its exact named weapon/armor. No count, name,
+// base identity or other equipped stack may change during that preparation.
+[[nodiscard]] inline bool transfer_unequip_postcondition(
+    std::span<const core::InventoryItemSnapshot> before,
+    std::span<const core::InventoryItemSnapshot> after,
+    const core::InventoryItemSnapshot& selected) {
+    if (!selected.valid() || !selected.equipped ||
+        (selected.form_type != 0x2B && selected.form_type != 0x1D) ||
+        selected.count > 2147483647U || before.empty() || before.size() > 64 || after.size() > 64) return false;
+    using Key = std::pair<std::string_view, bool>;
+    std::map<Key, std::uint64_t> remaining;
+    bool found{};
+    const auto valid = [&](const auto& item) {
+        return item.valid() && item.form_id == selected.form_id && item.origin_plugin == selected.origin_plugin &&
+               item.form_type == selected.form_type && item.count <= 2147483647U;
+    };
+    for (const auto& item : before) {
+        if (!valid(item)) return false;
+        if (item.display_name == selected.display_name) {
+            if (found || !item.equipped || item.count != selected.count) return false;
+            found = true;
+        }
+        remaining[{item.display_name, item.equipped}] += item.count;
+    }
+    if (!found) return false;
+    remaining[{selected.display_name, true}] -= selected.count;
+    remaining[{selected.display_name, false}] += selected.count;
+    for (const auto& item : after) {
+        if (!valid(item)) return false;
+        const auto entry = remaining.find({item.display_name, item.equipped});
+        if (entry == remaining.end() || entry->second < item.count) return false;
+        entry->second -= item.count;
+    }
+    return std::ranges::all_of(remaining, [](const auto& entry) { return entry.second == 0; });
 }
 
 // A transfer must conserve each named/equipped stack on both sides, not merely move a base-form total.

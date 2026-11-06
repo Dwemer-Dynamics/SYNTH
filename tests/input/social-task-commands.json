@@ -1,0 +1,18 @@
+[
+  {"text":"Go talk to Jun about the water pump.","expected":{"recipient_name":"Jun","topic":"the water pump","when":"now","location_name":""}},
+  {"text":"Can you please speak with Marcy about repairs.","expected":{"recipient_name":"Marcy","topic":"repairs","when":"now","location_name":""}},
+  {"text":"When we get back to Sanctuary, talk to Jun about the water pump.","expected":{"recipient_name":"Jun","topic":"the water pump","when":"on_return","location_name":"Sanctuary"}},
+  {"text":"Talk to Jun about the water pump when we return to Sanctuary.","expected":{"recipient_name":"Jun","topic":"the water pump","when":"on_return","location_name":"Sanctuary"}},
+  {"text":"Codsworth, go speak with Jun about repairs.","performer":"Codsworth","expected":{"recipient_name":"Jun","topic":"repairs","when":"now","location_name":""}},
+  {"text":"Please talk to Jun.","expected":{"recipient_name":"Jun","topic":"general conversation","when":"now","location_name":""}},
+  {"text":"Once you come back, chat with Jun about the supplies.","expected":{"recipient_name":"Jun","topic":"the supplies","when":"on_return","location_name":""}},
+  {"text":"go talk with Jun Long about clean water","expected":{"recipient_name":"Jun Long","topic":"clean water","when":"now","location_name":""}},
+  {"text":"Talk to Émile about repairs.","expected":{"recipient_name":"Émile","topic":"repairs","when":"now","location_name":""}},
+  {"text":"If we return, maybe talk to Jun about supplies.","expected":null},
+  {"text":"\"Go talk to Jun about supplies\"","expected":null},
+  {"text":"Don't go talk to Jun about supplies.","expected":null},
+  {"text":"Jun said to go talk to Marcy about supplies.","expected":null},
+  {"text":"I might ask you to talk to Jun about repairs.","expected":null},
+  {"text":"Go talk to <Jun> about repairs.","expected":null},
+  {"text":"When we get back to \"Sanctuary\", talk to Jun about repairs.","expected":null}
+]

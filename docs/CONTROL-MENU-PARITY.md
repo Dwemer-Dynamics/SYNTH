@@ -18,7 +18,7 @@ The coordinator loads local configuration without accessing game objects. Valid 
 
 ## Limits requiring manual verification
 
-- Wait Here applies the original `SYNTH.esp` package to any selected live, loaded NPC. No companion, combat, hostility or scene admission filter applies to wait/release. The package waits five minutes, with Release Wait for earlier release. Engine behavior still requires manual acceptance; see `WAIT-HERE.md`.
+- Wait Here uses the original `SYNTH.esp` aliases and matching HoldPosition package for 90 seconds of unpaused gameplay. Terminal success requires the active owned package and stable stopped-position proof; Release Wait requires empty owned aliases and fresh package absence. Existing foreign restraint is preserved. See `WAIT-ALIAS-CHAT.md`; `WAIT-HERE.md` records historical implementations.
 - Native Director sends an instruction through the selected NPC's structured response/action pipeline. It does not yet provide Dialectic's full multi-NPC scene orchestration or legacy global role-command queue.
 - Whisper/Close publish a private, 200-unit audience; Shout expands the normal hearing radius. Provider-specific vocal whisper/shout effects are not added.
 - Model slots must be configured in the server. A native selection does not silently substitute another empty profile slot. In-flight text/audio requests retain their selected slot; automatic follow-up model inheritance needs a separate audit.

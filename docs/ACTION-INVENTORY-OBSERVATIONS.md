@@ -1,5 +1,68 @@
 # Post-action inventory observation work
 
+## Installed player-to-NPC gift transfer
+
+TakeItemFromPlayer now reverses the existing exact-stack transfer safely: the
+player donates and the addressed NPC receives. It requires its own capability and
+ACK, an explicit direct player offer, observed item/quantity and a paired native
+receipt. Equipped player gear and currency cannot use this action. The NPC decides
+whether to accept; Talk alone does not perform a transfer. Successful gifts feed
+personality-based relationship evidence without fixed gratitude points.
+The coordinated flat update is installed and hash verified; in-game transfer and gift valuation remain open.
+
+
+## Equipped item transfers
+
+Jun's Heavy 10mm Pistol equip and unequip have successful live-state/count
+receipts. Hand-back failed because Fallout equipped it again between separate
+requests: one transfer encountered it equipped at native execution and the next
+captured snapshot already marked it equipped.
+
+The flat candidate admits exact equipped weapons/armor for GiveItemTo, then
+performs immediate non-forcing native unequip and exact-stack transfer inside
+one owned game-thread operation. Unequip must preserve every named base count and
+other equipped stack. The refreshed stack/extra data, quest guard, participants,
+cancellation, load/menu boundary and deadline are revalidated before transfer.
+Existing exact donor/recipient delta checks still establish success. Every exit
+after entering native unequip attempts both inventory observations, so a partial
+unequip cannot be reported as a completed transfer.
+
+Focused flat validation passed and the DLL update is installed. Equipped-weapon
+transfer is gameplay verified with Jun: the Submachine Gun was equipped in the
+request snapshot, and complete paired receipts prove donor zero and player one.
+The Heavy 10mm Pistol return also passed. Player-pack item-taking is installed in the coordinated update, pending gameplay;
+reverse caps transfer remains separate. VR transfer remains unsupported.
+
+## Flat consumption dispatch correction
+
+The Sturges Purified Water gameplay request selected Consume and reached the
+client with the exact item. It returned unavailable before mutation:
+"consumption cannot execute synchronously on this engine thread". The temporary
+queue-drain thread marker is cleared before SYNTH's post-Main::Update action
+pump. Checking that marker made ordinary consumption unavailable.
+
+The candidate uses the same immediate consumable caster (source 3), call
+arguments and native completion as the flat 1.11.240 task-0x7E unpack path.
+It calls the immediate routine on the verified Fallout main thread while the
+original action still owns its actor reservation, token, load epoch and deadline.
+No queued DrinkPotion task or queue-flag writes are created. The engine applies
+effects before its native completion removes the selected stack; success still
+requires exactly one observed unit to disappear with named-stack counts preserved.
+The cast ABI and completion ordering have focused coverage. The correction is
+installed; the user confirmed water consumption and its successful exact-decrement
+receipt. Other consumables and effects remain separate coverage cases.
+
+The 4 November 2026 flat Sturges helmet test visibly equipped and unequipped the
+Army Helmet. The equip receipt verified success; unequip incorrectly reported
+rejection despite its attached inventory showing the helmet unequipped. The
+candidate now reads the exact post-operation inventory even when UnequipObject
+returns false, and accepts only the verified equipped-to-unequipped transition
+with named-item and base counts preserved. An unchanged item, missing observation
+or changed owner/count cannot establish success. Equip still requires engine
+acceptance; consumption uses the immediate path above and verified removal.
+The unequip update is installed and verified: Jun unequipped Heavy 10mm Pistol
+with a successful live-state/count receipt.
+
 Status: native producer, receipt/acceptance, client forwarding, mixed action/rechat
 inventory views, explicit readiness and old-server equipment execution gate implemented.
 Synthetic full-main/model and mixed cancellation/concurrency/replay checks pass.

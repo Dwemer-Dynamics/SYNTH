@@ -57,20 +57,30 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertIn(b'PLDT' + struct.pack('<Hiiii', 16, 2, 0, 64, 0), original)
         self.assertIn(b'PKCU' + struct.pack('<HIII', 12, 15, 0x2CB1, 7), original)
         self.assertIn(b'PKDT' + struct.pack('<HIBBBBHH', 12, 0x100004, 18, 0, 0, 0, 0, 0), original)
-        # Every live slot uses HoldPosition v1, one Location input, zero radius.
-        self.assertEqual(original.count(b'PKCU' + struct.pack('<HIII', 12, 1, 0x1D415, 1)), 256)
+        # Every live slot uses ordinary Wait v2, with False/ActualSeconds public inputs.
+        self.assertEqual(original.count(b'PKCU' + struct.pack('<HIII', 12, 2, 0x001A32D6, 2)), 256)
+        self.assertNotIn(b'PKCU' + struct.pack('<HIII', 12, 1, 0x0001D415, 1), original)
         # All 256 live holds plus the migration package are normal packages, not combat overrides.
         self.assertEqual(original.count(b'PKDT' + struct.pack('<HIBBBBHH', 12, 0x100004, 18, 0, 0, 0, 0, 0)), 257)
         self.assertNotIn(b'PKDT' + struct.pack('<HIBBBBHH', 12, 0x100004, 18, 4, 0, 0, 0, 0), original)
-        # Existing packages/markers retain their IDs, but no alias injects them anymore.
-        # A second bank of saved aliases records only SYNTH-owned restraint transitions.
+        # Existing Wait packages/markers retain IDs. ALPC binds each exact Wait
+        # package; the second alias bank is retired restraint migration only.
         self.assertIn(b'SYNTH_WaitOwnership', original)
-        self.assertEqual(original.count(b'ALST'), 512)
-        self.assertEqual(original.count(b'ALPC'), 0)
+        wait_name = b'EDID' + struct.pack('<H', len(b'SYNTH_WaitOwnership\0')) + b'SYNTH_WaitOwnership\0'
+        priority_offset = original.index(wait_name) + len(wait_name) + 8
+        self.assertEqual(struct.unpack_from('<b', original, priority_offset)[0], 100)
+        negative_priority = original[:priority_offset] + b'\xff' + original[priority_offset + 1:]
+        plugin.write_bytes(negative_priority)
+        with self.assertRaisesRegex(AuditError, 'deterministic wait package'):
+            audit_path(stage, 'flat')
+        plugin.write_bytes(original)
+        self.assertEqual(original.count(b'ALST'), 512 + 32)
+        self.assertEqual(original.count(b'ALPC'), 256 + 16)
         for slot in range(256):
             self.assertIn(b'ALST' + struct.pack('<HI', 4, 256 + slot), original)
             self.assertIn(f'RestraintOwned{slot}\0'.encode(), original)
-            self.assertIn(b'PLDT' + struct.pack('<Hiiii', 16, 0, 0x01000A00 + slot, 0, 0), original)
+            self.assertIn(b'ALPC' + struct.pack('<HI', 4, 0x01000900 + slot), original)
+        self.assertNotIn(b'PLDT' + struct.pack('<Hiiii', 16, 2, 0, 0, 0), original)
         self.assertNotIn(struct.pack('<f', 300.0), original)
         plugin.write_bytes(original + b'unreviewed record')
         with self.assertRaisesRegex(AuditError, 'deterministic wait package'):

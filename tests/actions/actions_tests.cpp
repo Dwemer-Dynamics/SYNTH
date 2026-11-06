@@ -1,10 +1,20 @@
 #include "actions/actions.hpp"
 #include "actions/equipment.hpp"
+#include "adapters/detail/flat_consumption_call.hpp"
+#include <cstring>
 #include "runtime/action_completion.hpp"
 #include "runtime/pickup_progress.hpp"
 #include "runtime/wait_recovery.hpp"
+#include "wait_verification_cases.hpp"
 #include "client/action_inventory.hpp"
+#include "actions/gift_menu.hpp"
 #include "client/wait_action.hpp"
+#include "client/attack_action.hpp"
+#include "runtime/conversation_approach.hpp"
+#include "client/conversation_holds.hpp"
+#include "social_visit_cases.hpp"
+#include "social_task_cases.hpp"
+#include "social_delivery_cases.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -16,7 +26,7 @@
 namespace {
 using namespace std::chrono_literals;
 int checks{};
-#define CHECK(x) do { ++checks; if (!(x)) throw std::runtime_error{std::string{"check failed: "} + #x}; } while (false)
+#define CHECK(x) do { ++checks; if (!(x)) throw std::runtime_error{std::string{"check failed at line "} + std::to_string(__LINE__) + ": " + #x}; } while (false)
 
 synth::context::ActorIdentity actor() {
     return {{42, "Actors.esm"}, synth::context::PlaythroughIdentity{"save-a"}};
@@ -42,11 +52,232 @@ struct Executor final : synth::actions::IInspectActorExecutor {
 int main() {
     try {
         {
+            // Audit-backed flat task-0x7E cast ABI. Read raw offsets just as the
+            // engine does; the completion must run after effects on the same NPC.
+            struct Item { int tag{7}; } item;
+            struct Reference { int effects{}, count{2}, completions{}; std::uint32_t stack{}; } npc, other;
+            using Call = synth::adapters::detail::FlatConsumptionCall<Item, Reference>;
+            const auto finished = +[](Item* used, Reference* source, std::uint32_t stack) {
+                CHECK(used->tag == 7);
+                CHECK(source->effects == 1);
+                --source->count; ++source->completions; source->stack = stack;
+            };
+            const Call parameters{&item, &npc, nullptr, finished, 37, false};
+            const auto* bytes = reinterpret_cast<const std::byte*>(&parameters);
+            Item* engine_item{}; Reference* engine_source{}; void* unused{};
+            Call::Finished engine_finished{}; std::uint32_t engine_stack{}; bool flag{true};
+            std::memcpy(&engine_item, bytes + 0x00, sizeof(engine_item));
+            std::memcpy(&engine_source, bytes + 0x08, sizeof(engine_source));
+            std::memcpy(&unused, bytes + 0x10, sizeof(unused));
+            std::memcpy(&engine_finished, bytes + 0x18, sizeof(engine_finished));
+            std::memcpy(&engine_stack, bytes + 0x20, sizeof(engine_stack));
+            std::memcpy(&flag, bytes + 0x24, sizeof(flag));
+            CHECK(engine_item == &item); CHECK(engine_source == &npc);
+            CHECK(unused == nullptr); CHECK(!flag); CHECK(engine_stack == 37);
+            CHECK(engine_finished == finished);
+            ++engine_source->effects;
+            engine_finished(engine_item, engine_source, engine_stack);
+            CHECK(npc.count == 1); CHECK(npc.effects == 1); CHECK(npc.completions == 1);
+            CHECK(npc.stack == 37); CHECK(other.count == 2); CHECK(other.effects == 0);
+            CHECK(other.completions == 0);
+        }
+        checks += synth::tests::social_visit_contract_checks();
+        checks += synth::tests::wait_verification_checks();
+        checks += synth::tests::social_task_contract_checks();
+        checks += synth::tests::social_delivery_contract_checks();
+        {
+            using namespace synth;
+            using Kind=runtime::ConversationApproachKind;
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            core::CancellationSource turn{session.token()};
+            const auto now=core::SnapshotClock::now();
+            runtime::ConversationApproachCandidate candidate{{{0x15,"Fallout4.esm","save-a"},turn.token(),true},
+                {0x14,"Fallout4.esm","save-a"},500,true,true,true,false,false};
+            CHECK(candidate.eligible());
+            for (const auto* mode:{"STANDARD","WHISPER","CLOSE","SHOUT"}) CHECK(client::conversation_approach_mode(mode));
+            for (const auto* mode:{"NARRATOR","DIRECTOR","INJECTION_LOG","INJECTION_CHAT","CHEATMODE","","standard"})
+                CHECK(!client::conversation_approach_mode(mode));
+            for (int invalid=0;invalid<8;++invalid) {
+                auto value=candidate;
+                if (invalid==0) value.hold.approach_player=false;
+                if (invalid==1) value.native_follower=true;
+                if (invalid==2) value.explicit_wait=true;
+                if (invalid==3) value.calm=false;
+                if (invalid==4) value.same_area=false;
+                if (invalid==5) value.loaded=false;
+                if (invalid==6) value.distance=2001;
+                if (invalid==7) value.distance=std::numeric_limits<double>::quiet_NaN();
+                CHECK(!value.eligible());
+                runtime::ConversationApproachController bypass;bypass.update(std::span{&value,1},now);
+                CHECK(bypass.idle() && !bypass.next(now));
+            }
+            runtime::ConversationApproachController approach;
+            approach.update(std::span{&candidate,1},now);
+            const auto acquire=approach.next(now);
+            CHECK(acquire && acquire->kind==Kind::acquire && acquire->actor.form_id==0x15);
+            CHECK(approach.install_current(*acquire,now) && !approach.next(now));
+            approach.complete(*acquire,true,now);
+            CHECK(!approach.idle() && !approach.next(now+500ms));
+            const auto refresh=approach.next(now+1s);
+            CHECK(refresh && refresh->kind==Kind::refresh);
+            approach.complete(*refresh,true,now+1s);
+            // Combat/death/unload, scene exit, nativefollow and explicitWait transitions all release active ownership.
+            for (int reason=0;reason<5;++reason) {
+                runtime::ConversationApproachController active;active.update(std::span{&candidate,1},now);
+                const auto install=active.next(now);active.complete(*install,true,now);
+                auto unsafe=candidate;
+                if (reason==0) unsafe.calm=false;
+                if (reason==1) unsafe.loaded=false;
+                if (reason==2) unsafe.same_area=false;
+                if (reason==3) unsafe.native_follower=true;
+                if (reason==4) unsafe.explicit_wait=true;
+                active.update(std::span{&unsafe,1},now+1s);
+                const auto cleanup_due=active.next(now+1s);
+                CHECK(cleanup_due && cleanup_due->kind==Kind::release && !active.idle());
+                active.complete(*cleanup_due,true,now+1s);CHECK(active.idle());
+            }
+            // A different addressee cannot reuse or replace the first actor's owned alias before cleanup.
+            auto other=candidate;other.hold.actor.form_id=0x16;
+            approach.update(std::span{&other,1},now+2s);
+            const auto release=approach.next(now+2s);
+            CHECK(release && release->kind==Kind::release && release->actor.form_id==0x15);
+            CHECK(!approach.next(now+2s) && !approach.idle());
+            approach.complete(*release,false,now+2s);
+            const auto retry=approach.next(now+3s);
+            CHECK(retry && retry->kind==Kind::release && retry->actor.form_id==0x15);
+            approach.complete(*retry,true,now+3s);
+            CHECK(approach.idle());
+            approach.update(std::span{&other,1},now+3s);
+            const auto replacement=approach.next(now+3s);
+            CHECK(replacement && replacement->kind==Kind::acquire && replacement->actor.form_id==0x16);
+            // Cancelling during acquisition revokes installation but must retain an owned release path.
+            turn.cancel();approach.update({},now+4s);
+            CHECK(!approach.install_current(*replacement,now+4s));
+            approach.complete(*replacement,true,now+4s);
+            const auto cancel_release=approach.next(now+4s);
+            CHECK(cancel_release && cancel_release->kind==Kind::release);
+            runtime::WaitScriptReceipt cleanup{"cleanup",turn.token(),false};
+            CHECK(cleanup.current("cleanup"));
+            approach.complete(*cancel_release,true,now+4s);CHECK(approach.idle());
+            // A failed install cannot silently acquire a second package while its alias may be partly assigned.
+            core::CancellationSource fresh{session.token()};candidate.hold.cancellation=fresh.token();
+            approach.update(std::span{&candidate,1},now+5s);
+            const auto failed=approach.next(now+5s);CHECK(failed.has_value());
+            approach.complete(*failed,false,now+5s);
+            const auto failed_release=approach.next(now+5s);CHECK(failed_release && failed_release->kind==Kind::release);
+            approach.complete(*failed_release,true,now+5s);
+            approach.update(std::span{&candidate,1},now+6s);CHECK(approach.idle() && !approach.next(now+6s));
+            // A new player turn permits a fresh bounded attempt; an idle/Stop frame revokes it.
+            fresh.cancel();core::CancellationSource next_turn{session.token()};candidate.hold.cancellation=next_turn.token();
+            approach.update(std::span{&candidate,1},now+7s);const auto renewed=approach.next(now+7s);
+            CHECK(renewed && renewed->kind==Kind::acquire);
+            approach.complete(*renewed,true,now+7s);approach.update({},now+8s);
+            const auto idle_release=approach.next(now+8s);CHECK(idle_release && idle_release->kind==Kind::release);
+            approach.complete(*idle_release,true,now+8s);CHECK(approach.idle());
+            // Speech/facing cannot downgrade a player lease; NPC-to-NPC facing cannot acquire navigation authority.
+            client::ConversationHolds holders;
+            holders.add(candidate.hold.actor,next_turn.token(),now,true);
+            holders.add(candidate.hold.actor,next_turn.token(),now,false);
+            auto frame=holders.frame(true,session.token().generation(),now);
+            CHECK(frame.size()==1 && frame[0].approach_player);
+            holders.clear();holders.add(candidate.hold.actor,next_turn.token(),now);
+            frame=holders.frame(true,session.token().generation(),now);
+            CHECK(frame.size()==1 && !frame[0].approach_player);
+            auto background=candidate;background.hold=frame[0];
+            approach.update(std::span{&background,1},now+9s);CHECK(approach.idle());
+            holders.clear();holders.add(candidate.hold.actor,next_turn.token(),now,true);
+            frame=holders.frame(true,session.token().generation(),now);
+            auto player_engaged=candidate;player_engaged.hold=frame[0];
+            approach.update(std::span{&player_engaged,1},now+9s);const auto before_action=approach.next(now+9s);
+            approach.complete(*before_action,true,now+9s);
+            holders.suspend(next_turn.token());frame=holders.frame(true,session.token().generation(),now);
+            CHECK(frame.empty());approach.update({},now+9s);
+            const auto action_release=approach.next(now+9s);
+            CHECK(action_release && action_release->kind==Kind::release && !approach.idle());
+            approach.complete(*action_release,true,now+9s);CHECK(approach.idle());
+            // One continuing input cannot extend its own90second lifetime by repeated frame updates.
+            approach.update(std::span{&candidate,1},now+10s);const auto bounded=approach.next(now+10s);
+            approach.complete(*bounded,true,now+10s);approach.update(std::span{&candidate,1},now+101s);
+            const auto expired=approach.next(now+101s);CHECK(expired && expired->kind==Kind::release);
+            approach.complete(*expired,true,now+101s);approach.update(std::span{&candidate,1},now+102s);
+            CHECK(approach.idle() && !approach.next(now+102s));
+            approach.reset();CHECK(approach.idle());
+            // Timeout revokes permission but cannot prove a VM stack has drained or free its alias.
+            core::CancellationSource delayed_turn{session.token()};candidate.hold.cancellation=delayed_turn.token();
+            approach.update(std::span{&candidate,1},now);const auto delayed=approach.next(now);
+            runtime::WaitScriptReceipt delayed_receipt{"delayed",delayed_turn.token(),true};
+            delayed_receipt.revoke_install();approach.update({},now+6s);
+            CHECK(!delayed_receipt.current("delayed") && !delayed_receipt.done());
+            CHECK(!approach.next(now+6s) && !approach.idle());
+            delayed_receipt.finish("foreign",true);CHECK(!delayed_receipt.done());
+            delayed_receipt.finish("delayed",true);CHECK(delayed_receipt.done() && !delayed_receipt.success());
+            approach.complete(*delayed,delayed_receipt.success(),now+7s);
+            const auto drained_release=approach.next(now+7s);CHECK(drained_release && drained_release->kind==Kind::release);
+            approach.complete(*drained_release,true,now+7s);CHECK(approach.idle());
+            // Failed or unrecognized STT has no reply/caption work; idle clears the provisional voice lease immediately.
+            holders.clear();holders.add(candidate.hold.actor,next_turn.token(),now,true);
+            CHECK(holders.frame(false,session.token().generation(),now+1s).empty());
+            CHECK(holders.frame(true,session.token().generation(),now+2s).empty());
+            // Renewing sameNPC on new player turns remains bounded by the original five minute hard cap.
+            core::CancellationSource hard_a{session.token()};candidate.hold.cancellation=hard_a.token();
+            approach.update(std::span{&candidate,1},now);auto hard=approach.next(now);approach.complete(*hard,true,now);
+            hard_a.cancel();core::CancellationSource hard_b{session.token()};candidate.hold.cancellation=hard_b.token();
+            approach.update(std::span{&candidate,1},now+80s);hard=approach.next(now+80s);approach.complete(*hard,true,now+80s);
+            hard_b.cancel();core::CancellationSource hard_c{session.token()};candidate.hold.cancellation=hard_c.token();
+            approach.update(std::span{&candidate,1},now+160s);hard=approach.next(now+160s);approach.complete(*hard,true,now+160s);
+            hard_c.cancel();core::CancellationSource hard_d{session.token()};candidate.hold.cancellation=hard_d.token();
+            approach.update(std::span{&candidate,1},now+240s);hard=approach.next(now+240s);approach.complete(*hard,true,now+240s);
+            approach.update(std::span{&candidate,1},now+301s);const auto hard_end=approach.next(now+301s);
+            CHECK(hard_end && hard_end->kind==Kind::release);
+            approach.complete(*hard_end,true,now+301s);approach.update(std::span{&candidate,1},now+302s);
+            CHECK(approach.idle() && !approach.next(now+302s));
+        }
+        {
+            using namespace synth;
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            core::CancellationSource turn{session.token()};
+            const auto now=core::SnapshotClock::now();
+            const auto pose=core::WorldPose{{},core::UnitVector3::from({1,0,0}),core::UnitVector3::from({0,0,1})};
+            const auto player=core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a"};
+            core::CombatantIdentity enemy{0xFF000123,"Fallout4.esm","save-a","Mole Rat","Molerat"};
+            const auto follower=[&](bool teammate=true) {
+                return core::ActorSnapshot{0x15,"Follower",{},"Fallout4.esm","save-a",true,false,false,false,false,1,{},{},{},teammate}
+                    .with_enemy_awareness({true,{{enemy,150,true,false,true}},{},{}});
+            };
+            const auto scene=[&](core::RuntimeVariant lane,core::ActorSnapshot actor) {
+                return core::RuntimeSnapshot{core::Game::fallout4,lane,session.token().generation(),12,now,pose,
+                    std::nullopt,std::nullopt,std::nullopt,player,{std::move(actor)},123};
+            };
+            protocol_native::Action action{"action:attack","idem:attack","attack","action.attack",
+                {"0x00000015","Fallout4.esm","save-a","Follower"},
+                protocol_native::Identity{"0xFF000123","Fallout4.esm","save-a","Mole Rat"},json::Value{json::Value::Object{}},5000};
+            const auto snapshot=scene(core::RuntimeVariant::flat,follower());
+            const auto prepared=client::prepare_attack_action(snapshot,action,turn.token(),now+5s);
+            CHECK(prepared.name==runtime::RuntimeActionName::attack && prepared.recipient && prepared.recipient->form_id==enemy.form_id);
+            CHECK(prepared.actor.form_id==0x15 && !prepared.item && !prepared.wait_session);
+            const auto rejects=[&](const auto& snap,const auto& candidate,const auto& token,auto deadline) {
+                try { (void)client::prepare_attack_action(snap,candidate,token,deadline);return false; }
+                catch (const std::invalid_argument&) {return true;}
+            };
+            CHECK(rejects(scene(core::RuntimeVariant::vr,follower()),action,turn.token(),now+5s));
+            CHECK(rejects(scene(core::RuntimeVariant::flat,follower(false)),action,turn.token(),now+5s));
+            CHECK(rejects(snapshot,action,turn.token(),now-1s));
+            auto changed=action;changed.target.reset();CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            changed=action;changed.target->form_id="0x00000014";CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            changed=action;changed.target->origin_plugin="Other.esm";CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            changed=action;changed.target->playthrough_id="other-save";CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            changed=action;changed.actor.form_id="0x00000016";CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            changed=action;changed.arguments=json::Value{json::Value::Object{{"target_name","Mole Rat"}}};CHECK(rejects(snapshot,changed,turn.token(),now+5s));
+            const auto recent=follower().with_enemy_awareness({true,{}, {},{{enemy,"seen_hostile",500}}});
+            CHECK(rejects(scene(core::RuntimeVariant::flat,recent),action,turn.token(),now+5s));
+            turn.cancel();CHECK(rejects(snapshot,action,turn.token(),now+5s));
+        }
+        {
             using namespace synth;
             std::vector<std::string> flat_caps, vr_caps;
             client::append_wait_capabilities(flat_caps, core::RuntimeVariant::flat);
             client::append_wait_capabilities(vr_caps, core::RuntimeVariant::vr);
-            CHECK(flat_caps == std::vector<std::string>({"action.wait_here", "action.release_wait"}));
+            CHECK(flat_caps == std::vector<std::string>({"action.wait_here", "action.release_wait","action.wait_verified","context.wait_state"}));
             CHECK(vr_caps.empty());
             core::CancellationSource session{core::RuntimeGeneration::initial()};
             core::CancellationSource turn{session.token()};
@@ -312,6 +543,18 @@ int main() {
         std::vector<core::InventoryItemSnapshot> split{equipped, remaining, modified};
         CHECK(actions::equipment_postcondition(inventory, split, rifle, true));
         CHECK(actions::equipment_postcondition(split, inventory, rifle, false));
+        // Sturges helmet regression: false engine return, but a verified removal.
+        CHECK(actions::equipment_operation_confirmed(split, inventory, equipped, false, false));
+        CHECK(actions::equipment_operation_confirmed(inventory, split, rifle, true, true));
+        CHECK(!actions::equipment_operation_confirmed(inventory, split, rifle, true, false));
+        CHECK(!actions::equipment_operation_confirmed(split, split, equipped, false, false));
+        CHECK(!actions::equipment_operation_confirmed(inventory, inventory, rifle, false, false));
+        CHECK(!actions::equipment_operation_confirmed(inventory, inventory, equipped, false, false));
+        CHECK(!actions::equipment_operation_confirmed(split, std::vector<core::InventoryItemSnapshot>{}, equipped, false, false));
+        auto removed_item = inventory; --removed_item[0].count;
+        CHECK(!actions::equipment_operation_confirmed(split, removed_item, equipped, false, false));
+        auto foreign_item = inventory; foreign_item[0].origin_plugin = "Other.esp";
+        CHECK(!actions::equipment_operation_confirmed(split, foreign_item, equipped, false, false));
         CHECK(!actions::equipment_postcondition(inventory, inventory, rifle, true));
         CHECK(!actions::equipment_postcondition(split, split, rifle, false));
         split[1].count = 2;
@@ -381,6 +624,45 @@ int main() {
         CHECK(!actions::consumption_postcondition(consume_before, consume_after, aid));
         consume_after.assign(65, aid);
         CHECK(!actions::consumption_postcondition(std::vector{aid}, consume_after, aid));
+        // Equipped transfer preparation changes only the selected named equipment state.
+        auto carried_weapon = rifle;
+        carried_weapon.count = 1;
+        carried_weapon.equipped = false;
+        auto worn_weapon = carried_weapon;
+        worn_weapon.equipped = true;
+        auto other_weapon = worn_weapon;
+        other_weapon.display_name = "Other modification";
+        const std::vector worn_inventory{worn_weapon, other_weapon};
+        const std::vector carried_inventory{carried_weapon, other_weapon};
+        CHECK(actions::transfer_unequip_postcondition(worn_inventory, carried_inventory, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(worn_inventory, worn_inventory, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(worn_inventory, carried_inventory, carried_weapon));
+        CHECK(!actions::transfer_unequip_postcondition({}, carried_inventory, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(worn_inventory, {}, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(std::vector{worn_weapon, worn_weapon}, carried_inventory, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(std::vector(65, worn_weapon), carried_inventory, worn_weapon));
+        CHECK(!actions::transfer_unequip_postcondition(worn_inventory, std::vector(65, carried_weapon), worn_weapon));
+        for (int mutation=0;mutation<7;++mutation) {
+            auto wrong = carried_inventory;
+            if (mutation==0) wrong[0].count=2;
+            if (mutation==1) wrong[0].display_name="Different pistol";
+            if (mutation==2) wrong[0].origin_plugin="Other.esm";
+            if (mutation==3) wrong[0].form_id++;
+            if (mutation==4) wrong[0].form_type=0x30;
+            if (mutation==5) wrong[1].equipped=false;
+            if (mutation==6) wrong[1].count=2;
+            CHECK(!actions::transfer_unequip_postcondition(worn_inventory, wrong, worn_weapon));
+        }
+        // Armor is supported; an ALCH/ammo/caps row cannot gain equipped-transfer permission.
+        for (const auto type : {0x1D,0x2B,0x30,0x2C,0x23}) {
+            auto a=worn_weapon;auto b=carried_weapon;
+            a.form_type=static_cast<std::uint16_t>(type);b.form_type=a.form_type;
+            CHECK(actions::transfer_unequip_postcondition(std::vector{a}, std::vector{b}, a)==(type==0x1D||type==0x2B));
+        }
+        CHECK(actions::transfer_postcondition(carried_inventory, std::vector{other_weapon},
+            {}, std::vector{carried_weapon}, carried_weapon, 1));
+        CHECK(!actions::transfer_postcondition(worn_inventory, std::vector{other_weapon},
+            {}, std::vector{carried_weapon}, worn_weapon, 1));
         // Transfers require exact deltas on both owners, preserving names and equipped flags across stack merges.
         auto given = aid; given.count = 1;
         const std::vector donor_before{aid, named_aid}, donor_after{given, named_aid};
@@ -550,7 +832,33 @@ int main() {
         CHECK(requested.action_id==give.action_id && requested.deadline==now+1s);
         auto one=give;one.arguments=json::parse(R"({"item":"Combat rifle"})");
         CHECK(client::prepare_transfer_action(*original,one,observed_owner.token(),now+1s).amount==1);
-        for(const auto* arguments:{R"({})",R"({"item":"Combat"})",R"({"item":"Pistol"})",R"({"item":"Unknown"})",
+        // The exact equipped weapon is admitted for the native, same-operation unequip/transfer.
+        auto worn = rifle;worn.count=1;worn.equipped=true;
+        const auto worn_scene=original->with_actor_inventory(0x15,"Fallout4.esm","save-a",{worn},"complete");
+        const auto worn_request=client::prepare_transfer_action(worn_scene,one,observed_owner.token(),now+1s);
+        CHECK(worn_request.item && worn_request.item->equipped && worn_request.amount==1);
+        CHECK(worn_request.item->form_id==rifle.form_id && worn_request.actor.form_id==requested.actor.form_id);
+        auto pistol_give=one;pistol_give.arguments=json::parse(R"({"item":"Pistol"})");
+        const auto pistol_request=client::prepare_transfer_action(*original,pistol_give,observed_owner.token(),now+1s);
+        CHECK(pistol_request.item && pistol_request.item->equipped && pistol_request.item->form_id==pistol.form_id);
+        auto returned_pistol=pistol;returned_pistol.equipped=false;
+        runtime::RuntimeTransferObservation pistol_pair{{runtime,pistol_request.actor,{},"complete",pistol_give.action_id},
+            {runtime,*pistol_request.recipient,{returned_pistol},"complete",pistol_give.action_id}};
+        CHECK(pistol_pair.valid_for(pistol_request));
+        bool worn_quantity_refused=false;
+        try{(void)client::prepare_transfer_action(worn_scene,give,observed_owner.token(),now+1s);}
+        catch(const std::invalid_argument&){worn_quantity_refused=true;}
+        CHECK(worn_quantity_refused);
+        for (const auto type : {0x30,0x2C,0x23}) {
+            auto invalid=worn;invalid.form_type=static_cast<std::uint16_t>(type);
+            const auto bad_scene=original->with_actor_inventory(0x15,"Fallout4.esm","save-a",{invalid},"complete");
+            bool refused=false;
+            try{(void)client::prepare_transfer_action(bad_scene,one,observed_owner.token(),now+1s);}
+            catch(const std::invalid_argument&){refused=true;}
+            CHECK(refused);
+        }
+
+        for(const auto* arguments:{R"({})",R"({"item":"Combat"})",R"({"item":"Unknown"})",
             R"({"item":"Combat rifle","amount":0})",R"({"item":"Combat rifle","amount":-1})",R"({"item":"Combat rifle","amount":3})",
             R"({"item":"Combat rifle","amount":1000001})",R"({"item":"Combat rifle","amount":1.0})",R"({"item":"Combat rifle","amount":"1"})",
             R"({"item":"Combat rifle","amount":true})",R"({"item":"Combat rifle","amount":null})",R"({"item":"Combat rifle","target_name":"Settler"})",
@@ -647,6 +955,68 @@ int main() {
         CHECK(payment_view.snapshot->actors()[1].inventory()[0].form_id==payer_scene->actors()[1].inventory()[0].form_id);
         CHECK(payment_view.snapshot->frame()==payer_scene->frame() && payment_view.snapshot->captured_at()==payer_scene->captured_at());
         CHECK(payment_view.snapshot->game_time_ticks()==payer_scene->game_time_ticks());
+        // Player-pack items reverse the physical roles without changing the NPC dialogue owner.
+        auto gift=take;gift.name="take_item_from_player";gift.capability="action.take_item_from_player";
+        gift.action_id="action:player-gift";gift.arguments=json::parse(R"({"item":"Combat rifle","amount":1})");
+        const auto gift_scene=std::make_shared<const core::RuntimeSnapshot>(payer_scene->with_player_inventory(
+            payer_scene->player().with_inventory({rifle},"complete")));
+        const auto gift_request=client::prepare_transfer_action(*gift_scene,gift,observed_owner.token(),now+1s);
+        CHECK(gift_request.name==runtime::RuntimeActionName::take_item && gift_request.actor.form_id==0x14);
+        CHECK(gift_request.recipient->form_id==0x15 && gift_request.amount==1 && gift_request.item->form_id==rifle.form_id);
+        auto remaining_rifle=rifle;remaining_rifle.count=1;
+        runtime::RuntimeTransferObservation gift_pair{{runtime,gift_request.actor,{remaining_rifle},"complete",gift.action_id},
+            {runtime,*gift_request.recipient,{remaining_rifle},"complete",gift.action_id}};
+        CHECK(gift_pair.valid_for(gift_request));
+        const auto gift_view=client::prepare_transfer_inventory(gift_scene,gift,observed_owner.token(),gift_pair,true);
+        CHECK(gift_view.snapshot->player().inventory()[0].count==1 && gift_view.snapshot->actors()[0].inventory()[0].count==1);
+        CHECK(gift_view.transfer.donor.actor.form_id=="0x00000014" && gift_view.transfer.recipient.actor.form_id=="0x00000015");
+        for(int bad=0;bad<8;++bad) {
+            auto wrong=gift;auto item=rifle;
+            if(bad==0)item.equipped=true;
+            if(bad==1)wrong.capability="action.give_item_to";
+            if(bad==2)wrong.target=wrong.actor;
+            if(bad==3)wrong.actor=*wrong.target;
+            if(bad==4)wrong.arguments=json::parse(R"({"item":"Combat rifle","amount":3})");
+            if(bad==5)wrong.arguments=json::parse(R"({"item":"Combat rifle","amount":"1"})");
+            if(bad==6){item=caps_item;wrong.arguments=json::parse(R"({"item":"0x0000000F"})");}
+            auto scene=gift_scene->with_player_inventory(gift_scene->player().with_inventory({item},bad==7?"partial":"complete"));
+            bool refused=false;try{(void)client::prepare_transfer_action(scene,wrong,observed_owner.token(),now+1s);}
+            catch(const std::invalid_argument&){refused=true;}CHECK(refused);
+        }
+        gift_pair.donor.action_id="other";
+        CHECK(client::prepare_transfer_inventory(gift_scene,gift,observed_owner.token(),gift_pair,true).transfer.donor.observation=="unavailable");
+        auto menu=gift;menu.name="open_inventory";menu.capability="action.open_inventory";
+        menu.arguments=json::parse("{}");menu.action_id="action:menu";
+        const auto menu_request=client::prepare_gift_menu_action(*gift_scene,menu,observed_owner.token(),now+120s);
+        CHECK(menu_request.name==runtime::RuntimeActionName::open_inventory && menu_request.actor.form_id==0x15);
+        CHECK(menu_request.recipient->form_id==0x14 && !menu_request.item && menu_request.deadline==now+120s);
+        runtime::RuntimeTransferObservation menu_pair{
+            {runtime,*menu_request.recipient,{remaining_rifle},"complete",menu.action_id},
+            {runtime,menu_request.actor,{remaining_rifle},"complete",menu.action_id}};
+        CHECK(menu_pair.valid_for(menu_request));
+        CHECK((!runtime::RuntimeTransferObservation{menu_pair.recipient,menu_pair.donor}.valid_for(menu_request)));
+        const auto menu_view=client::prepare_transfer_inventory(gift_scene,menu,observed_owner.token(),menu_pair,true);
+        CHECK(menu_view.transfer.donor.actor.form_id=="0x00000014" && menu_view.transfer.recipient.actor.form_id=="0x00000015");
+        CHECK(menu_view.transfer.donor.observation=="complete" && menu_view.transfer.recipient.observation=="complete");
+        CHECK(menu_view.transfer.donor.items[0].count==1 && menu_view.transfer.recipient.items[0].count==1);
+        CHECK(menu_view.snapshot->player().inventory()[0].count==1 && menu_view.snapshot->actors()[0].inventory()[0].count==1);
+        auto original_rifle=remaining_rifle;original_rifle.count=2;
+        CHECK(actions::gift_menu_exchange_conserved(std::vector{original_rifle},{},std::vector{remaining_rifle},std::vector{remaining_rifle}));
+        auto equipped_gift=remaining_rifle;equipped_gift.equipped=true;
+        CHECK(actions::gift_menu_exchange_conserved(std::vector{original_rifle},{},std::vector{remaining_rifle},std::vector{equipped_gift}));
+        CHECK(!actions::gift_menu_exchange_conserved(std::vector{original_rifle},{},{},std::vector{remaining_rifle}));
+        CHECK(!actions::gift_menu_exchange_conserved({}, {}, {}, std::vector{remaining_rifle}));
+        CHECK(actions::gift_menu_exchange_conserved(std::vector{original_rifle},{},std::vector{original_rifle},{}));
+        for(int bad=0;bad<5;++bad) {
+            auto wrong=menu;
+            if(bad==0)wrong.arguments=json::parse(R"({"item":"Combat rifle"})");
+            if(bad==1)wrong.target=wrong.actor;
+            if(bad==2)wrong.actor=*wrong.target;
+            if(bad==3)wrong.capability="action.give_item_to";
+            if(bad==4)wrong.action_id.clear();
+            bool refused=false;try{(void)client::prepare_gift_menu_action(*gift_scene,wrong,observed_owner.token(),now+1s);}
+            catch(const std::invalid_argument&){refused=true;}CHECK(refused);
+        }
         auto wrong_payment=payment;wrong_payment.name=runtime::RuntimeActionName::give_caps;
         CHECK(!payment_pair.valid_for(wrong_payment));
         wrong_payment=payment;wrong_payment.actor=*payment.recipient;

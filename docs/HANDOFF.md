@@ -1,5 +1,99 @@
 # SYNTH developer handoff
 
+## Installed gift screen and shared wording
+
+The user approved general gifts opening the normal inventory exchange, while
+named items transfer directly. The shared Marcy wording helper is installed for
+all NPCs. The coordinated installed update adds owned, observed OpenInventory,
+post-menu paired receipts and model-valued gift batches. Automated checks pass;
+the reviewed DLL/PEX/backend are installed and hash verified. Next verify
+the correct NPC's free exchange opens and actual donations become gift facts.
+No fixed NPC bonus is used. See PROTOCOL.md. Menu gameplay remains unverified.
+
+
+## Installed player-pack gifts
+
+The populated live action catalog required explicit registration of the new
+reviewed TakeItemFromPlayer builtin. The empty-catalog seeder does not add missing
+actions to an existing catalog. Registration is complete and verified; all 34
+previous catalog rows were preserved. The initial Marcy/Jun tests had no transfer
+intents because the action was absent. Retest after registration.
+
+The user explicitly requested player-to-NPC ordinary item transfers and personal
+gift valuation. The coordinated candidate adds TakeItemFromPlayer with its own
+flat v2 acknowledgement, exact Player donor/NPC recipient evidence and explicit
+direct-input authorization. Accepted gifts feed the existing relationship model
+with the recipient's saved biography/personality/goals; there are no fixed NPC
+scores. Failed handoffs and receipt retries cannot multiply gift appreciation.
+The coordinated flat client/backend update is installed and hash verified. Gameplay acceptance remains open. See PROTOCOL.md.
+
+
+## Equipped pistol transfer correction
+
+The installed flat update performs verified non-forcing unequip and exact-instance
+GiveItemTo within one owned game-thread operation. This addresses Jun equipping
+the Heavy 10mm Pistol again between separate requests. Exact counts, instance/
+quest ownership and cancellation/load/deadline checks remain required.
+Equip, corrected unequip and equipped-weapon transfer are gameplay/receipt
+verified. Jun returned the equipped Submachine Gun with complete paired
+inventories proving donor zero and player one. Taking ordinary items from the
+player pack is now supported by the installed direct transfer; the general gift menu remains a candidate; reverse caps transfer works.
+See ACTION-INVENTORY-OBSERVATIONS.md.
+
+## Current handoff priorities
+
+Rangroo's handoff scope is bios, world knowledge, diaries, actions, and basic
+rechat/profile setup. Preserve accepted work: flat NPC rechat and movement release
+were already gameplay confirmed with Codsworth and Jun, and completed rechat is
+also recorded in the current backend. All 11 stored actor sheets have valid
+profile/connector assignments and populated biography/personality fields.
+
+The 4 November read-only audit confirms all 204 reviewed biography templates are
+populated, all 207 expected actor mappings match, and all 125 lore articles are
+active with matching reviewed text and content hashes. Existing successful
+requests show biography and lore text reaching the provider. This completes the
+reviewed content pack, not an exhaustive Fallout cast/world census.
+
+One bounded deployment gap remains: Pearl, Maxwell, Bert Riggs, Gilda Broscoe,
+Keith McKinney and Santiago Avida retain the old exclusive prewar access tag in the
+installed pack/database. The reviewed candidate removes it for these live postwar
+Vault 118 actors. Their biographies are present; the obsolete tag restricts lore
+access. The installed JSON pack also predates other biography revisions already
+in the database. No runtime change was made by the audit.
+
+Manual NPC diary generation, the F6 shortcut and dashboard publication are
+gameplay verified. Continue only outstanding supported-action cases and specific
+reproduced failures; do not restart accepted biography, lore or basic rechat work.
+The directed follower-to-NPC errand failed, with no accepted social-task request
+found, and remains deferred separately from basic nearby rechat.
+
+## Manual diary control and dashboard reader
+
+The flat control menu now offers Write Diary for its retained NPC, closes on
+submission, revalidates the exact actor after capture and calls the existing
+owned background diary request. A target change or load cannot redirect a
+queued selection. The menu, dashboard reader and configurable WriteDiary hotkey
+are installed. Shipped defaults leave the shortcut unbound; local settings assign
+F6. It captures only the crosshair NPC, blocks menu input, obeys dialogue pause
+and combat policy, and keeps exact actor/session ownership.
+Flat gameplay on 4 November confirms F6 works: Sturges' new 1,429-character entry
+completed on the first provider attempt in about 33 seconds, was published with
+valid ownership/hashes, and appears in the dashboard. The paired backend fixes
+the old 15-second background timeout. VR shortcut gameplay remains unproven.
+
+
+## Supported-action consumption correction
+
+Item transfer and both 10-cap directions with Sturges are now confirmed by the
+user and successful receipts with complete donor/recipient inventories. The
+Purified Water Consume request reached the client but was blocked by a temporary
+engine queue-thread check outside that queue-drain phase. The candidate now calls
+the audited flat 1.11.240 immediate consumption path on the main thread and keeps
+the original action ownership, cancellation/deadline and exact decrement proof.
+See ACTION-INVENTORY-OBSERVATIONS.md. The correction is installed; the user
+confirmed water consumption and the successful receipt verifies exactly one item
+was consumed. This is flat gameplay evidence; VR remains unproven.
+
 Updated: 2026-10-15. This is the current entry point for SYNTH development. Older plans and
 audits under `docs/` are kept as feature evidence, and some carry a historical banner.
 
@@ -19,8 +113,21 @@ Start all work from `alpha` and target every PR at `alpha`. `synth` is the main/
 The public client source comes from private cleanup `618e924`; the paired server comes from
 `c12fb1b`. Older hashes and branch names below identify historical development checkpoints.
 
-Temporary flat conversation holds and active-dialogue wait pumping are prepared in the testing candidate.
-See [CONVERSATION-HOLDS.md](CONVERSATION-HOLDS.md). Gameplay and installation remain open.
+The testing candidate preserves native follower movement, uses an original continuous
+Follow package for bounded ordinary-NPC approach, includes conversational robots in
+camera-independent hearing, and provides separate owned navigation for saved follower
+errands. Arrival requires the actual owned package rather than proximity alone.
+Flat gameplay confirms Sturges approaches the player during conversation; the
+runtime log confirms the expected owned package. Walking together, cleanup,
+cell transitions and NPC-to-NPC errands still need separate gameplay proof.
+See [CONVERSATION-HOLDS.md](CONVERSATION-HOLDS.md). Updated flat gameplay remains open.
+
+The 3 November 2026 flat retest confirmed, by user observation, that Wait Here
+and Follow Me work after correcting generated version-131 package schedules:
+month Any must be `00`, rather than the pre-version-122 `FF` encoding. The live
+alias already contained the priority-100 Wait package; the invalid month prevented
+selection. See [WAIT-ALIAS-CHAT.md](WAIT-ALIAS-CHAT.md) for the cause and remaining
+acceptance scope.
 
 ## Supported runtimes
 
@@ -106,9 +213,19 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
 - `SYNTH.esp` is flat only. It contains original wait and restraint records with
   `Fallout4.esm` as its master. Never renumber or remove existing FormIDs, quest aliases,
   PACK/REFR records or the local-800 migration record. Saves refer to them.
-- Wait uses Papyrus `SetRestrained` with a game-thread check of the actor's life state.
-  Aliases 0â€“255 track wait subjects. Aliases 256â€“511 record only the restraint that SYNTH
-  applied. Old package and marker records remain for save compatibility only. See
+- Wait uses exact alias-bound packages wrapping the ordinary Wait template (`001A32D6`).
+  The Wait quest priority is 100 and is audited as a signed runtime value.
+- Current wait action success additionally requires the active owned package and stable stopped-position
+  verification; release requires empty owned aliases and fresh absence of SYNTH Wait packages.
+  The fixed position anchor is established only after exact alias/package observation, so a walking
+  follower is not cancelled for movement during asynchronous installation. Success still requires
+  two stationary samples; pending installation retains the original deadline and cancellation guards.
+  Admission stays pending until those checks complete. The 90-second unpaused order
+  survives later dialogue, while Stop and load release it rather than restoring it.
+  Generic restraint is factual metadata and is preserved. It is not evidence of SYNTH-owned waiting.
+  Aliases 0â€“255 bind Wait subjects to packages 0x900â€“0x9FF. Aliases 256â€“511
+  are legacy restraint receipts used only for migration cleanup. The local-800
+  package and marker records remain for save compatibility. See
   [WAIT-ALIAS-CHAT.md](WAIT-ALIAS-CHAT.md).
 - Commit `231bbdb` (PKDT interrupt-override fix) and commit `f34da88` (restraint hold) must stay
   together.
@@ -205,7 +322,7 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
   Chatterbox, PocketTTS, Cartesia and Inworld.
 - Server native embedding-space work is deferred and is **not** alpha-ready. It lives on
   Synthserver `codex/dialectic-parity-core` at `3808838`. Its migration IDs
-  `20260908001`â€“`006` sort below the baseline's `20260909001`, so they must be renumbered
+  `20260908001`Ã¢â‚¬â€œ`006` sort below the baseline's `20260909001`, so they must be renumbered
   before that work resumes. See the Synthserver handoff.
 - The flat package audit verifies only SYNTH-owned ESP/PEX bytes. A Script VM call or record
   behavior is proven only by in-game evidence.

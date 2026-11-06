@@ -1,4 +1,5 @@
 #include "protocol_native/v1_codec.hpp"
+#include "client/wait_action.hpp"
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -7,6 +8,63 @@
 #include <vector>
 
 namespace {
+void verified_wait_tests() {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    core::CancellationSource owner{core::RuntimeGeneration::from_value(7)};
+    runtime::RuntimeActionRequest request;
+    request.name=runtime::RuntimeActionName::wait_here;
+    request.actor={0x1A4D7,"Fallout4.esm","save:wait-proof"};
+    request.action_id="wait:proof";request.cancellation=owner.token();
+    request.deadline=core::SnapshotClock::now()+std::chrono::seconds{30};
+    protocol_native::Action action;
+    action.action_id=request.action_id;action.name="wait_here";action.capability="action.wait_here";
+    action.actor={"0x0001A4D7","Fallout4.esm","save:wait-proof","Preston"};
+    runtime::RuntimeWaitObservation proof{owner.token().generation(),request.actor,request.action_id,request.name,true,false,0x05000900,true};
+    const auto wire=json::parse(client::verified_wait_result(action,request,proof));
+    require(protocol_native::text(wire,"schema")=="synth.action.wait.result.v1","wait proof schema lost");
+    require(protocol_native::required(wire,"owned_hold").as_bool(),"verified wait did not retain physical ownership");
+    const auto rejects=[&](runtime::RuntimeWaitObservation bad) {
+        try{(void)client::verified_wait_result(action,request,bad);return false;}
+        catch(const std::invalid_argument&){return true;}
+    };
+    auto bad=proof;bad.owned_hold=false;require(rejects(bad),"queued/unowned wait became success");
+    bad=proof;bad.owned_package=0;require(rejects(bad),"missing package became success");
+    bad=proof;bad.stationary=false;require(rejects(bad),"moving NPC became successful wait");
+    bad=proof;bad.actor.form_id=0x1CA7D;require(rejects(bad),"another NPC's observation became success");
+    bad=proof;bad.actor.playthrough_id="save:other";require(rejects(bad),"another save's observation became success");
+    bad=proof;bad.action_id="wait:other";require(rejects(bad),"another action's receipt became success");
+    bad=proof;bad.generation=core::RuntimeGeneration::from_value(8);require(rejects(bad),"another runtime generation became success");
+    request.name=runtime::RuntimeActionName::release_wait;
+    action.name="release_wait";action.capability="action.release_wait";
+    proof.name=request.name;proof.owned_hold=false;proof.restrained=false;proof.owned_package=0;proof.stationary=false;
+    require(!protocol_native::required(json::parse(client::verified_wait_result(action,request,proof)),"owned_hold").as_bool(),
+            "verified release retained hold");
+    proof.restrained=true;
+    require(protocol_native::required(json::parse(client::verified_wait_result(action,request,proof)),"restrained").as_bool(),
+            "foreign restraint must remain explicit after owned package release");
+    protocol_native::ActorState state;
+    state.actor=action.actor;state.base_form_id="0x0001A4D7";state.base_origin_plugin="Fallout4.esm";
+    state.alive=true;state.level=1;state.life_state="alive";state.wait_held=true;
+    require(protocol_native::required(protocol_native::actor_state_value(state),"wait_held").as_bool(),"current owned wait lost");
+    state.wait_held=false;
+    require(!protocol_native::required(protocol_native::actor_state_value(state),"wait_held").as_bool(),"observed release became unknown");
+    state.wait_held.reset();require(!protocol_native::actor_state_value(state).find("wait_held"),"unknown wait state became false");
+    state.wait_held=true;state.alive=false;
+    bool invalid{};try{(void)protocol_native::actor_state_value(state);}catch(const std::invalid_argument&){invalid=true;}
+    require(invalid,"dead actor current wait accepted");
+    state.wait_held=false;state.alive=true;
+    protocol_native::EventContext context;
+    context.protocol_version=2;context.runtime_variant="flat";context.generation=7;
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm","save:wait-proof","Player"};
+    const auto encode=[&]{return protocol_native::encode_context(context,"save:wait-proof",1,player,action.actor,{action.actor},{state});};
+    invalid=false;try{(void)encode();}catch(const std::invalid_argument&){invalid=true;}
+    require(invalid,"unnegotiated wait state emitted");
+    context.capabilities={"context.wait_state","dialogue.turn_ownership"};(void)encode();
+    context.runtime_variant="vr";
+    invalid=false;try{(void)encode();}catch(const std::invalid_argument&){invalid=true;}
+    require(invalid,"flat wait state emitted in VR");
+}
 void enemy_awareness_tests() {
     using namespace synth;
     const core::CombatantIdentity owner{0x1A4D7,"Fallout4.esm","save:awareness","Preston","HumanRace"};
@@ -40,6 +98,44 @@ void enemy_awareness_tests() {
     require(counts==std::array<std::size_t,4>{61,1,1,1},"bounded scan wasted populated tier budget");
     require(core::enemy_awareness_scan_counts({100,100,100,100})==std::array<std::size_t,4>{16,16,16,16},"bounded scan starved a process tier");
     require(core::enemy_awareness_scan_counts({0,2,0,3})==std::array<std::size_t,4>{0,2,0,3},"small tier scan exceeded population");
+    {
+        // Reproduce a follower's known native combat target outside the current process-list slice.
+        // Discovery must offer it immediately, while admission remains the observer's responsibility.
+        std::array<std::vector<std::uint32_t>,4> tiers;
+        for (std::uint32_t i=1;i<=128;++i) tiers[0].push_back(i);
+        tiers[1]={201,202,203,204};tiers[2]={301,302,303,304};tiers[3]={401,402,403,404};
+        const std::array<std::size_t,4> sizes{128,4,4,4};
+        const auto at=[&](std::size_t tier,std::size_t index){return tiers[tier][index];};
+        const std::uint32_t native_target=120;
+        std::vector<std::uint32_t> inspected,accepted;
+        bool visible=true,hostile=true,same_scene=true,alive=true;
+        const auto consider=[&](std::uint32_t handle) {
+            inspected.push_back(handle);
+            if (handle==native_target && visible && hostile && same_scene && alive) accepted.push_back(handle);
+        };
+        core::visit_enemy_awareness_candidates<std::uint32_t>({},sizes,0,at,consider);
+        require(accepted.empty(),"regression fixture target was already in this rotating window");
+        inspected.clear();
+        const std::array<std::uint32_t,3> priority{native_target,native_target,0};
+        core::visit_enemy_awareness_candidates<std::uint32_t>(priority,sizes,0,at,consider);
+        require(inspected.front()==native_target && accepted==std::vector<std::uint32_t>{native_target},
+            "native follower target was hidden behind a process-list rotation");
+        require(inspected.size()<=64 && std::ranges::count(inspected,native_target)==1,
+            "priority candidates duplicated or exceeded the combined inspection budget");
+        require(std::ranges::find(inspected,201)!=inspected.end() &&
+            std::ranges::find(inspected,301)!=inspected.end() && std::ranges::find(inspected,401)!=inspected.end(),
+            "native target prioritization starved a populated process tier");
+        for (auto* rejected : {&visible,&hostile,&same_scene,&alive}) {
+            *rejected=false;inspected.clear();accepted.clear();
+            core::visit_enemy_awareness_candidates<std::uint32_t>(priority,sizes,0,at,consider);
+            require(accepted.empty(),"discovery candidates bypassed current observer admission");
+            *rejected=true;
+        }
+        const std::array<std::uint32_t,10> excess_priority{501,502,503,504,505,506,507,508,509,510};
+        inspected.clear();accepted.clear();
+        core::visit_enemy_awareness_candidates<std::uint32_t>(excess_priority,{0,0,0,0},0,at,consider);
+        require(inspected.size()==8,"priority discovery escaped its reserved inspection bound");
+    }
     core::EnemyAwarenessSampler sampler;
     require(!sampler.due(1000,true,1),"unselected observer sampled");
     sampler.select(owner,1);require(sampler.due(1000,true,1).has_value(),"combat observation not sampled");
@@ -102,6 +198,7 @@ void enemy_awareness_tests() {
 int main(int argc,char** argv){
  try{
   enemy_awareness_tests();
+  verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};
   std::vector<synth::protocol_native::Line> lines; std::string raw;

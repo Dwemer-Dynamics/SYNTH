@@ -1,10 +1,12 @@
 #pragma once
 
 #include "combat_target.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -65,9 +67,10 @@ inline bool valid_enemy_awareness(const EnemyAwarenessSnapshot& value,std::uint3
 }
 
 // Fair bounded windows. Monotonic rotation contains no actor/session knowledge and never grants visibility.
-inline std::array<std::size_t,4> enemy_awareness_scan_counts(const std::array<std::size_t,4>& sizes) noexcept {
+inline std::array<std::size_t,4> enemy_awareness_scan_counts(const std::array<std::size_t,4>& sizes,
+                                                          std::size_t budget = 64) noexcept {
     std::array<std::size_t,4> counts{};std::size_t tier{};
-    for (std::size_t read=0;read<64;++read) {
+    for (std::size_t read=0;read<std::min<std::size_t>(64,budget);++read) {
         bool found{};
         for (std::size_t attempt=0;attempt<4;++attempt) {
             const auto next=tier;tier=(tier+1)%4;
@@ -77,6 +80,32 @@ inline std::array<std::size_t,4> enemy_awareness_scan_counts(const std::array<st
         if (!found) break;
     }
     return counts;
+}
+
+// Native target/discovery handles are candidates, never accepted observations. Prioritize at most eight
+// before the fair process windows so a known combat target cannot wait for a later rotation. The caller
+// still performs this observer's complete, current visibility/hostility/identity checks on each handle.
+template<class Handle,class HandleAt,class Consider>
+void visit_enemy_awareness_candidates(std::span<const Handle> priority,
+    const std::array<std::size_t,4>& sizes,std::uint64_t epoch,HandleAt handle_at,Consider consider) {
+    std::array<Handle,64> visited{};
+    std::size_t used{};
+    const auto inspect=[&](const Handle& handle) {
+        if (!handle || used==visited.size() ||
+            std::find(visited.begin(),visited.begin()+used,handle)!=visited.begin()+used) return;
+        visited[used++]=handle;
+        consider(handle);
+    };
+    for (std::size_t i=0;i<std::min<std::size_t>(8,priority.size());++i) inspect(priority[i]);
+    const auto counts=enemy_awareness_scan_counts(sizes,visited.size()-used);
+    for (std::size_t tier=0;tier<sizes.size();++tier) {
+        if (!sizes[tier] || !counts[tier]) continue;
+        auto index=static_cast<std::size_t>((epoch*counts[tier])%sizes[tier]);
+        for (std::size_t i=0;i<counts[tier];++i) {
+            inspect(handle_at(tier,index));
+            if (++index==sizes[tier]) index=0;
+        }
+    }
 }
 
 // One known observer per session; no scans before selection or after Stop. Cadence uses monotonic time.

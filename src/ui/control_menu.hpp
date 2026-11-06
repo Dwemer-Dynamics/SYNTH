@@ -105,6 +105,7 @@ enum class ControlAction : unsigned char {
     wait_here,         // value: the target's display name, for the caller's log line
     release_wait,      // value: the target's display name, for the caller's log line
     open_dashboard,    // value: empty
+    diary_target,      // value: target display name; game thread retains exact identity
 };
 
 // One selection, handed over exactly once.
@@ -376,6 +377,7 @@ inline bool open_control_menu(std::uint64_t generation, std::string target_name,
     // test, or a future row - must not fall through to "Applying...".
     case ControlAction::wait_here: return "Asking this NPC to wait here...";
     case ControlAction::release_wait: return "Asking this NPC to stop waiting...";
+    case ControlAction::diary_target: return "Requesting this NPC\'s diary...";
     case ControlAction::open_dashboard: return "Opening the server dashboard...";
     default: return "Applying...";
     }
@@ -491,6 +493,13 @@ inline void __stdcall render_control_menu() {
                     : "Release Wait  [" + target + "]##SYNTH.Control.ReleaseWait";
             if (control_row(release_row, false) &&
                 control_submit(ControlAction::release_wait, target)) {
+                keep_open = false;
+            }
+
+            const auto diary_row = target.empty()
+                ? std::string{"Write NPC Diary##SYNTH.Control.Diary"}
+                : "Write Diary  [" + target + "]##SYNTH.Control.Diary";
+            if (control_row(diary_row, false) && control_submit(ControlAction::diary_target, target)) {
                 keep_open = false;
             }
 
