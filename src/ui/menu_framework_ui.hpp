@@ -84,6 +84,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #if SYNTH_HAS_MENU_FRAMEWORK
 #include "ui/settings_store.hpp"
@@ -121,6 +122,7 @@ using ConfigSnapshot = std::shared_ptr<const config::Config>;
 struct ChatboxSubmission final {
     std::string text;
     std::optional<integration::PromptTarget> target;
+    std::uint64_t draft_revision{};
 };
 
 // What the Tools page has asked the game thread to do about voice imports. The
@@ -154,18 +156,27 @@ public:
     // The same 1-4096 character window `PluginSession::submit_text` enforces, so
     // the UI can never build a message the transport would reject.
     static constexpr std::size_t message_limit = 4096;
+    static constexpr std::size_t target_limit = 16;
 
     // A draft receipt is copied atomically with its target, never read separately.
     struct Draft final {
         std::uint64_t revision{};
         std::optional<integration::PromptTarget> target;
+        std::vector<integration::PromptTarget> targets;
     };
 
-    bool request_open(std::optional<integration::PromptTarget> target = {}) {
+    bool request_open(std::optional<integration::PromptTarget> target = {},std::vector<integration::PromptTarget> targets = {}) {
         std::scoped_lock lock{mutex_};
         if (open_pending_ || draft_ || message_) return false;
         if (target && target->session.is_cancelled()) return false;
-        draft_ = Draft{++revision_, std::move(target)};
+        if(targets.size()>target_limit||(!targets.empty()&&(!target||!valid_target(*target))))return false;
+        for(std::size_t index=0;index<targets.size();++index) {
+            const auto& choice=targets[index];
+            if(!valid_target(choice)||!choice.manual_chat||!choice.nearby_conversation||
+                choice.session.generation()!=target->session.generation()||choice.playthrough_id!=target->playthrough_id)return false;
+            for(std::size_t previous=0;previous<index;++previous)if(same_identity(choice,targets[previous]))return false;
+        }
+        draft_ = Draft{++revision_, std::move(target),std::move(targets)};
         open_pending_ = true;
         refresh_open_locked();
         return true;
@@ -179,6 +190,16 @@ public:
         return draft_;
     }
 
+    // The renderer can choose only an index in the game thread's copied list.
+    // Selection replaces the receipt, so a stale Send/Stop cannot use a new target.
+    [[nodiscard]] std::optional<Draft> choose_target(std::size_t index,std::uint64_t revision) {
+        std::scoped_lock lock{mutex_};
+        if(!draft_||draft_->revision!=revision||index>=draft_->targets.size()||
+            !draft_->target||draft_->target->session.is_cancelled()||draft_->targets[index].session.is_cancelled())return {};
+        draft_->target=draft_->targets[index];draft_->revision=++revision_;
+        refresh_open_locked();return draft_;
+    }
+
     // Render thread: offer the game thread one message. A second draft is
     // refused while the first is still unread rather than overwriting it, so a
     // slow consumer can lose neither message nor gain a duplicate.
@@ -190,7 +211,7 @@ public:
         if (message_) return ChatboxSubmit::busy;
         if (!draft_ || draft_->revision != revision ||
             (draft_->target && draft_->target->session.is_cancelled())) return ChatboxSubmit::stale;
-        message_ = ChatboxSubmission{std::move(trimmed), std::move(draft_->target)};
+        message_ = ChatboxSubmission{std::move(trimmed), std::move(draft_->target),draft_->revision};
         draft_.reset();
         refresh_open_locked();
         return ChatboxSubmit::accepted;
@@ -286,6 +307,14 @@ public:
     }
 
 private:
+    [[nodiscard]] static bool same_identity(const integration::PromptTarget& a,const integration::PromptTarget& b) noexcept {
+        return a.form_id==b.form_id&&a.origin_plugin==b.origin_plugin&&a.playthrough_id==b.playthrough_id;
+    }
+    [[nodiscard]] static bool valid_target(const integration::PromptTarget& target) noexcept {
+        return !target.session.is_cancelled()&&target.session.generation().valid()&&target.form_id&&target.form_id!=0x14&&
+            target.base_form_id&&!target.origin_plugin.empty()&&!target.base_origin_plugin.empty()&&
+            !target.playthrough_id.empty()&&!target.display_name.empty();
+    }
     // Caller holds `mutex_`. Publishes and returns the same answer, so the
     // lock-free `is_open()` can never disagree with `has_draft()` by more than
     // the frame in which the session was retired.
@@ -744,10 +773,10 @@ inline const char* chatbox_status = nullptr;
 inline std::optional<ChatboxBridge::Draft> chatbox_draft;
 
 // No bridge lock is held while the framework's visibility flag is changed.
-inline bool open_chatbox(std::optional<integration::PromptTarget> target = {}) {
+inline bool open_chatbox(std::optional<integration::PromptTarget> target = {},std::vector<integration::PromptTarget> targets = {}) {
     auto* window = chatbox_window.load(std::memory_order_acquire);
     if (window == nullptr) return false;
-    if (!chatbox.request_open(std::move(target))) return false;
+    if (!chatbox.request_open(std::move(target),std::move(targets))) return false;
     // The render lifecycle publishes visibility, so an older render close
     // cannot lose this request between the bridge and the framework flag.
     return true;
@@ -797,10 +826,31 @@ inline void __stdcall render_chatbox() {
         ImGuiMCP::SetWindowFontScale(1.25f * scale);
         ImGuiMCP::PushTextWrapPos(0.0f);
         ImGuiMCP::TextDisabled(
-            "Message the NPC you are talking to. Enter sends, Ctrl+Enter starts a new line, "
+            "Choose a nearby NPC to message. Enter sends, Ctrl+Enter starts a new line, "
             "Escape closes.");
-        if (chatbox_draft->target)
-            ImGuiMCP::TextWrapped("To: %s", chatbox_draft->target->display_name.c_str());
+        if (chatbox_draft->target) {
+            if(chatbox_draft->targets.empty())ImGuiMCP::TextWrapped("To: %s",chatbox_draft->target->display_name.c_str());
+            else if(ImGuiMCP::BeginCombo("To:##SYNTH.Chatbox.Target",chatbox_draft->target->display_name.c_str())) {
+                std::optional<std::size_t> chosen;
+                for(std::size_t index=0;index<chatbox_draft->targets.size();++index) {
+                    const auto& option=chatbox_draft->targets[index];
+                    const auto selected=option.form_id==chatbox_draft->target->form_id&&
+                        option.origin_plugin==chatbox_draft->target->origin_plugin&&option.playthrough_id==chatbox_draft->target->playthrough_id;
+                    auto label=option.display_name;
+                    const auto repeated=std::ranges::count_if(chatbox_draft->targets,[&](const auto& value){return value.display_name==option.display_name;});
+                    if(repeated>1)label+=" ("+std::to_string(index+1)+")";
+                    label+="##SYNTH.Chatbox.Target."+std::to_string(index);
+                    if(ImGuiMCP::Selectable(label.c_str(),selected))chosen=index;
+                }
+                ImGuiMCP::EndCombo();
+                if(chosen) {
+                    if(auto selected=chatbox.choose_target(*chosen,chatbox_draft->revision)) {
+                        chatbox_draft=std::move(selected);chatbox_focus_pending=true;
+                    }
+                    else chatbox_status="This prompt expired. Close it and open a new prompt.";
+                }
+            }
+        }
         if (!published_configuration.load()) {
             ImGuiMCP::TextColored(ImGuiMCP::ImVec4{1.0f, 0.78f, 0.25f, 1.0f},
                                   "SYNTH has not loaded a session yet, so there may be nobody to "
@@ -963,11 +1013,12 @@ public:
 #endif
     }
 
-    static bool request_open(integration::PromptTarget target) {
+    static bool request_open(integration::PromptTarget target,std::vector<integration::PromptTarget> targets = {}) {
 #if SYNTH_HAS_MENU_FRAMEWORK
-        return detail::open_chatbox(std::move(target));
+        return detail::open_chatbox(std::move(target),std::move(targets));
 #else
         (void)target;
+        (void)targets;
         return false;
 #endif
     }

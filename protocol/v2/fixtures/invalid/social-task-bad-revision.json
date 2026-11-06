@@ -1,0 +1,27 @@
+{
+  "schema": "synth.event.v2",
+  "protocol_version": 2,
+  "type": "social_task_progress",
+  "session_id": "session:flat:fixture",
+  "request_id": "req-text-1",
+  "turn_id": "turn-text-1",
+  "generation": 2,
+  "game": "fo4",
+  "runtime_variant": "flat",
+  "client_version": "0.1.0",
+  "runtime_version": "1.10.163",
+  "capabilities": [
+    "dialogue.text",
+    "social.tasks.v1",
+    "context.saved_anchor",
+    "dialogue.turn_ownership",
+    "context.location_identity"
+  ],
+  "payload": {
+    "task_id": "social:0123456789abcdef0123456789abcdef",
+    "expected_revision": 0,
+    "execution_id": "visit:session:2:1",
+    "phase": "started"
+  },
+  "context_sequence": 7
+}

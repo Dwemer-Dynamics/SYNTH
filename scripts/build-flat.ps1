@@ -50,11 +50,13 @@ $TestSuites = @(
     'synth-audio-tests',
     'synth-presentation-tests',
     'synth-media-fetch-tests',
+    'synth-radio-tests',
     'synth-adapters-tests'
 )
 if (Test-Path -LiteralPath (Join-Path $Root 'tests\protocol_native\protocol_native_tests.cpp') -PathType Leaf) {
     $TestSuites += 'synth-protocol-native-tests'
 }
+$TestSuites += 'synth-native-playback-tests'
 
 Push-Location $Root
 try {

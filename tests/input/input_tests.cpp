@@ -3,6 +3,10 @@
 #include "input/press_gesture.hpp"
 #include "integration/external_requests.hpp"
 #include "integration/papyrus_requests.hpp"
+#include "client/social_task_input.hpp"
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <thread>
 #include <chrono>
 #include <iostream>
@@ -13,6 +17,27 @@ static_assert(sizeof(SynthExternalRequestV1)==1032 && offsetof(SynthExternalRequ
               offsetof(SynthExternalRequestV1,text)==24 && sizeof(SynthExternalAPIV1)==24);
 #define CHECK(x) do { if (!(x)) throw std::runtime_error{#x}; } while(false)
 int main() try {
+    {
+        std::ifstream stream{std::filesystem::path{__FILE__}.parent_path()/"social-task-commands.json"};
+        CHECK(stream.good());
+        const std::string bytes{std::istreambuf_iterator<char>{stream},std::istreambuf_iterator<char>{}};
+        const auto cases=synth::json::parse(bytes);
+        for (const auto& test:cases.as_array()) {
+            const auto* performer=test.find("performer");
+            const auto parsed=synth::client::parse_social_task_input(test.find("text")->as_string(),
+                performer ? performer->as_string() : "");
+            const auto& expected=*test.find("expected");
+            if (expected.is_null()) { CHECK(!parsed);continue; }
+            CHECK(parsed);
+            CHECK(parsed->recipient_name==expected.find("recipient_name")->as_string());
+            CHECK(parsed->topic==expected.find("topic")->as_string());
+            CHECK(parsed->when==expected.find("when")->as_string());
+            CHECK(parsed->location_name==expected.find("location_name")->as_string());
+        }
+        CHECK(!synth::client::parse_social_task_input(std::string(1201,'x')));
+        CHECK(!synth::client::parse_social_task_input(std::string{"talk to J\0un about repairs",26}));
+        CHECK(!synth::client::parse_social_task_input(std::string{"talk to \xFF about repairs"}));
+    }
     {
         using synth::ui::VoiceAction;
         synth::ui::detail::VoiceImportBridge bridge;
@@ -40,7 +65,7 @@ int main() try {
     }
     {
         // Voice and typed drafts revalidate the same copied identity, never a matching name.
-        synth::integration::PromptTarget target{{}, 1, 1, "Fallout4.esm", "Fallout4.esm", "save", "Preston"};
+        synth::integration::PromptTarget target{{}, 1, 1, "Fallout4.esm", "Fallout4.esm", "save", "Preston", false, {}};
         using synth::core::ActorSnapshot;
         CHECK(target.matches(ActorSnapshot{1, "Renamed Preston", {1, 2, 3}, "Fallout4.esm", "save"}));
         CHECK(!target.matches(ActorSnapshot{2, "Preston", {}, "Fallout4.esm", "save"}));
@@ -265,8 +290,9 @@ int main() try {
         CHECK(bridge.submit(synth::ui::ControlAction::wait_here, "Preston", draft->revision) == synth::ui::detail::ControlSubmit::stale);
         CHECK(!bridge.take_request());
     }
-    // Auto-close must preserve exactly one owned wait/release request; load invalidation must not.
-    for (auto action : {synth::ui::ControlAction::wait_here, synth::ui::ControlAction::release_wait}) {
+    // Auto-close preserves exactly one owned wait/release/diary request; load invalidation does not.
+    for (auto action : {synth::ui::ControlAction::wait_here, synth::ui::ControlAction::release_wait,
+                        synth::ui::ControlAction::diary_target}) {
         synth::ui::detail::ControlMenuBridge bridge;
         CHECK(bridge.request_open(9, "Raider", "STANDARD", "standard"));
         const auto draft = bridge.consume_open_request();
@@ -287,7 +313,7 @@ int main() try {
         synth::ui::detail::ChatboxBridge bridge;
         synth::core::CancellationSource chat_owner{generation};
         synth::integration::PromptTarget target{chat_owner.token(), 0x1A4D7, 0x19FD9,
-            "Fallout4.esm", "Fallout4.esm", "test-playthrough", "Preston", true};
+            "Fallout4.esm", "Fallout4.esm", "test-playthrough", "Preston", true, {}};
         CHECK(bridge.request_open(target));
         auto draft = bridge.consume_open_request();
         CHECK(draft && draft->target && draft->target->display_name == "Preston");
@@ -301,6 +327,67 @@ int main() try {
         chat_owner.cancel();
         CHECK(bridge.submit("stale", draft->revision) == synth::ui::detail::ChatboxSubmit::stale);
         CHECK(!bridge.take_submission());
+    }
+    // The typed-recipient picker retains copied identities, not a display-name lookup.
+    {
+        using synth::ui::detail::ChatboxBridge;
+        using synth::ui::detail::ChatboxSubmit;
+        synth::core::CancellationSource picker_owner{generation};
+        const auto option=[&](std::uint32_t form) {
+            return synth::integration::PromptTarget{picker_owner.token(),form,form+100,
+                "Fallout4.esm","Fallout4.esm","test-playthrough","Settler",true,"STANDARD",4,true};
+        };
+        auto first=option(0xFF000101),second=option(0xFF000102);
+        ChatboxBridge bridge;
+        CHECK(bridge.request_open(first,{first,second}));
+        auto opened=bridge.consume_open_request();
+        CHECK(opened&&opened->target&&opened->target->form_id==first.form_id&&opened->targets.size()==2);
+        CHECK(!bridge.choose_target(2,opened->revision));
+        CHECK(!bridge.choose_target(1,opened->revision+1));
+        // Editing a renderer copy cannot inject a recipient into the bridge list.
+        opened->targets[1].form_id=0xDEADBEEF;
+        const auto chosen=bridge.choose_target(1,opened->revision);
+        CHECK(chosen&&chosen->revision!=opened->revision&&chosen->target->form_id==second.form_id);
+        CHECK(bridge.submit("wrong receipt",opened->revision)==ChatboxSubmit::stale);
+        CHECK(!bridge.request_stop(opened->revision));
+        bridge.cancel(opened->revision);CHECK(bridge.has_draft());
+        CHECK(bridge.submit("Hello there",chosen->revision)==ChatboxSubmit::accepted);
+        const auto sent=bridge.take_submission();
+        CHECK(sent&&sent->target&&sent->draft_revision==chosen->revision);
+        CHECK(sent->target->form_id==second.form_id&&sent->target->base_form_id==second.base_form_id&&
+            sent->target->origin_plugin==second.origin_plugin&&sent->target->base_origin_plugin==second.base_origin_plugin&&
+            sent->target->playthrough_id==second.playthrough_id&&sent->target->session.generation()==generation);
+        CHECK(sent->target->nearby_conversation&&sent->target->manual_chat&&sent->target->conversation_mode=="STANDARD"&&
+            sent->target->conversation_model_slot==4);
+        CHECK(!bridge.take_submission());
+        CHECK(bridge.request_open(first,{first,second}));
+        const auto active=bridge.consume_open_request();picker_owner.cancel();
+        CHECK(!bridge.choose_target(1,active->revision));
+        CHECK(bridge.submit("expired",active->revision)==ChatboxSubmit::stale);
+    }
+    {
+        using synth::ui::detail::ChatboxBridge;
+        synth::core::CancellationSource picker_owner{generation};
+        const synth::integration::PromptTarget first{picker_owner.token(),0xFF000201,0x200,
+            "Fallout4.esm","Fallout4.esm","test-playthrough","Jun",true,"STANDARD",1,true};
+        std::vector<synth::integration::PromptTarget> choices;
+        for(std::uint32_t index=0;index<16;++index) {auto target=first;target.form_id+=index;choices.push_back(target);}
+        ChatboxBridge bounded;
+        CHECK(bounded.request_open(first,choices));bounded.discard();
+        auto extra=first;extra.form_id+=16;choices.push_back(extra);
+        CHECK(!bounded.request_open(first,choices));
+        CHECK(!bounded.request_open(first,{first,first}));
+        CHECK(!bounded.request_open(std::nullopt,{first}));
+        synth::core::CancellationSource foreign{synth::core::RuntimeGeneration::from_value(generation.value()+1)};
+        for(int bad_choice_case=0;bad_choice_case<5;++bad_choice_case) {
+            auto target=first;target.form_id+=1;
+            if(bad_choice_case==0)target.session=foreign.token();
+            if(bad_choice_case==1)target.playthrough_id="different-save";
+            if(bad_choice_case==2)target.base_form_id=0;
+            if(bad_choice_case==3)target.nearby_conversation=false;
+            if(bad_choice_case==4)target.manual_chat=false;
+            CHECK(!bounded.request_open(first,{target}));
+        }
     }
     std::cout << "input tests passed\n";
 } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

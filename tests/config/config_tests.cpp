@@ -106,12 +106,13 @@ void test_shipped_defaults_and_override_precedence() {
     const auto custom = std::filesystem::temp_directory_path() / "synth-override.ini";
     {
         std::ofstream output{custom};
-        output << "[Hotkeys]\nPipVision=43\n[Audio]\nDistanceScale=20.0\n"
+        output << "[Hotkeys]\nPipVision=43\nWriteDiary=64\n[Audio]\nDistanceScale=20.0\n"
                   "[BoredEvents]\nTimerSeconds=5\n";
     }
 
     const auto shipped = load(root / "config/SYNTH.ini");
     CHECK(shipped.hotkeys.pip_vision == 0);
+    CHECK(shipped.hotkeys.write_diary == 0);
     CHECK(shipped.activation.automatic_hearing_distance == 784);
     CHECK(shipped.behavior.dynamic_profile_minutes == 30);
     CHECK(shipped.behavior.bored_event_seconds == 60);
@@ -121,6 +122,7 @@ void test_shipped_defaults_and_override_precedence() {
 
     const auto config = load(root / "config/SYNTH.ini", custom);
     CHECK(config.hotkeys.pip_vision == 43);
+    CHECK(config.hotkeys.write_diary == 64);
     CHECK(config.behavior.bored_event_seconds == 5);
     CHECK(config.audio.distance_scale == 20.0);
     CHECK(config.activation.automatic_hearing_distance == 784);
@@ -165,7 +167,7 @@ void test_settings_catalog_matches_configuration() {
             }
         }
     }
-    CHECK(interactive == 43);
+    CHECK(interactive == 44);
 
     // Every framework hotkey identifier must resolve to a catalog keybind row,
     // otherwise the reconcile pass would drop a rebind on the floor.

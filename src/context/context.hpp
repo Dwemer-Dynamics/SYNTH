@@ -29,6 +29,7 @@ struct WorldObservation final {
     core::RuntimeGeneration generation;
     std::string playthrough, location, cell, worldspace, weather;
     bool interior{};
+    std::optional<core::LocationIdentity> location_ref;
     bool operator==(const WorldObservation&) const = default;
 };
 
@@ -36,7 +37,7 @@ struct WorldObservation final {
     if (!snapshot.world()) return std::nullopt;
     const auto& world = *snapshot.world();
     return WorldObservation{snapshot.variant(), snapshot.generation(), snapshot.player().playthrough_id(),
-                            world.location, world.cell, world.worldspace, world.weather, world.interior};
+                            world.location, world.cell, world.worldspace, world.weather, world.interior, world.location_ref};
 }
 
 [[nodiscard]] inline bool valid_plugin_name(std::string_view value) noexcept {

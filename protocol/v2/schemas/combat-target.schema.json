@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/combat-target.schema.json",
+  "title": "Current native combat target observation",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation", "actor", "race"],
+      "properties": {
+        "observation": {"const": "identified"},
+        "actor": {
+          "allOf": [
+            {"$ref": "../../v1/schemas/identity.schema.json"},
+            {"required": ["display_name"], "properties": {
+              "form_id": {"not": {"const": "0x00000000"}},
+              "display_name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+            }}
+          ]
+        },
+        "race": {"type": "string", "maxLength": 255}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation", "actor", "race"],
+      "properties": {
+        "observation": {"enum": ["none", "unavailable"]},
+        "actor": {"type": "null"},
+        "race": {"const": ""}
+      }
+    }
+  ]
+}

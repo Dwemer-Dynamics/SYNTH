@@ -92,6 +92,16 @@ int main() {
         CHECK(trace->take()->stage == ConversationStage::playing);
         CHECK(trace->take()->stage == ConversationStage::spoken);
         CHECK(!trace->take());
+        for (const auto stage : {ConversationStage::presentation_missing_capture,ConversationStage::presentation_owner_changed,
+            ConversationStage::presentation_stale_capture,ConversationStage::presentation_scene_changed,
+            ConversationStage::presentation_actor_missing,ConversationStage::presentation_actor_identity_changed,
+            ConversationStage::presentation_actor_unavailable,ConversationStage::presentation_actor_out_of_range,
+            ConversationStage::presentation_actor_cancelled}) {
+            trace->record(stage,7,11,"request:1","line-1");
+            const auto stopped = trace->take();
+            CHECK(stopped && stage_name(stopped->stage).starts_with("presentation_"));
+            CHECK(stopped->request_id == "request:1" && stopped->line_id == "line-1");
+        }
         auto parent=std::make_shared<synth::presentation::DialogueCaption>();
         synth::core::CancellationSource owner{synth::core::RuntimeGeneration::initial()};
         parent->cancellation=owner.token(); parent->trace=trace;

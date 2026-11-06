@@ -1,6 +1,74 @@
-# Persistent wait ownership and paused-chat targeting
+# Owned Wait Here and Release Wait
 
-## Current: September 14 direct movement hold
+The flat client routes explicit typed/voice and control-menu Wait Here and Release
+Wait to the same original quest and package controller. Actions retain the exact
+NPC identity, runtime generation, action ID and original deadline. Queue admission
+is pending; it is not a successful physical result. VR has no Wait adapter.
+
+Wait aliases 0Ã¢â‚¬â€œ255 bind their matching original packages through `ALPC`. Each
+wrapper references Fallout 4's ordinary `Wait` template (`001A32D6`), with Bool
+false and Float 0.0 mapped to public inputs 10 and 11. Its unconditional Wait
+procedure is separate from the combat HoldPosition template. The existing 512
+alias IDs, package/marker IDs, master and separate approach/social records remain
+resolvable. Marker records are retained for save compatibility.
+Generated version-131 packages encode schedule month Any as `00`. Older
+vanilla records (before version 122) use `FF`, which the loader converts; modern
+records retain `FF` as -1 and fail the runtime month check. Live inspection found
+the exact Wait package attached to the priority-100 alias but rejected by this
+schedule check while Codsworth retained FollowersCompanionPackage. The corrected
+encoding is covered across every generated package and all calendar months.
+After installation on 3 November 2026, the user confirmed in flat gameplay that
+"Wait here" and "Follow me" both worked. This records the user-observed retest;
+the wider interruption, expiry and save/load acceptance checks remain separate.
+
+The Wait quest uses priority 100. Fallout's runtime stores this as a signed
+8-bit field; the record audit checks the signed value to reject negative priority.
+
+Wait Here succeeds only after exact target alias ownership and the active matching
+SYNTH package are observed, then two native samples at least 100 ms apart show the
+actor stopped within 64 game units of a native package anchor, with speed at most 5.
+The anchor is captured once, only after the exact owned alias and matching active
+package are observed. Normal movement while its asynchronous script is still
+applying must not be measured against an earlier command-admission position.
+Before anchoring, actor availability, same-cell,
+cancellation and the original action deadline remain required. After anchoring,
+the position is fixed and movement beyond 64 units releases the hold; it never
+follows a moving NPC to manufacture a successful observation.
+The bounded 90-second unpaused hold starts at that verified completion. A later
+player question does not release it. Repeated action IDs poll the original result
+without restarting the lease or renewing its admission deadline.
+
+Release succeeds after the owned aliases are empty and a fresh native observation
+finds no SYNTH Wait package active on that actor. An alias-clear acknowledgement
+alone is insufficient. Release does not instruct a follower to follow; native AI
+can resume according to its existing packages and other owners. Foreign restraint
+is preserved, so package release can be verified even if another owner still
+restrains the actor. `restrained` remains factual metadata; it is not Wait ownership.
+The negotiated `wait_held` field distinguishes current owned waiting from generic
+restraint. Unknown recovery/cleanup is omitted rather than reported as false.
+
+Stop, timeout, unavailability, leaving the original cell and load release the owned
+package. No physical Wait order is restored across save/load. Historical verified
+waiting can still be recalled while a fresh observation says its owned hold ended.
+Aliases 256Ã¢â‚¬â€œ511 are retired restraint receipts: load/reset clears only recorded
+legacy transitions, and new waits never fill these aliases or call SetRestrained.
+Old HoldActor signatures remain resolvable but cannot create another restraint.
+
+The coordinator retains timed-out VM tickets until matching Finished acknowledges
+the stack has drained. No alias release or reuse can race that stack. A late saved
+completion schedules recovery of this original quest after any live stack drains.
+Cleanup runs through the stable local game pump without requiring a connected
+backend. Menu pause extends the 90-second hold clock and VM timeout, but does not
+renew an action's original admission deadline. A VM that never drains needs reload.
+
+Automated proof and package audits do not establish gameplay acceptance. Recheck
+ordinary NPCs and native followers, busy workshop AI, menu pause, interruption,
+Release, Stop, expiry, save/load, and preservation of foreign restraint in flat.
+
+## Retired September 14 restraint implementation
+
+The following notes explain the superseded implementation and prior evidence.
+They are not success criteria for the current owned-package controller.
 
 The 12:49 diagnostic run confirmed Preston retained `WorkshopSandboxAtWork7x17`
 (`00038C10`) while the wait quest and alias were valid. The marker reported a
@@ -11,7 +79,7 @@ actor's restrained life state. The existing 90-second unpaused lease still handl
 expiry, repeat commands, cancellation, Release Wait, and load recovery. Dialogue
 targeting permits restrained actors so chat and Release Wait remain available.
 
-Aliases 0–255 track wait subjects; aliases 256–511 persist only restraint transitions
+Aliases 0Ã¢â‚¬â€œ255 track wait subjects; aliases 256Ã¢â‚¬â€œ511 persist only restraint transitions
 SYNTH applied. The setter's no-change return does not claim pre-existing restraint.
 Release and reset clear only recorded restraint. Old package and marker FormIDs
 remain for save compatibility, but aliases no longer inject those packages and

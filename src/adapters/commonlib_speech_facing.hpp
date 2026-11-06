@@ -45,7 +45,7 @@ namespace synth::adapters::commonlib {
         static_cast<std::uint32_t>(RE::Actor::BOOL_FLAGS::kSceneHeadtrackRotation) |
         static_cast<std::uint32_t>(RE::Actor::BOOL_FLAGS::kIsInKillMove);
     if (!speaker->currentProcess || speaker->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal ||
-        speaker->lifeState != 0 || speaker->knockState != 0 || speaker->flyState != 0 ||
+        (speaker->lifeState != 0 && !(conversation_hold_observer && conversation_hold_observer(speaker->GetFormID()))) || speaker->knockState != 0 || speaker->flyState != 0 ||
         speaker->meleeAttackState != 0 || speaker->staggered || speaker->inSyncAnim || speaker->talkingToPlayer ||
         speaker->interactingState != RE::INTERACTING_STATE::kNotInteracting || speaker->IsInCombat() ||
         (speaker->niFlags.flags & scene_flags) != 0 || !std::isfinite(speed) || std::abs(speed) > 0.1F ||

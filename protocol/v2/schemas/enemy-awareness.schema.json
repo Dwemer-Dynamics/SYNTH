@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/enemy-awareness.schema.json",
+  "title": "Current visible hostiles and bounded recent observations owned by one NPC",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "current",
+    "recent"
+  ],
+  "properties": {
+    "current": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "race",
+          "distance",
+          "hostile",
+          "in_combat",
+          "line_of_sight"
+        ],
+        "properties": {
+          "actor": {
+            "allOf": [
+              {
+                "$ref": "../../v1/schemas/identity.schema.json"
+              },
+              {
+                "required": [
+                  "display_name"
+                ],
+                "properties": {
+                  "form_id": {
+                    "not": {
+                      "enum": [
+                        "0x00000000",
+                        "0x00000014"
+                      ]
+                    }
+                  },
+                  "display_name": {
+                    "minLength": 1,
+                    "pattern": ".*\\S.*"
+                  }
+                }
+              }
+            ]
+          },
+          "race": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "distance": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2000
+          },
+          "hostile": {
+            "const": true
+          },
+          "in_combat": {
+            "type": "boolean"
+          },
+          "line_of_sight": {
+            "const": "visible"
+          }
+        }
+      }
+    },
+    "recent": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "race",
+          "observation",
+          "age_ms"
+        ],
+        "properties": {
+          "actor": {
+            "allOf": [
+              {
+                "$ref": "../../v1/schemas/identity.schema.json"
+              },
+              {
+                "required": [
+                  "display_name"
+                ],
+                "properties": {
+                  "form_id": {
+                    "not": {
+                      "enum": [
+                        "0x00000000",
+                        "0x00000014"
+                      ]
+                    }
+                  },
+                  "display_name": {
+                    "minLength": 1,
+                    "pattern": ".*\\S.*"
+                  }
+                }
+              }
+            ]
+          },
+          "race": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "observation": {
+            "enum": [
+              "seen_hostile",
+              "seen_dead"
+            ]
+          },
+          "age_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000
+          }
+        }
+      }
+    }
+  }
+}

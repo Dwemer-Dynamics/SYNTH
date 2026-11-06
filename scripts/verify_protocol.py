@@ -201,6 +201,9 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     catalog = load_json(catalog_path)
     payload_type = value.get("type")
     payload_schema = catalog.get("$defs", {}).get(payload_type)
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "status":
+        catalog_path = PROTOCOL / "v2/schemas/status.schema.json"
+        payload_schema = load_json(catalog_path)
     if value.get("schema") == "synth.event.v2" and payload_type == "control":
         catalog_path = PROTOCOL / "v2/schemas/control.schema.json"
         payload_schema = load_json(catalog_path)
@@ -220,10 +223,33 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") == "synth.event.v2" and payload_type == "action_result":
         catalog_path = PROTOCOL / "v2/schemas/action-result-payload.schema.json"
         payload_schema = load_json(catalog_path)
+    if value.get("schema") == "synth.event.v2" and payload_type in {"social_task_request", "social_task_progress"}:
+        catalog_path = PROTOCOL / "v2/schemas" / ("social-task-request.schema.json" if payload_type == "social_task_request" else "social-task-progress.schema.json")
+        payload_schema = load_json(catalog_path)
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "social_task":
+        catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
+        payload_schema = {"type": "object", "additionalProperties": False, "required": ["task"],
+                          "properties": {"task": {"$ref": "social-task.schema.json"}}}
     if payload_schema is None:
         raise ValidationError(f"{path}: no payload schema for {payload_type!r}")
     validate(value.get("payload"), payload_schema, catalog_path, f"{path}:payload")
     payload = value.get("payload", {})
+    if payload_type in {"social_task_request", "social_task_progress"}:
+        if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or not {
+            "social.tasks.v1", "context.saved_anchor", "dialogue.turn_ownership"
+        }.issubset(value.get("capabilities", [])):
+            raise ValidationError(f"{path}: social tasks require negotiated saved v2 flat ownership")
+    if payload_type == "context" and "location_ref" in payload.get("world", {}):
+        if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.location_identity" not in value.get("capabilities", []):
+            raise ValidationError(f"{path}: canonical location requires negotiated v2 flat capability")
+    wait_caps={"context.wait_state", "action.wait_verified"}
+    caps=set(value.get("capabilities", []))
+    if wait_caps & caps and (value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat"
+                            or "dialogue.turn_ownership" not in caps):
+        raise ValidationError(f"{path}: native wait observations require owned v2 flat capability")
+    if payload_type == "context" and any("wait_held" in state for state in payload.get("actor_states", [])):
+        if "context.wait_state" not in caps:
+            raise ValidationError(f"{path}: owned wait state requires negotiated capability")
     if payload_type == "action_result" and payload.get("result", {}).get("schema") == "synth.action.result.v2":
         if value.get("protocol_version") != 2 or not {"action.inventory_observation", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])):
             raise ValidationError(f"{path}: post-action inventory requires owned v2 capability")

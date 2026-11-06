@@ -208,6 +208,67 @@ void test_saved_context_roundtrip_and_stale_writers() {
     CHECK(!store.acknowledge(another.epoch, original));
 }
 
+void test_saved_context_same_world_replacement() {
+    using namespace synth::core;
+    const SavedContext disk{"player:a", "session:disk", 7, 9};
+    const SavedContext acknowledged{"player:a", "session:before-stop", 8, 12};
+    const SavedContext next_acknowledged{"player:a", "session:after-stop", 8, 2};
+    SaveContextStore store;
+    const auto load_epoch = store.reset();
+    store.restore(load_epoch, encode_saved_context(disk));
+    const auto original = store.bind("player:a");
+    CHECK(original.loaded_context == disk);
+    CHECK(store.acknowledge(original.epoch, acknowledged));
+    CHECK(original.loaded_context == disk); // An active session keeps its copied origin.
+
+    store.stop_writer(original.epoch); // Halt retires the writer without loading a different save.
+    CHECK(store.for_save() == encode_saved_context(acknowledged));
+    CHECK(!store.acknowledge(original.epoch, {"player:a", "session:before-stop", 8, 99}));
+    const auto restarted = store.bind("player:a");
+    CHECK(restarted.loaded_context == acknowledged); // The replacement must inherit the live frontier.
+    CHECK(store.for_save() == encode_saved_context(acknowledged));
+    CHECK(!store.acknowledge(restarted.epoch, {"player:b", "session:after-stop", 8, 1}));
+    store.stop_writer(original.epoch); // Late retirement cannot stop the replacement writer.
+    CHECK(store.acknowledge(restarted.epoch, next_acknowledged));
+    CHECK(restarted.loaded_context == acknowledged);
+    CHECK(original.loaded_context == disk);
+
+    const auto replaced = store.bind("player:a"); // Settings replacement also transfers the frontier.
+    CHECK(replaced.loaded_context == next_acknowledged);
+    CHECK(!store.acknowledge(restarted.epoch, {"player:a", "session:after-stop", 8, 99}));
+    CHECK(store.for_save() == encode_saved_context(next_acknowledged));
+}
+
+void test_saved_context_disk_load_replaces_live_frontier() {
+    using namespace synth::core;
+    const SavedContext earlier_disk{"player:a", "session:earlier-save", 3, 4};
+    const SavedContext later_live{"player:a", "session:later-live", 7, 20};
+    const SavedContext after_reload{"player:a", "session:after-reload", 8, 1};
+    SaveContextStore store;
+    const auto later_writer = store.bind("player:a");
+    CHECK(store.acknowledge(later_writer.epoch, later_live));
+
+    const auto disk_epoch = store.reset(); // An actual load must discard the later live frontier.
+    CHECK(!store.for_save());
+    store.restore(disk_epoch, encode_saved_context(earlier_disk));
+    const auto reloaded = store.bind("player:a");
+    CHECK(reloaded.loaded_context == earlier_disk);
+    CHECK(store.for_save() == encode_saved_context(earlier_disk));
+    CHECK(!store.acknowledge(later_writer.epoch, {"player:a", "session:later-live", 7, 99}));
+    CHECK(store.acknowledge(reloaded.epoch, after_reload));
+    store.restore(disk_epoch, encode_saved_context(later_live)); // Delayed restore cannot replace its newer writer.
+    CHECK(store.for_save() == encode_saved_context(after_reload));
+    CHECK(reloaded.loaded_context == earlier_disk);
+
+    (void)store.reset(); // A save without a context record must not inherit memory from another save.
+    const auto blank_save = store.bind("player:a");
+    CHECK(!blank_save.loaded_context && !store.for_save());
+    CHECK(!store.acknowledge(reloaded.epoch, after_reload));
+    CHECK(store.acknowledge(blank_save.epoch, after_reload));
+    CHECK(!store.bind("player:b").loaded_context && !store.for_save());
+    CHECK(!store.bind("player:a").loaded_context && !store.for_save());
+}
+
 void test_bounded_saved_context_records() {
     using namespace synth::core;
     struct Record { std::uint32_t type, version, length; SavedContextBytes data; };
@@ -568,6 +629,8 @@ int main() {
         test_shutdown_is_terminal_and_contains_cancel_exceptions();
         test_validation();
         test_saved_context_roundtrip_and_stale_writers();
+        test_saved_context_same_world_replacement();
+        test_saved_context_disk_load_replaces_live_frontier();
         test_bounded_saved_context_records();
         std::cout << "lifecycle tests passed (" << assertions << " assertions)\n";
         return 0;

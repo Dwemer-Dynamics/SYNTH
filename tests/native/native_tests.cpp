@@ -70,6 +70,37 @@ void test_runtime_identity() {
     CHECK(!parse_runtime_variant("VR"));
 }
 
+void test_combat_target_identity_and_unavailable_evidence() {
+    using namespace synth::core;
+    const ActorSnapshot source{0x0001A4D7, "Preston", {}, "Fallout4.esm", "save:one", true, false, true};
+    const CombatTargetSnapshot observed{"identified", CombatantIdentity{0xFF000123, "Fallout4.esm", "save:one", "Raider", "HumanRace"}};
+    const auto enriched = source.with_combat_target(observed);
+    CHECK(source.combat_target().observation == "unavailable");
+    CHECK(enriched.combat_target() == observed);
+    CHECK(source.with_details_from(enriched).combat_target() == observed);
+    const ActorSnapshot peaceful{source.form_id(), source.name(), {}, source.origin_plugin(), source.playthrough_id()};
+    CHECK(peaceful.with_details_from(enriched).combat_target().observation == "unavailable");
+    CHECK(source.with_combat_target({"none", std::nullopt}).combat_target().observation == "none");
+    for (int bad = 0; bad < 9; ++bad) {
+        auto value = observed;
+        if (bad == 0) value.observation = "unavailable";
+        if (bad == 1) value.observation = "none";
+        if (bad == 2) value.observation = "guessed";
+        if (bad == 3) value.actor.reset();
+        if (bad == 4) value.actor->form_id = source.form_id();
+        if (bad == 5) value.actor->playthrough_id = "foreign:save";
+        if (bad == 6) value.actor->origin_plugin = "../Fallout4.esm";
+        if (bad == 7) value.actor->display_name.clear();
+        if (bad == 8) value.actor->form_id = 0;
+        check_throws<std::invalid_argument>([&] { (void)source.with_combat_target(value); });
+    }
+    check_throws<std::invalid_argument>([&] { (void)peaceful.with_combat_target(observed); });
+    for (const auto state : {std::pair{false, false}, std::pair{true, true}}) {
+        const ActorSnapshot unavailable{source.form_id(), source.name(), {}, source.origin_plugin(), source.playthrough_id(), state.first, state.second, true};
+        check_throws<std::invalid_argument>([&] { (void)unavailable.with_combat_target(observed); });
+    }
+}
+
 void test_generation_and_cancellation() {
     using namespace synth::core;
     GenerationClock clock;
@@ -428,6 +459,28 @@ void test_voice_archive_bounds_and_cancellation() {
     index.scan(root, {"Fallout4.esm"}, [] { return false; });
     CHECK(index.samples().at("npcmpaladindanse").loose);
     CHECK(SampleIndex::read(index.samples().at("npcmpaladindanse")).front() == 'y');
+    const auto rejected_file = root / "rejected.txt";
+    { std::ofstream output{rejected_file}; output << "# Reject the bad loose sample only\nSound\\Voice\\Fallout4.esm\\NPCMPaladinDanse\\override.fuz\n"; }
+    const auto rejected = SampleIndex::read_rejected_sources(rejected_file);
+    index.scan(root, {"Fallout4.esm"}, [] { return false; }, rejected);
+    CHECK(index.samples().size() == 1);
+    CHECK(!index.samples().at("npcmpaladindanse").loose);
+    CHECK(SampleIndex::read(index.samples().at("npcmpaladindanse")).front() == 'x');
+    auto all_rejected = rejected;
+    all_rejected.push_back(lower(name));
+    index.scan(root, {"Fallout4.esm"}, [] { return false; }, all_rejected);
+    CHECK(index.samples().empty());
+    CHECK(SampleIndex::read_rejected_sources(root / "missing.txt").empty());
+    { std::ofstream output{rejected_file}; output << "sound/voice/../npc/test.fuz\n"; }
+    bool rejected_unsafe{};
+    try { (void)SampleIndex::read_rejected_sources(rejected_file); }
+    catch (const std::runtime_error&) { rejected_unsafe = true; }
+    CHECK(rejected_unsafe);
+    { std::ofstream output{rejected_file}; output << std::string(65'537, 'x'); }
+    bool rejected_oversized{};
+    try { (void)SampleIndex::read_rejected_sources(rejected_file); }
+    catch (const std::runtime_error&) { rejected_oversized = true; }
+    CHECK(rejected_oversized);
     CHECK(!safe_component("../outside"));
     CHECK(!safe_component(std::string(129, 'a')));
 }
@@ -437,6 +490,7 @@ void test_voice_archive_bounds_and_cancellation() {
 int main() {
     try {
         test_runtime_identity();
+        test_combat_target_identity_and_unavailable_evidence();
         test_generation_and_cancellation();
         test_snapshot_values_and_immutability();
         test_priority_queue_reservations_and_halt();

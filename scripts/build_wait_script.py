@@ -49,7 +49,9 @@ def canonical(data):
     if objects != 1 or name >= len(strings) or strings[name].lower() != 'synthwait':
         raise ValueError('unowned executable script')
     if not {'Current', 'Finished', 'Observed', 'Apply', 'Reset', 'ApplyByFormIds', 'ResetByFormId',
-            'RefreshByFormIds', 'HoldActor', 'ReleaseRestraint'}.issubset(strings):
+            'RefreshByFormIds', 'HoldActor', 'ReleaseRestraint', 'ReleaseByFormIds', 'ObserveWaitState', 'CurrentAttack', 'FinishedAttack', 'AttackByFormIds',
+            'CurrentApproach', 'FinishedApproach', 'ObservedApproach', 'ApproachByFormIds', 'ResetApproachByFormId', 'ApproachSameArea', 'CurrentVisit', 'FinishedVisit', 'ObservedVisit',
+            'VisitByFormIds', 'ResetVisitByFormId', 'CurrentGiftMenu', 'FinishedGiftMenu', 'GiftMenuByFormIds'}.issubset(strings):
         raise ValueError('missing wait entry points')
     header = data[:8] + bytes(8)
     for text in ('SYNTHWait.psc', '', ''):
@@ -59,7 +61,7 @@ def canonical(data):
 
 
 def verify_wait_bundle(pex, manifest, source, flags):
-    if len(manifest) > 65536 or len(source) > 16384 or len(flags) > 4096:
+    if len(manifest) > 65536 or len(source) > 32768 or len(flags) > 4096:
         raise ValueError('oversized wait bundle')
     if source != (ROOT / 'scripts/papyrus/SYNTHWait.psc').read_bytes() or flags != (ROOT / 'scripts/papyrus/SYNTHNative.flg').read_bytes():
         raise ValueError('wait source is stale or unowned')

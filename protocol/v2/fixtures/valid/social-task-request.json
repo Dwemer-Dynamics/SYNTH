@@ -1,0 +1,33 @@
+{
+  "schema": "synth.event.v2",
+  "protocol_version": 2,
+  "type": "social_task_request",
+  "session_id": "session:flat:fixture",
+  "request_id": "req-text-1",
+  "turn_id": "turn-text-1",
+  "generation": 2,
+  "game": "fo4",
+  "runtime_variant": "flat",
+  "client_version": "0.1.0",
+  "runtime_version": "1.10.163",
+  "capabilities": [
+    "dialogue.text",
+    "social.tasks.v1",
+    "context.saved_anchor",
+    "dialogue.turn_ownership",
+    "context.location_identity"
+  ],
+  "payload": {
+    "performer": {
+      "form_id": "0x0001CA7D",
+      "origin_plugin": "Fallout4.esm",
+      "playthrough_id": "save-001",
+      "display_name": "Codsworth"
+    },
+    "recipient_name": "Jun",
+    "topic": "the water pump",
+    "when": "now",
+    "source_text": "Go talk to Jun about the water pump."
+  },
+  "context_sequence": 7
+}

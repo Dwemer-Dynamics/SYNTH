@@ -108,7 +108,8 @@ public:
             bound_ = true;
             if (loaded_ && !std::equal(owner.begin(), owner.end(), loaded_->begin())) loaded_.reset();
             if (latest_ && !std::equal(owner.begin(), owner.end(), latest_->begin())) latest_.reset();
-            loaded = loaded_;
+            // Replacements inherit the latest ACK; existing copied bindings remain immutable.
+            loaded = latest_;
         }
         auto context = loaded ? decode_saved_context(*loaded) : std::nullopt;
         return {epoch, std::move(context)};

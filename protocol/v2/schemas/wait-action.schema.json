@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/wait-action.schema.json",
+  "title": "Owned flat NPC wait or release intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "action_id",
+    "idempotency_key",
+    "name",
+    "capability",
+    "actor",
+    "arguments",
+    "deadline_ms"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.action.v1"
+    },
+    "action_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "name": {
+      "enum": [
+        "wait_here",
+        "release_wait"
+      ]
+    },
+    "capability": {
+      "enum": [
+        "action.wait_here",
+        "action.release_wait"
+      ]
+    },
+    "actor": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        {
+          "properties": {
+            "form_id": {
+              "not": {
+                "enum": [
+                  "0x00000014",
+                  "0X00000014"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 120000
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "name": {
+            "const": "wait_here"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capability": {
+            "const": "action.wait_here"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "capability": {
+            "const": "action.release_wait"
+          }
+        }
+      }
+    }
+  ]
+}

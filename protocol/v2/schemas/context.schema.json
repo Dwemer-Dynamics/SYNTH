@@ -4,11 +4,26 @@
   "title": "SYNTH context payload v2",
   "$defs": {
     "scene_reference": {
-      "type": "object", "additionalProperties": false,
-      "required": ["form_id", "origin_plugin"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "origin_plugin"
+      ],
       "properties": {
-        "form_id": {"type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$", "not": {"const": "0x00000000"}},
-        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"}
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$",
+          "not": {
+            "const": "0x00000000"
+          }
+        },
+        "origin_plugin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+        }
       }
     }
   },
@@ -23,15 +38,129 @@
     "nearby_items",
     "points_of_interest"
   ],
-  "allOf": [{"if":{"required":["audience_observation"],"properties":{"audience_observation":{"const":"unavailable"}}},"then":{"properties":{"audience":{"maxItems":0}}}},{"if":{"required":["active_quests_observation"],"properties":{"active_quests_observation":{"const":"unavailable"}}},"then":{"properties":{"active_quests":{"maxItems":0}}}},{"if":{"required":["nearby_items_observation"],"properties":{"nearby_items_observation":{"const":"unavailable"}}},"then":{"properties":{"nearby_items":{"maxItems":0}}}},{"if":{"required":["points_of_interest_observation"],"properties":{"points_of_interest_observation":{"const":"unavailable"}}},"then":{"properties":{"points_of_interest":{"maxItems":0}}}}],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "audience_observation"
+        ],
+        "properties": {
+          "audience_observation": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "audience": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "active_quests_observation"
+        ],
+        "properties": {
+          "active_quests_observation": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "active_quests": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "nearby_items_observation"
+        ],
+        "properties": {
+          "nearby_items_observation": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "nearby_items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "points_of_interest_observation"
+        ],
+        "properties": {
+          "points_of_interest_observation": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "points_of_interest": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
   "properties": {
-    "actor_events": {"$ref": "actor-events.schema.json"},
-    "player_event": {"$ref": "player-event.schema.json"},
-    "quest_events": {"$ref": "quest-events.schema.json"},
-    "active_quests_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
-    "audience_observation": {"type": "string", "enum": ["complete", "partial", "unavailable"]},
-    "nearby_items_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
-    "points_of_interest_observation": {"type": "string", "enum": ["complete", "partial", "cached", "unavailable"]},
+    "actor_events": {
+      "$ref": "actor-events.schema.json"
+    },
+    "player_event": {
+      "$ref": "player-event.schema.json"
+    },
+    "quest_events": {
+      "$ref": "quest-events.schema.json"
+    },
+    "active_quests_observation": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "cached",
+        "unavailable"
+      ]
+    },
+    "audience_observation": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "nearby_items_observation": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "cached",
+        "unavailable"
+      ]
+    },
+    "points_of_interest_observation": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "cached",
+        "unavailable"
+      ]
+    },
     "playthrough_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -66,7 +195,7 @@
       "type": "array",
       "maxItems": 16,
       "items": {
-          "$ref": "quest-state.schema.json"
+        "$ref": "quest-state.schema.json"
       }
     },
     "nearby_items": {
@@ -86,11 +215,39 @@
     "world": {
       "type": "object",
       "additionalProperties": false,
-      "allOf": [{
-        "if": {"properties": {"interior": {"const": true}}},
-        "then": {"properties": {"scene": {"properties": {"worldspace": {"type": "null"}}}}},
-        "else": {"properties": {"scene": {"properties": {"worldspace": {"$ref": "#/$defs/scene_reference"}}}}}
-      }],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "interior": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scene": {
+                "properties": {
+                  "worldspace": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "scene": {
+                "properties": {
+                  "worldspace": {
+                    "$ref": "#/$defs/scene_reference"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
       "required": [
         "location",
         "cell",
@@ -101,10 +258,26 @@
       ],
       "properties": {
         "scene": {
-          "type": "object", "additionalProperties": false, "required": ["cell", "worldspace"],
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cell",
+            "worldspace"
+          ],
           "properties": {
-            "cell": {"$ref": "#/$defs/scene_reference"},
-            "worldspace": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/scene_reference"}]}
+            "cell": {
+              "$ref": "#/$defs/scene_reference"
+            },
+            "worldspace": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/scene_reference"
+                }
+              ]
+            }
           }
         },
         "location": {
@@ -130,6 +303,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        },
+        "location_ref": {
+          "$ref": "#/$defs/scene_reference"
         }
       }
     },

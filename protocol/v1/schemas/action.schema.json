@@ -16,8 +16,8 @@
       "inspect_actor", "inspect_surroundings", "make_follower", "move_to", "barter",
       "open_inventory", "pickup_item", "read_quests", "relax", "director_command",
       "spawn_caps", "spawn_item", "teleport_actor", "kill_target", "sheathe_weapon",
-      "stop_walk", "take_a_seat", "take_caps_from_player", "travel_to",
-      "unequip_item", "wait_here"
+      "stop_walk", "take_a_seat", "take_caps_from_player", "take_item_from_player", "travel_to",
+      "unequip_item", "wait_here", "release_wait"
     ]},
     "capability": {"type": "string", "pattern": "^action\\.[a-z][a-z0-9_.-]{0,56}$"},
     "actor": {"$ref": "identity.schema.json"},

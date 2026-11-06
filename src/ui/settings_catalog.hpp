@@ -104,7 +104,7 @@ struct HotkeyBinding final {
     const char* label;
 };
 
-inline constexpr std::array<HotkeyBinding, 7> hotkey_bindings{{
+inline constexpr std::array<HotkeyBinding, 8> hotkey_bindings{{
     {"SYNTH.Chatbox", "TalkToNPC", "Chatbox"},
     {"SYNTH.VoiceChat", "ToggleVoice", "Voice Chat"},
     {"SYNTH.Control", "SYNTHControl", "SYNTH Control"},
@@ -112,6 +112,7 @@ inline constexpr std::array<HotkeyBinding, 7> hotkey_bindings{{
     {"SYNTH.HaltActions", "StopTalking", "Halt AI Actions"},
     {"SYNTH.PipVision", "PipVision", "Use PipVision"},
     {"SYNTH.OpenMicMute", "OpenMicMute", "Open Mic Mute"},
+    {"SYNTH.WriteDiary", "WriteDiary", "Write NPC Diary"},
 }};
 
 namespace detail {
@@ -135,6 +136,8 @@ inline constexpr Setting hotkeys_page[] = {
      "Tap to capture the scene, double-tap to set the targeted NPC portrait, or hold to ask the "
      "nearest NPC to describe the scene. Unbound by default.",
      "Hotkeys", "PipVision", SettingKind::keybind, 0, 255, 1},
+    {"Write NPC Diary", "Point at an NPC and press once to request a diary entry. Unbound by default.",
+     "Hotkeys", "WriteDiary", SettingKind::keybind, 0, 255, 1},
 };
 
 inline constexpr Setting auto_activate_page[] = {
@@ -275,6 +278,7 @@ inline constexpr std::array<Page, 5> pages{{
         if (key == "StopTalking") return configuration.hotkeys.hard_halt;
         if (key == "PipVision") return configuration.hotkeys.pip_vision;
         if (key == "OpenMicMute") return configuration.hotkeys.open_mic_mute;
+        if (key == "WriteDiary") return configuration.hotkeys.write_diary;
     } else if (section == "AutoActivate") {
         if (key == "Enabled") return boolean(configuration.activation.enabled);
         if (key == "AutoAddHostile") return boolean(configuration.activation.include_hostile);

@@ -1,5 +1,6 @@
 #include "audio/dialogue_audio.hpp"
 #include "audio/speech_animation.hpp"
+#include "audio/speech_lease.hpp"
 #include <limits>
 #include <cmath>
 #include <iostream>
@@ -8,6 +9,50 @@
 using namespace synth::audio;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error{#x}; } while(false)
 int main() try {
+    {
+        const auto generation = synth::core::RuntimeGeneration::initial();
+        synth::core::CancellationSource cancellation{generation};
+        synth::runtime::RuntimeSpeechOwner owner{generation.value(), "request", "turn", "utterance",
+            {0x101, "Fallout4.esm", "save:a"}, cancellation.token()};
+        SpeechLease lease;
+        std::vector<std::string> events;
+        bool admit = true, clear = true, throws{};
+        const SpeechOwnerPump pump = [&](const auto& requested, bool discard) {
+            events.push_back(discard ? "discard" : requested ? requested->utterance_id : "release");
+            if (requested && throws) throw std::runtime_error{"native admission failure"};
+            return requested ? admit : clear;
+        };
+        CHECK(lease.maintain(owner, pump));
+        CHECK(lease.maintain(owner, pump)); // Paused/no-animation pumps still maintain the exact actor lease.
+        CHECK(events == std::vector<std::string>({"utterance", "utterance"}));
+        for (const auto actor : {0x102U, 0x103U, 0x104U}) { // Human, Codsworth and other robots use copied IDs.
+            auto next = owner; next.speaker.form_id = actor; next.utterance_id = "next";
+            CHECK(lease.maintain(next, pump));
+            CHECK(events[events.size()-2] == "release" && events.back() == "next");
+        }
+        CHECK(lease.release(pump) && !lease.owner());
+        const auto calls = events.size();
+        CHECK(lease.release(pump) && events.size() == calls);
+        CHECK(lease.release(pump, true) && events.back() == "discard");
+        admit = false;
+        CHECK(!lease.maintain(owner, pump) && lease.owner());
+        CHECK(lease.release(pump) && !lease.owner()); // Caller first stops audio, then cleans failed admission.
+        admit = true; throws = true;
+        CHECK(!lease.maintain(owner, pump) && lease.owner());
+        CHECK(lease.release(pump) && !lease.owner());
+        throws = false; CHECK(lease.maintain(owner, pump));
+        clear = false;
+        CHECK(!lease.release(pump) && lease.owner());
+        auto replacement = owner; replacement.utterance_id = "replacement";
+        CHECK(!lease.maintain(replacement, pump));
+        CHECK(lease.owner()->utterance_id == "utterance"); // Failed restoration cannot admit a new clip.
+        clear = true; CHECK(lease.release(pump));
+        CHECK(lease.maintain(replacement, pump));
+        cancellation.cancel();
+        CHECK(!lease.maintain(owner, pump));
+        CHECK(lease.owner()->utterance_id == "replacement"); // Stale input cannot clear current ownership.
+        CHECK(lease.release(pump) && !lease.owner());
+    }
     {
         const auto now = SpeechMergePermit::Clock::now();
         synth::core::CancellationSource owner{synth::core::RuntimeGeneration::initial()};

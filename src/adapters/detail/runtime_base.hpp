@@ -270,6 +270,12 @@ public:
         const runtime::RuntimeActionRequest& request) final {
         assert_game_thread();
         const auto owner_generation = generation();
+        if(request.cancellation.generation().valid() &&
+            (request.cancellation.generation()!=owner_generation || request.cancellation.is_cancelled()))
+            return {runtime::RuntimeActionStatus::unavailable,"action runtime generation or owner is no longer current"};
+        if((request.name==runtime::RuntimeActionName::wait_here||request.name==runtime::RuntimeActionName::release_wait) &&
+            !request.cancellation.generation().valid())
+            return {runtime::RuntimeActionStatus::rejected,"wait action has no runtime generation owner"};
         const std::array actors{request.actor.form_id, request.recipient ? request.recipient->form_id : 0U};
         const auto reservation = reserve_action_actors(std::span{actors}.first(request.recipient ? 2 : 1), owner_generation);
         if (!reservation) return {runtime::RuntimeActionStatus::rejected, "action actors are invalid or reserved by another operation"};
@@ -287,6 +293,34 @@ public:
         }
     }
 
+    void set_social_visit_pump(std::function<runtime::RuntimeSocialVisitResult(const runtime::RuntimeSocialVisitRequest&)> pump) {
+        assert_game_thread();social_visit_pump_=std::move(pump);
+    }
+    [[nodiscard]] runtime::RuntimeSocialVisitResult social_visit(const runtime::RuntimeSocialVisitRequest& request) final {
+        assert_game_thread();
+        if (!request.valid_ids() || request.cancellation.generation()!=generation() || !social_visit_pump_)
+            return {runtime::RuntimeSocialVisitStatus::unavailable,request.task_id,request.execution_id,"runtime_owner_unavailable",0};
+        return social_visit_pump_(request);
+    }
+
+    void set_conversation_hold_pump(std::function<void(std::span<const runtime::RuntimeConversationHold>,bool)> pump,
+                                    std::function<bool()> ready) {
+        assert_game_thread(); conversation_hold_pump_=std::move(pump); conversation_action_ready_pump_=std::move(ready);
+    }
+    [[nodiscard]] bool conversation_actions_ready() final {
+        assert_game_thread(); return !conversation_action_ready_pump_ || conversation_action_ready_pump_();
+    }
+    void update_conversation_holds(std::span<const runtime::RuntimeConversationHold> holds, bool discard=false) final {
+        assert_game_thread();
+        if (!conversation_hold_pump_) return;
+        if (discard) { conversation_hold_pump_({},true); return; }
+        std::vector<runtime::RuntimeConversationHold> current;
+        for (const auto& hold:holds) if (current.size()<16 && !hold.cancellation.is_cancelled() &&
+            hold.cancellation.generation()==generation() && hold.actor.form_id!=0 && hold.actor.form_id!=0x14 &&
+            !hold.actor.origin_plugin.empty() && !hold.actor.playthrough_id.empty()) current.push_back(hold);
+        conversation_hold_pump_(current,false); cached_snapshot_.reset();
+    }
+
     void set_facing_pump(std::function<runtime::RuntimeActionResult(const runtime::RuntimeFacingRequest&)> pump) {
         assert_game_thread();
         facing_pump_ = std::move(pump);
@@ -295,6 +329,41 @@ public:
     void set_speech_pump(std::function<void(const std::optional<runtime::RuntimeSpeechFrame>&, bool)> pump) {
         assert_game_thread();
         speech_pump_ = std::move(pump);
+    }
+
+    void set_speech_owner_pump(std::function<bool(const std::optional<runtime::RuntimeSpeechOwner>&, bool)> pump) {
+        assert_game_thread();
+        speech_owner_pump_ = std::move(pump);
+    }
+
+    void set_speech_spatial_pump(std::function<std::optional<runtime::RuntimeSpeechSpatial>(const runtime::RuntimeSpeechOwner&)> pump) {
+        assert_game_thread();
+        speech_spatial_pump_ = std::move(pump);
+    }
+
+    [[nodiscard]] std::optional<runtime::RuntimeSpeechSpatial> capture_speech_spatial(const runtime::RuntimeSpeechOwner& owner) final {
+        assert_game_thread();
+        const auto captured_generation = generation();
+        if (!speech_spatial_pump_ || owner.generation != captured_generation.value() ||
+            owner.cancellation.generation() != captured_generation || owner.cancellation.is_cancelled() ||
+            owner.speaker.form_id == 0 || owner.speaker.form_id == 0x14 || owner.speaker.origin_plugin.empty() ||
+            owner.speaker.playthrough_id.empty() || owner.request_id.empty() || owner.turn_id.empty() || owner.utterance_id.empty())
+            return std::nullopt;
+        auto result = speech_spatial_pump_(owner);
+        return generation() == captured_generation && !owner.cancellation.is_cancelled() &&
+            (!result || result->speaker_position.finite()) ? result : std::nullopt;
+    }
+
+    [[nodiscard]] bool set_speech_owner(const std::optional<runtime::RuntimeSpeechOwner>& owner,
+                                        bool discard = false) final {
+        assert_game_thread();
+        if (discard) return !speech_owner_pump_ || speech_owner_pump_(std::nullopt, true);
+        if (owner && (owner->generation != generation().value() ||
+            owner->cancellation.generation() != generation() || owner->cancellation.is_cancelled() ||
+            owner->speaker.form_id == 0 || owner->speaker.origin_plugin.empty() ||
+            owner->speaker.playthrough_id.empty() || owner->request_id.empty() ||
+            owner->turn_id.empty() || owner->utterance_id.empty())) return false;
+        return speech_owner_pump_ ? speech_owner_pump_(owner, false) : !owner;
     }
 
     void animate_speech(const std::optional<runtime::RuntimeSpeechFrame>& frame, bool discard = false) final {
@@ -340,6 +409,8 @@ public:
 
     [[nodiscard]] core::RuntimeGeneration invalidate() {
         assert_game_thread();
+        if (conversation_hold_pump_) conversation_hold_pump_({},true);
+        if (speech_owner_pump_) (void)speech_owner_pump_(std::nullopt, true);
         if (speech_pump_) speech_pump_(std::nullopt, true);
         cached_snapshot_.reset();
         frame_ = 0;
@@ -375,8 +446,13 @@ private:
     CapturePump capture_pump_;
     PresentationPump presentation_pump_;
     ActionPump action_pump_;
+    std::function<runtime::RuntimeSocialVisitResult(const runtime::RuntimeSocialVisitRequest&)> social_visit_pump_;
+    std::function<void(std::span<const runtime::RuntimeConversationHold>,bool)> conversation_hold_pump_;
+    std::function<bool()> conversation_action_ready_pump_;
     std::function<runtime::RuntimeActionResult(const runtime::RuntimeFacingRequest&)> facing_pump_;
     std::function<void(const std::optional<runtime::RuntimeSpeechFrame>&, bool)> speech_pump_;
+    std::function<bool(const std::optional<runtime::RuntimeSpeechOwner>&, bool)> speech_owner_pump_;
+    std::function<std::optional<runtime::RuntimeSpeechSpatial>(const runtime::RuntimeSpeechOwner&)> speech_spatial_pump_;
     ActorDetailPump actor_detail_pump_;
     ActorDetailPump player_inventory_pump_;
     std::function<std::uint64_t()> capture_epoch_reader_;

@@ -56,6 +56,7 @@ struct HotkeysConfig {
     std::uint32_t hard_halt{};
     std::uint32_t pip_vision{};
     std::uint32_t open_mic_mute{};
+    std::uint32_t write_diary{};
 };
 
 struct ActivationConfig {
@@ -335,6 +336,8 @@ inline void apply(Config& config,
         config.hotkeys.pip_vision = parse_range(value, 0, 255, qualified);
     else if (section == "Hotkeys" && key == "OpenMicMute")
         config.hotkeys.open_mic_mute = parse_range(value, 0, 255, qualified);
+    else if (section == "Hotkeys" && key == "WriteDiary")
+        config.hotkeys.write_diary = parse_range(value, 0, 255, qualified);
     else if (section == "AutoActivate" && key == "Enabled")
         config.activation.enabled = parse_bool(value, qualified);
     else if (section == "AutoActivate" && key == "AutoAddHostile")

@@ -272,6 +272,54 @@ void test_product_owned_pump_seams_and_invalidation() {
     CHECK(!flat.is_game_thread());
 }
 
+void test_current_speech_spatial_capture_is_owned_and_game_thread_only() {
+    using namespace synth;
+    for (const auto* descriptor : {&adapters::flat_descriptor, &adapters::vr_descriptor}) {
+        adapters::detail::RuntimeBase adapter{*descriptor,
+            [](core::SnapshotClock::time_point, runtime::RuntimeCapturePurpose) -> adapters::detail::CapturedRuntimeValues {
+                throw std::logic_error{"deep context capture must not run for active speech"};
+            }, [](std::string_view) {}, [](const runtime::RuntimeActionRequest&) { return runtime::RuntimeActionResult{}; }};
+        core::CancellationSource cancellation{adapter.generation()};
+        const runtime::RuntimeSpeechOwner owner{adapter.generation().value(), "request", "turn", "utterance",
+            {100, "Actors.esm", "save-a"}, cancellation.token()};
+        CHECK(!adapter.capture_speech_spatial(owner));
+        int calls{}, mode{};
+        adapter.set_speech_spatial_pump([&](const runtime::RuntimeSpeechOwner& observed) -> std::optional<runtime::RuntimeSpeechSpatial> {
+            ++calls;
+            CHECK(observed.speaker.form_id == 100 && observed.request_id == "request" && observed.utterance_id == "utterance");
+            if (mode == 1) return std::nullopt;
+            if (mode == 2) (void)adapter.invalidate();
+            return runtime::RuntimeSpeechSpatial{{mode == 3 ? std::numeric_limits<double>::quiet_NaN() : 10.0, 0, 0},
+                core::WorldPose{{20, 0, 0}, core::UnitVector3::from({0, 1, 0}), core::UnitVector3::from({0, 0, 1})}, true};
+        });
+        const auto captured = adapter.capture_speech_spatial(owner);
+        CHECK(captured && captured->speaker_position.x == 10 && captured->listener_pose.position().x == 20 && captured->interior);
+        CHECK(calls == 1);
+        for (int bad = 0; bad < 6; ++bad) {
+            auto invalid = owner;
+            if (bad == 0) invalid.generation++;
+            if (bad == 1) invalid.speaker.form_id = 0;
+            if (bad == 2) invalid.speaker.form_id = 0x14;
+            if (bad == 3) invalid.speaker.playthrough_id.clear();
+            if (bad == 4) invalid.request_id.clear();
+            if (bad == 5) invalid.utterance_id.clear();
+            CHECK(!adapter.capture_speech_spatial(invalid));
+            CHECK(calls == 1);
+        }
+        bool refused{};
+        std::thread worker{[&] { try { (void)adapter.capture_speech_spatial(owner); } catch (const std::logic_error&) { refused = true; } }};
+        worker.join();
+        CHECK(refused && calls == 1);
+        mode = 1;
+        CHECK(!adapter.capture_speech_spatial(owner) && calls == 2);
+        mode = 3;
+        CHECK(!adapter.capture_speech_spatial(owner) && calls == 3);
+        mode = 2;
+        CHECK(!adapter.capture_speech_spatial(owner) && calls == 4);
+        CHECK(!adapter.capture_speech_spatial(owner) && calls == 4);
+    }
+}
+
 // Exercise the same adapter gate in both lanes without touching an engine or provider.
 void test_selected_actor_enrichment_ownership() {
     using namespace synth;
@@ -785,6 +833,7 @@ int main() {
         test_lifecycle_emits_runtime_actions();
         test_deferred_lifecycle_actions_coalesce_load_boundaries();
         test_product_owned_pump_seams_and_invalidation();
+        test_current_speech_spatial_capture_is_owned_and_game_thread_only();
         test_selected_actor_enrichment_ownership();
         test_request_player_inventory_ownership();
         test_requested_actor_capture_outside_discovery();

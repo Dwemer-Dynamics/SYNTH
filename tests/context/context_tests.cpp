@@ -2,6 +2,7 @@
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_binding.hpp"
 #include "client/actor_event_delivery.hpp"
+#include "client/actor_state_combat.hpp"
 #include "core/player_event_sampler.hpp"
 
 #include <iostream>
@@ -63,6 +64,24 @@ void test_actor_event_binding() {
     CHECK(first && first->capture->scene==current && first->capture->events.size()==2 && first->actors.size()==2);
     const auto retained_states=first->resolve_actor_states();
     CHECK(retained_states.size()==2 && retained_states[0]==&current->player() && retained_states[1]==&current->actors()[0]);
+    // The real context projection must deliver a death batch even with visual-contact support negotiated.
+    protocol_native::ActorState dead_state{};
+    dead_state.actor={"0x00001234","Actors.esm","save-a","Settler"};
+    dead_state.alive=false;dead_state.life_state="dead";
+    client::append_actor_combat_observations(dead_state,current->actors()[0],true,true);
+    CHECK(!dead_state.combat_contacts && !dead_state.enemy_awareness);
+    CHECK(!json::write(protocol_native::actor_state_value(dead_state)).empty());
+    auto invalid_dead=dead_state;invalid_dead.combat_contacts=std::vector<protocol_native::CombatContactState>{};
+    throws<std::invalid_argument>([&]{(void)protocol_native::actor_state_value(invalid_dead);});
+    protocol_native::ActorState living_state{};
+    living_state.actor={"0x00002345","Actors.esm","save-a","Living"};living_state.alive=true;
+    const core::ActorSnapshot living{0x2345,"Living",{},"Actors.esm","save-a"};
+    client::append_actor_combat_observations(living_state,living,true,true);
+    CHECK(living_state.combat_contacts && living_state.combat_contacts->empty());
+    CHECK(!json::write(protocol_native::actor_state_value(living_state)).empty());
+    protocol_native::ActorState player_state{};
+    client::append_actor_combat_observations(player_state,current->player(),true,true);
+    CHECK(!player_state.combat_contacts && !player_state.enemy_awareness);
     auto wrong_fragment=*first;wrong_fragment.actors.clear();
     throws<std::invalid_argument>([&]{(void)wrong_fragment.resolve_actor_states();});
     wrong_fragment=*first;wrong_fragment.actors.push_back(wrong_fragment.actors.back());
@@ -118,6 +137,12 @@ void test_actor_event_binding() {
     CHECK(text.find("player_equipment")!=std::string::npos && text.find("witnesses")==std::string::npos);
     CHECK(protocol_native::encode_context(wire,"save-a",1,player,std::nullopt,{}, {},std::nullopt,{},{},{},
         std::nullopt,"","","","",std::nullopt,std::nullopt,packet).find("actor_events")!=std::string::npos);
+    // Full context encoding keeps the original death batch and dead state without a false live-observer claim.
+    const auto death_context=json::parse(protocol_native::encode_context(wire,"save-a",1,player,std::nullopt,{},
+        {dead_state},std::nullopt,{},{},{},std::nullopt,"","","","",std::nullopt,std::nullopt,packet));
+    const auto& death_payload=protocol_native::required(death_context,"payload");
+    CHECK(protocol_native::required(death_payload,"actor_events").is_object());
+    CHECK(!protocol_native::required(protocol_native::required(death_payload,"actor_states").as_array()[0],"alive").as_bool());
     for (int invalid=0;invalid<8;++invalid) {
         auto transport=wire;auto bad=packet;auto recipient=player;
         if(invalid==0)transport.session_id="other";
