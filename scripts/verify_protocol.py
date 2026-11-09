@@ -211,6 +211,13 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         payload_schema = dict(payload_schema)
         payload_schema["properties"] = dict(payload_schema["properties"])
         payload_schema["properties"]["control"] = {"$ref": "../../v2/schemas/control.schema.json#/$defs/selection"}
+        if payload_type == "input_text":
+            payload_schema["properties"]["intent"] = {"const": "conversation"}
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "dialogue":
+        # Explicit native-turn marker: only a receipt-owned native-turn line carries it, always true.
+        payload_schema = dict(payload_schema)
+        payload_schema["properties"] = dict(payload_schema["properties"])
+        payload_schema["properties"]["native_turn"] = {"const": True}
     if value.get("schema") == "synth.event.v2" and payload_type == "context":
         catalog_path = PROTOCOL / "v2/schemas/context.schema.json"
         payload_schema = load_json(catalog_path)
@@ -226,6 +233,9 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") == "synth.event.v2" and payload_type in {"social_task_request", "social_task_progress"}:
         catalog_path = PROTOCOL / "v2/schemas" / ("social-task-request.schema.json" if payload_type == "social_task_request" else "social-task-progress.schema.json")
         payload_schema = load_json(catalog_path)
+    if value.get("schema") == "synth.event.v2" and payload_type == "speech_receipt":
+        catalog_path = PROTOCOL / "v2/schemas/speech-receipt.schema.json"
+        payload_schema = load_json(catalog_path)
     if value.get("schema") == "synth.response.line.v2" and payload_type == "social_task":
         catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
         payload_schema = {"type": "object", "additionalProperties": False, "required": ["task"],
@@ -239,6 +249,12 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
             "social.tasks.v1", "context.saved_anchor", "dialogue.turn_ownership"
         }.issubset(value.get("capabilities", [])):
             raise ValidationError(f"{path}: social tasks require negotiated saved v2 flat ownership")
+    if payload_type == "speech_receipt":
+        if not {"dialogue.native_turn", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])) or                 not payload["line_id"].startswith(payload["dialogue_request_id"] + ":dialogue:"):
+            raise ValidationError(f"{path}: speech receipt requires native-turn ownership of its exact line")
+    if payload_type == "input_text" and "intent" in payload:
+        if not {"dialogue.native_turn", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])) or                 value.get("protocol_version") != 2 or int(value.get("context_sequence", 0)) < 1:
+            raise ValidationError(f"{path}: conversation intent requires a bound native-turn context")
     if payload_type == "context" and "location_ref" in payload.get("world", {}):
         if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.location_identity" not in value.get("capabilities", []):
             raise ValidationError(f"{path}: canonical location requires negotiated v2 flat capability")

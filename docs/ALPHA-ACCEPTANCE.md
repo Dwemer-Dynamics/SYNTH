@@ -1,5 +1,16 @@
 # SYNTH open-alpha acceptance
 
+## Stage 1 native typed turn
+
+- [ ] Build, package and audit both DLLs with the paired server candidate.
+- [ ] Flat and VR, separately: `/talk <message>` to a registered placed NPC streams
+  sentence lines with NPC voice; each completed line records one heard row.
+- [ ] Interrupt mid-line, then load a save: interrupted/stale lines stay unheard
+  and no late audio plays.
+- [ ] Unmarked typed text (Wait, Follow, gifts, Jev) still uses its existing routes;
+  `/talk` with no message or to an ineligible NPC shows a useful failure.
+- [ ] Subtitles-only or voice failure: text appears but the line stays unheard.
+
 ## Generic gift inventory exchange
 
 - [x] Install the reviewed coordinated gift-menu DLL/PEX/backend update; installed hashes and server health verified.

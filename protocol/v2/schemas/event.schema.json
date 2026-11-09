@@ -42,7 +42,8 @@
         "cancel",
         "halt",
         "social_task_request",
-        "social_task_progress"
+        "social_task_progress",
+        "speech_receipt"
       ]
     },
     "session_id": {
@@ -829,7 +830,8 @@
               "diary_request",
               "action_result",
               "social_task_request",
-              "social_task_progress"
+              "social_task_progress",
+              "speech_receipt"
             ]
           }
         }
@@ -1268,6 +1270,81 @@
           },
           "payload": {
             "$ref": "social-task-progress.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "speech_receipt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "dialogue.native_turn"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "speech-receipt.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "input_text"
+          },
+          "payload": {
+            "required": [
+              "intent"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "dialogue.native_turn"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "properties": {
+              "intent": {
+                "const": "conversation"
+              }
+            }
           }
         }
       }

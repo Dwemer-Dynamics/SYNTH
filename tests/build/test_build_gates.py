@@ -755,7 +755,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
             self.assertIn("session->cancel_voice_capture()", capture)
             self.assertIn("voice_capture_down = false", capture)
         text_admission = session.split("bool submit_text(", 1)[1].split("bool external_ready()", 1)[0]
-        self.assertIn("return queue_text_for_actor(std::move(snapshot),std::move(text),target, controls);", text_admission)
+        self.assertIn("return queue_text_for_actor(std::move(snapshot),std::move(text),target, controls, intent);", text_admission)
         text_turn = session.split("bool queue_text_for_actor(", 1)[1].split("static std::optional<std::string> clipboard_text", 1)[0]
         self.assertLess(text_turn.index("begin_context_turn()"), text_turn.index("publish_snapshot(snapshot,"))
         self.assertLess(text_turn.index("publish_snapshot(snapshot,"), text_turn.index("client_.send_text("))

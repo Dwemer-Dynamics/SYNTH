@@ -22,7 +22,8 @@ enum class ConversationStage {
     continuation_complete, continuation_failed, continuation_queue_full, continuation_scene_rejected,
     presentation_missing_capture, presentation_owner_changed, presentation_stale_capture,
     presentation_scene_changed, presentation_actor_missing, presentation_actor_identity_changed,
-    presentation_actor_unavailable, presentation_actor_out_of_range, presentation_actor_cancelled
+    presentation_actor_unavailable, presentation_actor_out_of_range, presentation_actor_cancelled,
+    receipt_accepted, receipt_rejected
 };
 
 [[nodiscard]] inline std::string_view stage_name(ConversationStage stage) noexcept {
@@ -35,7 +36,8 @@ enum class ConversationStage {
         "continuation_complete","continuation_failed","continuation_queue_full","continuation_scene_rejected",
         "presentation_missing_capture","presentation_owner_changed","presentation_stale_capture",
         "presentation_scene_changed","presentation_actor_missing","presentation_actor_identity_changed",
-        "presentation_actor_unavailable","presentation_actor_out_of_range","presentation_actor_cancelled"};
+        "presentation_actor_unavailable","presentation_actor_out_of_range","presentation_actor_cancelled",
+        "receipt_accepted","receipt_rejected"};
     const auto index = static_cast<unsigned>(stage);
     return index < std::size(names) ? names[index] : "invalid";
 }

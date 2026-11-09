@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/speech-receipt.schema.json",
+  "title": "SYNTH v2 native-turn delivery receipt; text and speaker come from the server record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dialogue_request_id",
+    "line_id",
+    "character",
+    "outcome"
+  ],
+  "properties": {
+    "dialogue_request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "line_id": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:dialogue:[1-9][0-9]{0,5}$"
+    },
+    "character": {
+      "$ref": "../../v1/schemas/identity.schema.json"
+    },
+    "outcome": {
+      "enum": [
+        "audio_completed",
+        "text_presented",
+        "interrupted",
+        "failed"
+      ]
+    }
+  }
+}

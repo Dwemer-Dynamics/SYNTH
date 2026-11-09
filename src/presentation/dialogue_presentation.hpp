@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <deque>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -37,6 +38,10 @@ struct DialogueCaption final {
     std::string request_id, line_id;
     std::uint64_t context_sequence{};
     std::shared_ptr<SceneAdmission> admission;
+    // Optional copy-only sink for the first terminal delivery (spoken, text_complete or discarded).
+    // It runs inside playback/presentation teardown and must only enqueue a bounded copy.
+    std::function<void(DialogueDelivery terminal, bool cancelled)> on_terminal;
+    std::shared_ptr<std::atomic_bool> terminal_reported{std::make_shared<std::atomic_bool>(false)};
 
     [[nodiscard]] bool scene_ready(core::SnapshotClock::time_point now) const noexcept {
         return !admission || admission->ready(now);
@@ -55,6 +60,10 @@ struct DialogueCaption final {
                     state == DialogueDelivery::text_complete ? diagnostics::ConversationStage::text_complete : diagnostics::ConversationStage::discarded;
                 trace->record(stage,generation,context_sequence,request_id,line_id);
             } catch (...) {} // Diagnostics cannot change delivery or escape an audio teardown callback.
+        }
+        if (on_terminal && (state == DialogueDelivery::spoken || state == DialogueDelivery::text_complete ||
+            state == DialogueDelivery::discarded) && !terminal_reported->exchange(true, std::memory_order_acq_rel)) {
+            try { on_terminal(state, cancellation.is_cancelled() || scene_rejected()); } catch (...) {}
         }
     }
 

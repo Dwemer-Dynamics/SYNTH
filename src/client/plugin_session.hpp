@@ -6,6 +6,7 @@
 #include "audio/native_playback.hpp"
 #include "client/synth_client.hpp"
 #include "client/rechat_prefetch.hpp"
+#include "client/speech_receipts.hpp"
 #include "client/action_inventory.hpp"
 #include "client/wait_action.hpp"
 #include "client/ambient_exchange.hpp"
@@ -1000,6 +1001,7 @@ public:
         }
         refresh_active_speech_spatial(generation, runtime);
         captions_.enqueue_failed(failed_playback_caption_);
+        flush_speech_receipts(generation);
         {
             std::scoped_lock lock{rechat_mutex_};
             if (prefetched_rechat_) {
@@ -1389,17 +1391,38 @@ public:
         if (text == "/diary") return request_npc_diary(std::move(snapshot), retained);
         if (text == "/diary narrator") return request_diary(std::move(snapshot), protocol_native::DiaryRole::narrator);
         if (text == "/diary player") return request_diary(std::move(snapshot), protocol_native::DiaryRole::player);
+        // `/talk <message>` explicitly selects the native conversation-only turn; unmarked text keeps
+        // existing action-capable routing. The prefix is stripped here and never reaches the server.
+        auto intent = protocol_native::TextIntent::unmarked;
+        if (text == "/talk" || text.starts_with("/talk ")) {
+            const auto begin = text.find_first_not_of(" \t\r\n", 5);
+            const auto end = text.find_last_not_of(" \t\r\n");
+            if (begin == std::string::npos) {
+                push_notification("SYNTH /talk needs a message: /talk <what you say>");
+                return false;
+            }
+            if (!client_.native_turn_ready()) {
+                push_notification("SYNTH /talk is unavailable: the server did not accept native conversation turns");
+                return false;
+            }
+            text = text.substr(begin, end - begin + 1);
+            intent = protocol_native::TextIntent::conversation;
+        }
         const auto controls = retained && !retained->conversation_mode.empty()
             ? protocol_native::ControlSelection{retained->conversation_mode, retained->conversation_model_slot}
             : control_state().selection;
         const auto selected = conversation_target(*snapshot, controls, retained);
         const auto untargeted = controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG";
+        if (intent == protocol_native::TextIntent::conversation && untargeted) {
+            push_notification("SYNTH /talk needs a targeted conversation mode, not " + controls.mode);
+            return false;
+        }
         if (!selected && !untargeted) {
             push_notification("SYNTH text input needs an eligible target");
             return false;
         }
         const auto target = untargeted ? identity(snapshot->player()) : identity(*selected);
-        return queue_text_for_actor(std::move(snapshot),std::move(text),target, controls);
+        return queue_text_for_actor(std::move(snapshot),std::move(text),target, controls, intent);
     }
 
     // One-shot integrations still require a completely idle pipeline.
@@ -1516,7 +1539,8 @@ private:
     }
     // Both typed input and external Ask retain the same exact actor through context publication and response delivery.
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
-                                          std::optional<protocol_native::ControlSelection> retained_controls = {}) {
+                                          std::optional<protocol_native::ControlSelection> retained_controls = {},
+                                          protocol_native::TextIntent intent = protocol_native::TextIntent::unmarked) {
         const auto controls = retained_controls.value_or(control_state().selection);
         if (controls.mode != "NARRATOR" && controls.mode != "INJECTION_LOG" && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
@@ -1524,7 +1548,7 @@ private:
         const auto accepted = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, begin_player_turn(actor_key(target)),
             tasks::TaskLanes::track_activity(active_responses_,
-            [this, snapshot = std::move(snapshot), text = std::move(text), target, controls](
+            [this, snapshot = std::move(snapshot), text = std::move(text), target, controls, intent](
                 const core::CancellationToken& cancellation) mutable {
                 if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
 
@@ -1543,7 +1567,7 @@ private:
                     const auto outcome = client_.send_text(
                         std::move(text), [this, snapshot, cancellation](const protocol_native::Line& line) {
                             handle_line(line, snapshot, cancellation);
-                        }, context_outcome.context_binding, controls);
+                        }, context_outcome.context_binding, controls, intent);
                     const bool social_rejected=notify_social_input(outcome);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
                         if(!social_rejected)push_notification("SYNTH text request failed: " + outcome.detail);
@@ -2365,7 +2389,7 @@ private:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available) {
         std::vector<std::string> result{
-            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "control.menu",
+            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
@@ -3122,6 +3146,21 @@ private:
             conversation_holds_.add(facing->speaker,cancellation);
             conversation_holds_.add(facing->listener,cancellation);
         }
+        std::function<void(presentation::DialogueDelivery, bool)> on_terminal;
+        const auto* speaker = std::get_if<protocol_native::Identity>(&dialogue.speaker);
+        if (speaker && dialogue.native_turn && client_.native_turn_ready() &&
+            line.protocol_version == 2 && line.context_sequence != 0) {
+            on_terminal = [outbox = std::weak_ptr<SpeechReceiptOutbox>{speech_receipts_},
+                           pending = PendingSpeechReceipt{line.generation, line.context_sequence, line.turn_id,
+                               {line.request_id, line.line_id, *speaker, {}}}](
+                               presentation::DialogueDelivery terminal, bool cancelled) mutable {
+                const auto outcome = speech_receipt_outcome(terminal, cancelled);
+                const auto target = outbox.lock();
+                if (!outcome || !target) return;
+                pending.receipt.outcome = *outcome;
+                (void)target->push(std::move(pending));
+            };
+        }
         return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
             .generation = line.generation,
             .speaker = std::visit([](const auto& value) {
@@ -3130,7 +3169,34 @@ private:
             .text = dialogue.text, .cancellation = cancellation,
             .facing = facing,
             .trace = trace_, .request_id = line.request_id, .line_id = line.line_id, .context_sequence = line.context_sequence,
-            .admission = std::move(admission)});
+            .admission = std::move(admission), .on_terminal = std::move(on_terminal)});
+    }
+
+    // Game-thread trigger only: one background worker drains copied receipts. Receipts never use the
+    // control lane reserved for cancellation, are never retried, and are revalidated before encoding.
+    void flush_speech_receipts(std::uint64_t generation) {
+        auto lease = SpeechReceiptOutbox::try_begin_drain(speech_receipts_);
+        if (!lease) return;
+        auto pending = speech_receipts_->take(generation);
+        if (pending.empty() || !client_.native_turn_ready()) return;
+        const auto deadline = tasks::TaskLanes::Clock::now() + std::chrono::seconds{10};
+        (void)network_.try_submit("network", tasks::TaskClass::background, deadline, cancellation_.token(),
+            [this, lease = std::move(lease), pending = std::move(pending)](const core::CancellationToken& cancellation) {
+                for (const auto& value : pending) {
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                        value.generation != cancellation.generation().value()) break;
+                    try {
+                        const auto outcome = client_.send_speech_receipt(value.receipt,
+                            {value.generation, value.context_sequence, {}, value.turn_id});
+                        trace_->record(outcome.status == RequestStatus::complete
+                            ? diagnostics::ConversationStage::receipt_accepted : diagnostics::ConversationStage::receipt_rejected,
+                            value.generation, value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
+                    } catch (const std::exception&) {
+                        trace_->record(diagnostics::ConversationStage::receipt_rejected, value.generation,
+                            value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
+                    }
+                }
+            });
     }
 
     void queue_speech(const protocol_native::Line& line,
@@ -4094,6 +4160,7 @@ private:
     std::atomic_bool halting_{};
     std::atomic_size_t halt_requests_{};
     std::atomic_size_t speech_jobs_{};
+    std::shared_ptr<SpeechReceiptOutbox> speech_receipts_{std::make_shared<SpeechReceiptOutbox>()};
     ConversationHolds conversation_holds_;
     std::atomic_size_t active_responses_{};
     std::atomic_size_t visual_tasks_{};

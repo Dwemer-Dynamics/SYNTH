@@ -1,8 +1,11 @@
 #include "protocol_native/v1_codec.hpp"
 #include "client/wait_action.hpp"
+#include "client/speech_receipts.hpp"
+#include "tasks/task_lanes.hpp"
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -193,11 +196,109 @@ void enemy_awareness_tests() {
     state.enemy_awareness->recent.push_back({state.enemy_awareness->current[0].actor,"MoleratRace","seen_dead",30000});
     state.enemy_awareness->current.clear();(void)encode(envelope,state);
 }
+
+// Native-turn receipts: exact owner encoding, first terminal outcome only, bounded copy-only outbox.
+void native_turn_receipt_tests(const std::string& root) {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto read=[&](const char* name){std::ifstream in{root+"/protocol/v2/fixtures/"+name};return std::string{std::istreambuf_iterator<char>{in},{}};};
+    std::istringstream ack{read("valid/response-init-native-turn.ndjson")};
+    std::string raw; std::vector<protocol_native::Line> lines;
+    while(std::getline(ack,raw)) lines.push_back(protocol_native::decode_line(raw));
+    require(lines.size()==3 && std::get<protocol_native::Status>(lines[1].payload).native_turn,"native_turn ACK lost");
+    const auto fixture=json::parse(read("valid/speech-receipt.json"));
+    const auto& expected=protocol_native::required(fixture,"payload");
+    const auto& wire=protocol_native::required(expected,"character");
+    const protocol_native::Identity character{protocol_native::text(wire,"form_id"),protocol_native::text(wire,"origin_plugin"),
+        protocol_native::text(wire,"playthrough_id"),protocol_native::text(wire,"display_name")};
+    protocol_native::EventContext context{"session:flat:fixture","receipt:2:1","turn-text-1","flat","0.1.0","1.10.163",2,
+        {"dialogue.text","dialogue.turn_ownership","dialogue.native_turn"},2,7};
+    protocol_native::SpeechReceipt receipt{"req-text-1","req-text-1:dialogue:1",character,protocol_native::SpeechReceiptOutcome::audio_completed};
+    const auto encoded=json::parse(protocol_native::encode_speech_receipt(context,receipt));
+    require(json::write(encoded)==json::write(fixture),"speech receipt does not match the mirrored fixture");
+    // `/talk` is per-turn intent, never inferred from capability: unmarked text stays unmarked.
+    protocol_native::EventContext text_context{"session:flat:fixture","req-text-1","turn-text-1","flat","0.1.0","1.10.163",2,
+        {"dialogue.text","dialogue.turn_ownership","dialogue.native_turn"},2,7};
+    const auto talk=json::parse(protocol_native::encode_input_text(text_context,"How is the settlement holding up?",{},
+        protocol_native::TextIntent::conversation));
+    require(json::write(talk)==json::write(json::parse(read("valid/input-text-native-turn.json"))),"conversation intent does not match fixture");
+    require(protocol_native::encode_input_text(text_context,"Wait here").find("\"intent\"")==std::string::npos,"unmarked text gained intent");
+    auto legacy_text=text_context; legacy_text.capabilities={"dialogue.text","dialogue.turn_ownership"};
+    require([&]{try{(void)protocol_native::encode_input_text(legacy_text,"Hi",{},protocol_native::TextIntent::conversation);return false;}
+        catch(const std::invalid_argument&){return true;}}(),"conversation intent encoded without native-turn capability");
+    const auto rejects=[&](protocol_native::EventContext bad_context,protocol_native::SpeechReceipt bad){
+        try{(void)protocol_native::encode_speech_receipt(bad_context,bad);return false;}catch(const std::invalid_argument&){return true;}};
+    auto no_native=context; no_native.capabilities={"dialogue.text","dialogue.turn_ownership"};
+    auto unbound=context; unbound.context_sequence=0;
+    require(rejects(no_native,receipt) && rejects(unbound,receipt),"unnegotiated or unbound receipt encoded");
+    for(const auto* line:{"req-other:dialogue:1","req-text-1:dialogue:0","req-text-1:dialogue:","req-text-1:status"}) {
+        auto bad=receipt; bad.line_id=line; require(rejects(context,bad),"foreign line receipt encoded");
+    }
+    for(const auto* form:{"0xFF000802","0X0001A4D7","0x0x01A4D7","0x1A4D7"}) {
+        auto bad=receipt; bad.character.form_id=form; require(rejects(context,bad),"non-placed character receipt encoded");
+    }
+    using presentation::DialogueDelivery;
+    require(client::speech_receipt_outcome(DialogueDelivery::spoken,false)==protocol_native::SpeechReceiptOutcome::audio_completed,"spoken");
+    require(client::speech_receipt_outcome(DialogueDelivery::discarded,true)==protocol_native::SpeechReceiptOutcome::interrupted,"interrupted");
+    require(client::speech_receipt_outcome(DialogueDelivery::discarded,false)==protocol_native::SpeechReceiptOutcome::failed,"failed");
+    require(!client::speech_receipt_outcome(DialogueDelivery::text_complete,false),"reading timer claimed text_presented");
+    // Receipts follow the explicit server marker only; a legacy typed line without it never owns one.
+    std::istringstream native_lines{read("valid/response-native-turn.ndjson")};
+    std::vector<bool> markers;
+    while(std::getline(native_lines,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload))
+        markers.push_back(std::get<protocol_native::Dialogue>(line.payload).native_turn);
+    require(markers==std::vector<bool>{true,true},"native-turn marker lost");
+    auto legacy=read("valid/response-native-turn.ndjson");
+    legacy=legacy.substr(legacy.find(10)+1); legacy=legacy.substr(0,legacy.find(10));
+    const auto marker=legacy.find(",\"native_turn\":true");
+    const auto unmarked=legacy.substr(0,marker)+legacy.substr(marker+19);
+    require(!std::get<protocol_native::Dialogue>(protocol_native::decode_line(unmarked).payload).native_turn,"legacy line claimed a receipt");
+    auto falsy=unmarked; falsy.replace(falsy.find("\"text\":"),0,"\"native_turn\":false,");
+    require([&]{try{(void)protocol_native::decode_line(falsy);return false;}catch(const std::invalid_argument&){return true;}}(),"false marker accepted");
+    auto outbox=std::make_shared<client::SpeechReceiptOutbox>(2);
+    core::CancellationSource owner{core::RuntimeGeneration::from_value(2)};
+    int reports{};
+    presentation::DialogueCaption caption{.generation=2,.cancellation=owner.token(),
+        .on_terminal=[&](DialogueDelivery terminal,bool cancelled){
+            ++reports;
+            if(auto outcome=client::speech_receipt_outcome(terminal,cancelled))
+                (void)outbox->push({2,7,"turn-text-1",{receipt.dialogue_request_id,receipt.line_id,character,*outcome}});
+        }};
+    caption.mark_delivery(DialogueDelivery::playing);
+    caption.mark_delivery(DialogueDelivery::spoken);
+    caption.mark_delivery(DialogueDelivery::discarded);
+    require(reports==1,"a later terminal outcome replaced the first");
+    require(outbox->push({1,7,"old",receipt}) && !outbox->push({2,7,"overflow",receipt}),"outbox is unbounded");
+    // The drain lease belongs to the queued task: expiry or cancellation before start releases it.
+    {
+        tasks::TaskLanes::Deadline now{};
+        tasks::TaskLanes lanes{{tasks::LaneConfig{"network",2,1,1}},0,[&]{return now;}};
+        auto lease=client::SpeechReceiptOutbox::try_begin_drain(outbox);
+        require(lease && !client::SpeechReceiptOutbox::try_begin_drain(outbox),"receipt drain is not single-flight");
+        int ran{};
+        require(lanes.try_submit("network",tasks::TaskClass::background,now+std::chrono::seconds{1},owner.token(),
+            [&ran,lease=std::move(lease)](const auto&){++ran;})==tasks::SubmitResult::accepted,"receipt task rejected");
+        now+=std::chrono::seconds{2};
+        (void)lanes.run_until_idle();
+        require(ran==0,"expired receipt task ran");
+        lease=client::SpeechReceiptOutbox::try_begin_drain(outbox);
+        require(static_cast<bool>(lease),"expired receipt task latched the drain");
+        core::CancellationSource turn{core::RuntimeGeneration::from_value(2)};
+        require(lanes.try_submit("network",tasks::TaskClass::background,now+std::chrono::seconds{5},turn.token(),
+            [lease=std::move(lease)](const auto&){})==tasks::SubmitResult::accepted,"receipt task rejected");
+        turn.cancel();
+        require(lanes.discard_cancelled()==1 && client::SpeechReceiptOutbox::try_begin_drain(outbox),"cancelled receipt task latched the drain");
+    }
+    const auto taken=outbox->take(2);
+    require(taken.size()==1 && taken.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::audio_completed
+        && outbox->dropped()==2 && outbox->take(2).empty(),"stale or overflow receipts survived");
+}
 }
 
 int main(int argc,char** argv){
  try{
   enemy_awareness_tests();
+  if(argc==2) native_turn_receipt_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};

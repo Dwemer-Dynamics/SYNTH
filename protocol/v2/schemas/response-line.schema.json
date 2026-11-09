@@ -80,6 +80,9 @@
         },
         "social_tasks": {
           "type": "boolean"
+        },
+        "native_turn": {
+          "type": "boolean"
         }
       },
       "maxProperties": 64
