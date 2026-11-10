@@ -47,9 +47,9 @@ namespace synth::client {
 // across a runtime call, publication, HTTP, notification or line routing. Progress and checkpoint
 // HTTP run on the session's bounded network lane; there are no other threads.
 //
-// The session keeps line routing, rechat, turn replacement and cross-feature admission. It reaches
-// them only through the player_activity, route_line and notify callbacks, and calls the delivery
-// hooks below from its line handler and rechat workflow.
+// The session keeps line routing, turn replacement and cross-feature admission. It reaches them
+// only through the player_activity, route_line and notify callbacks, and calls the delivery hooks
+// below from its line handler; RechatContinuation calls the child and failure hooks.
 //
 // Lifetimes: the borrowed configuration, client, network lane, response accounting, context
 // publication and terminal flag outlive this object; it is declared after all of them. Network tasks
@@ -311,7 +311,7 @@ public:
             {snapshot.player().form_id(),snapshot.player().origin_plugin(),snapshot.player().playthrough_id()});
     }
 
-    // Delivery hooks for the session's line handler and rechat workflow.
+    // Delivery hooks for the session's line handler and RechatContinuation.
     void complete_request(std::string_view request) {std::scoped_lock lock{mutex_};delivery_.complete_request(request);}
     [[nodiscard]] bool track(const protocol_native::Line& line,const presentation::DialogueCaptions::Caption& caption) {
         std::scoped_lock lock{mutex_};return delivery_.track(line,caption);
