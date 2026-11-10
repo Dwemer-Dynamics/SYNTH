@@ -120,6 +120,12 @@ public:
         if (epoch == epoch_) { ++epoch_; bound_ = false; }
     }
 
+    // Advisory: a stale, stopped or reloaded writer must not dirty a binding it no longer owns.
+    [[nodiscard]] bool writer_current(std::uint64_t epoch) const {
+        std::scoped_lock lock{mutex_};
+        return epoch == epoch_ && bound_;
+    }
+
     [[nodiscard]] bool acknowledge(std::uint64_t epoch, const SavedContext& context) {
         const auto bytes = encode_saved_context(context);
         if (!bytes) return false;

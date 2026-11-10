@@ -221,7 +221,9 @@ void test_saved_context_same_world_replacement() {
     CHECK(store.acknowledge(original.epoch, acknowledged));
     CHECK(original.loaded_context == disk); // An active session keeps its copied origin.
 
+    CHECK(store.writer_current(original.epoch));
     store.stop_writer(original.epoch); // Halt retires the writer without loading a different save.
+    CHECK(!store.writer_current(original.epoch)); // A late heard receipt cannot dirty a retired binding.
     CHECK(store.for_save() == encode_saved_context(acknowledged));
     CHECK(!store.acknowledge(original.epoch, {"player:a", "session:before-stop", 8, 99}));
     const auto restarted = store.bind("player:a");
@@ -235,6 +237,7 @@ void test_saved_context_same_world_replacement() {
 
     const auto replaced = store.bind("player:a"); // Settings replacement also transfers the frontier.
     CHECK(replaced.loaded_context == next_acknowledged);
+    CHECK(store.writer_current(replaced.epoch) && !store.writer_current(restarted.epoch)); // Stale same-world writer.
     CHECK(!store.acknowledge(restarted.epoch, {"player:a", "session:after-stop", 8, 99}));
     CHECK(store.for_save() == encode_saved_context(next_acknowledged));
 }
@@ -250,6 +253,7 @@ void test_saved_context_disk_load_replaces_live_frontier() {
 
     const auto disk_epoch = store.reset(); // An actual load must discard the later live frontier.
     CHECK(!store.for_save());
+    CHECK(!store.writer_current(later_writer.epoch) && !store.writer_current(disk_epoch)); // Loading binds no writer.
     store.restore(disk_epoch, encode_saved_context(earlier_disk));
     const auto reloaded = store.bind("player:a");
     CHECK(reloaded.loaded_context == earlier_disk);

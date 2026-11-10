@@ -109,7 +109,11 @@ public:
                      [this](const RequestOutcome& outcome) { return social_.notify_input(outcome); },
                      [this](std::string message) { push_notification(std::move(message)); }}},
           speech_{configuration_, {client_, network_, cancellation_.token(), terminal_, trace_,
-                                   [this](std::string message) { push_notification(std::move(message)); }}},
+                                   [this](std::string message) { push_notification(std::move(message)); },
+                                   // Invoked only by network-lane receipt drains, which the destructor joins first.
+                                   [this](std::uint64_t generation, const core::CancellationToken& cancellation) {
+                                       context_.note_heard_receipt(generation, cancellation);
+                                   }}},
           voice_samples_{configuration_.server.base_url, configuration_.server.connect_timeout_ms,
                          cancellation_.token(), client_.runtime_session_id()},
           context_{{configuration_, client_, network_, requests_, voice_samples_, quest_events_,

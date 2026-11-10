@@ -880,6 +880,17 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertLess(publication.index("hydrate_social_(outcome, snapshot);"), publication.index("invalidate_response_(cancellation);"))
         self.assertLess(publication.index("save_context_->acknowledge(save_binding_.epoch,"), publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("))
         self.assertLess(publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("), publication.index("acknowledged_inventory_frame_.compare_exchange_weak("))
+        # A heard receipt raises only its live binding's frontier; every saved ACK needs an exact
+        # context_accepted, so a bare completion never advances the cutoff (executed in native_playback_tests).
+        self.assertIn("if (save_context_ && client_.context_accepted(outcome) && !cancellation.is_cancelled()", publication)
+        self.assertLess(publication.index("client_.context_accepted(outcome)"), publication.index("save_context_->acknowledge(save_binding_.epoch,"))
+        heard = context.split("void note_heard_receipt(", 1)[1].split("void note_wait_outcome(", 1)[0]
+        self.assertLess(heard.index("save_context_->writer_current(save_binding_.epoch)"), heard.index("history_checkpoint_serial_.fetch_add("))
+        self.assertNotIn("heard_receipt", publication)
+        drain = read("src/client/speech_delivery.hpp").split("void flush_speech_receipts(", 1)[1].split("void queue_speech(", 1)[0]
+        self.assertLess(drain.index("client_.send_speech_receipt("), drain.index("state && *state == \"spoken\""))
+        self.assertIn("const auto* state = accepted_receipt_state(outcome);", drain)  # Not transport completion.
+        self.assertIn("context_.note_heard_receipt(generation, cancellation);", session)
         for forbidden in ("social_mutex_", "social_tasks_.", "PluginSession", "RE::", "REL::", "IFalloutRuntime"):
             self.assertNotIn(forbidden, context)
         forwarder = session.split("RequestOutcome publish_snapshot(", 1)[1].split("std::optional<context::TargetContext> selected_target(", 1)[0]
