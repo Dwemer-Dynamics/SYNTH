@@ -16,7 +16,7 @@
 #include "client/dialogue_requests.hpp"
 #include "client/context_publication.hpp"
 #include "client/action_execution.hpp"
-#include "client/social_task_delivery.hpp"
+#include "client/social_task_execution.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_delivery.hpp"
 #include "client/winhttp_transport.hpp"
@@ -108,7 +108,7 @@ public:
                      },
                      [this](const protocol_native::Line& line, const Snapshot& snapshot,
                             const core::CancellationToken& cancellation) { handle_line(line, snapshot, cancellation); },
-                     [this](const RequestOutcome& outcome) { return notify_social_input(outcome); },
+                     [this](const RequestOutcome& outcome) { return social_.notify_input(outcome); },
                      [this](std::string message) { push_notification(std::move(message)); }}},
           speech_{configuration_, {client_, network_, cancellation_.token(), terminal_, trace_,
                                    [this](std::string message) { push_notification(std::move(message)); }}},
@@ -121,20 +121,28 @@ public:
                         return selected ? std::optional{identity(*selected)} : std::nullopt;
                     },
                     [this](const RequestOutcome& outcome, const core::RuntimeSnapshot& snapshot) {
-                        hydrate_social_tasks(outcome, snapshot);
+                        social_.hydrate(outcome, snapshot);
                     },
                     [this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); },
                     [this](std::string message) { push_notification(std::move(message)); }}},
+          social_{{configuration_, client_, network_, requests_, context_, terminal_, cancellation_.token(),
+                   [this] {
+                       return runtime_paused() || composing_.load(std::memory_order_acquire) || dialogue_.recording() ||
+                           actions_.active() != 0 || speech_.jobs_active() || !speech_.playback_idle() || !speech_.captions_idle();
+                   },
+                   [this](const protocol_native::Line& line, const Snapshot& snapshot,
+                          const core::CancellationToken& cancellation, bool allow_followup) {
+                       handle_line(line, snapshot, cancellation, allow_followup);
+                   },
+                   [this](std::string message) { push_notification(std::move(message)); }}},
           actions_{{configuration_, client_, network_, dispatcher_, dialogue_, context_, terminal_, cancellation_.token(),
                     [this](const protocol_native::Line& line, const Snapshot& snapshot,
                            const core::CancellationToken& cancellation) { handle_line(line, snapshot, cancellation); },
                     [this](const protocol_native::Identity& actor) { end_conversation(actor); },
                     [this](const protocol_native::Identity& actor, runtime::IFalloutRuntime& runtime) {
-                        return drain_social_action(actor, runtime);
+                        return social_.release_for_action(actor, runtime);
                     },
-                    [this](std::string message) { push_notification(std::move(message)); }}} {
-        social_tasks_.bind_session(client_.runtime_session_id());
-    }
+                    [this](std::string message) { push_notification(std::move(message)); }}} {}
 
     PluginSession(const PluginSession&) = delete;
     PluginSession& operator=(const PluginSession&) = delete;
@@ -162,7 +170,7 @@ public:
         terminal_.store(true, std::memory_order_release);
         context_.stop_save_writer();
         cancellation_.cancel();
-        { std::scoped_lock lock{social_mutex_}; social_tasks_.reset(); social_delivery_.clear(); social_pending_progress_.reset(); }
+        social_.reset();
         { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
         quest_events_.stop();
         actor_events_.stop();
@@ -183,92 +191,10 @@ public:
     [[nodiscard]] core::CancellationToken wait_action_lifetime() { return actions_.wait_lifetime(); }
     [[nodiscard]] std::string voice_sample_status() const { return voice_samples_.status(); }
 
-    [[nodiscard]] bool social_task_capture_due(core::SnapshotClock::time_point now) {
-        if(!client_.social_tasks_ready()||terminal_.load(std::memory_order_acquire)||now<next_social_capture_)return false;
-        std::unique_lock lock{social_mutex_,std::try_to_lock};
-        if(!lock.owns_lock()||(!social_checkpoint_needed_&&!social_tasks_.active_task()&&std::ranges::none_of(social_tasks_.reminders(),[](const auto& task) {
-            return task.status!="completed"&&task.status!="failed"&&task.status!="cancelled";
-        })))return false;
-        next_social_capture_=now+std::chrono::milliseconds{500};return true;
-    }
+    [[nodiscard]] bool social_task_capture_due(core::SnapshotClock::time_point now) { return social_.capture_due(now); }
 
-    // Fresh copied state enters here on the game thread. Physical visit polling is
-    // nonblocking; context publication and progress HTTP stay on the background lane.
-    void pump_social_tasks(Snapshot snapshot, runtime::IFalloutRuntime& runtime) {
-        runtime.assert_game_thread();
-        const auto now=core::SnapshotClock::now();
-        if(!snapshot||snapshot->variant()!=core::RuntimeVariant::flat||!client_.social_tasks_ready()||
-            terminal_.load(std::memory_order_acquire)||snapshot->generation()!=cancellation_.token().generation()||
-            runtime.generation()!=snapshot->generation()||now<snapshot->captured_at()||
-            now-snapshot->captured_at()>std::chrono::seconds{2})return;
-        if(now<next_social_task_pump_)return;
-        next_social_task_pump_=now+std::chrono::milliseconds{250};
-        const bool busy=social_player_busy();
-        bool checkpoint{};
-        {
-            std::scoped_lock lock{social_mutex_};
-            checkpoint=social_checkpoint_needed_&&!social_release_requested_&&!social_dialogue_owner_;
-        }
-        if(checkpoint) {
-            if(!busy&&social_progress_tasks_.load(std::memory_order_acquire)==0&&social_checkpoint_tasks_.load(std::memory_order_acquire)==0)
-                queue_social_checkpoint(std::move(snapshot));
-            return;
-        }
-        runtime::SocialTaskFrame frame;
-        frame.generation=snapshot->generation().value();
-        frame.player={snapshot->player().form_id(),snapshot->player().origin_plugin(),snapshot->player().playthrough_id()};
-        if(snapshot->world()&&snapshot->world()->location_ref)
-            frame.location=runtime::SocialLocationRef{snapshot->world()->location_ref->form_id,snapshot->world()->location_ref->origin_plugin};
-        for(const auto& actor:snapshot->actors())frame.actors.push_back({
-            {actor.form_id(),actor.origin_plugin(),actor.playthrough_id()},actor.position(),true,actor.alive(),actor.disabled(),
-            actor.in_combat(),actor.hostile_to_player(),actor.teammate(),actor.conversation_area_available()});
-        std::optional<runtime::SocialTaskCommand> native;
-        core::CancellationToken owner;
-        {
-            std::unique_lock lock{social_mutex_,std::try_to_lock};
-            if(!lock.owns_lock())return;
-            if(const auto proof=social_delivery_.delivered_proof())
-                social_tasks_.note_spoken(proof->task_id,proof->execution_id,proof->request_id,proof->line_id);
-            if(social_pending_progress_&&now>=social_pending_progress_->deadline&&
-                social_pending_progress_->kind!=runtime::SocialTaskCommandKind::failed&&
-                social_pending_progress_->kind!=runtime::SocialTaskCommandKind::cancelled) {
-                if(social_pending_progress_->kind==runtime::SocialTaskCommandKind::claim) {
-                    social_tasks_.claim_failed();clear_social_execution_locked();
-                } else {
-                    social_tasks_.abort();social_pending_progress_.reset();social_release_requested_=true;++social_progress_serial_;
-                }
-            }
-            // Explicit Stop/failed visits drain even while player input/audio is busy.
-            frame.paused=busy&&!social_release_requested_;
-            if(!social_pending_progress_) {
-                if(auto command=social_tasks_.poll(frame,now)) {
-                    if(!social_execution_owner_||social_execution_id_!=command->execution_id) {
-                        social_execution_owner_.emplace(cancellation_.token());
-                        social_execution_id_=command->execution_id;
-                    }
-                    if(command->kind==runtime::SocialTaskCommandKind::visit||command->kind==runtime::SocialTaskCommandKind::release) {
-                        native=*command;social_native_command_=*command;owner=social_execution_owner_->token();
-                    } else social_pending_progress_=std::move(command);
-                }
-            }
-            if(!social_tasks_.active_task()&&!social_pending_progress_&&!social_native_command_&&
-                social_progress_tasks_.load(std::memory_order_acquire)==0&&social_execution_owner_)clear_social_execution_locked();
-        }
-        if(native) {
-            const auto result=runtime.social_visit({native->task.task_id,native->execution_id,native->task.performer,
-                native->task.recipient,owner,native->deadline,native->kind==runtime::SocialTaskCommandKind::release});
-            std::scoped_lock lock{social_mutex_};
-            const auto feedback=static_cast<runtime::SocialTaskVisitFeedback>(result.status);
-            social_tasks_.visit_feedback(result.task_id,result.execution_id,feedback);
-            if(result.status==runtime::RuntimeSocialVisitStatus::failed||result.status==runtime::RuntimeSocialVisitStatus::unavailable)
-                social_release_requested_=true;
-            if(result.status==runtime::RuntimeSocialVisitStatus::released) {
-                social_native_command_.reset();
-                if(!social_tasks_.active_task())clear_social_execution_locked();
-            }
-        }
-        if(!busy&&social_progress_tasks_.load(std::memory_order_acquire)==0)queue_social_progress(std::move(snapshot));
-    }
+    // Fresh copied state enters here on the game thread; see SocialTaskExecution::pump.
+    void pump_social_tasks(Snapshot snapshot, runtime::IFalloutRuntime& runtime) { social_.pump(std::move(snapshot), runtime); }
 
     // Check before optional native capture; queue admission repeats this gate afterward.
     [[nodiscard]] bool context_observation_ready() const {
@@ -760,7 +686,7 @@ public:
         { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
         cancel_voice_capture();
         actions_.stop_wait();
-        stop_social_task(false);
+        social_.stop(false);
         (void)begin_player_turn();
         mark_activity();
     }
@@ -1279,30 +1205,6 @@ public:
     }
 
 private:
-    [[nodiscard]] bool drain_social_action(const protocol_native::Identity& actor,runtime::IFalloutRuntime& runtime) {
-        std::optional<runtime::SocialTaskCommand> command;core::CancellationToken token;
-        {
-            std::scoped_lock lock{social_mutex_};
-            const auto* active=social_tasks_.active_task();
-            if((!active||!social_wire_actor_matches(actor,active->performer))&&
-                (!social_native_command_||!social_wire_actor_matches(actor,social_native_command_->task.performer)))return true;
-            if(!social_release_requested_) {
-                social_tasks_.stop();social_release_requested_=true;
-                if(social_dialogue_owner_)social_dialogue_owner_->cancel();
-                social_delivery_.clear();social_pending_progress_.reset();++social_progress_serial_;
-            }
-            if(!social_native_command_)return true; // No native visit has been dispatched.
-            command=social_native_command_;token=social_execution_owner_->token();
-        }
-        const auto result=runtime.social_visit({command->task.task_id,command->execution_id,command->task.performer,
-            command->task.recipient,token,command->deadline,true});
-        std::scoped_lock lock{social_mutex_};
-        social_tasks_.visit_feedback(result.task_id,result.execution_id,static_cast<runtime::SocialTaskVisitFeedback>(result.status));
-        if(result.status!=runtime::RuntimeSocialVisitStatus::released)return false;
-        social_native_command_.reset();
-        if(!social_tasks_.active_task())clear_social_execution_locked();
-        return true;
-    }
     // Both typed input and external Ask retain the same exact actor through context publication and response delivery.
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
                                           std::optional<protocol_native::ControlSelection> retained_controls = {},
@@ -1676,186 +1578,6 @@ public:
     }
 
 private:
-    [[nodiscard]] bool notify_social_input(const RequestOutcome& outcome) {
-        if(outcome.status!=RequestStatus::complete&&outcome.status!=RequestStatus::server_failure)return false;
-        for(const auto& line:outcome.lines)if(const auto* status=std::get_if<protocol_native::Status>(&line.payload)) {
-            if(status->code=="social_task_accepted"&&outcome.status==RequestStatus::complete) {
-                std::string message="SYNTH saved conversation task";
-                for(const auto& item:outcome.lines)if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&item.payload)) {
-                    if(offer->task.status=="waiting_departure")message+="; waiting until you leave and return";
-                    else if(offer->task.status=="waiting_return")message+="; waiting for your return";
-                }
-                {std::scoped_lock lock{social_mutex_};social_checkpoint_notice_=std::move(message);}
-                push_notification("SYNTH conversation task accepted; recording it for the next save");return false;
-            }
-            if(status->code=="social_task_rejected") {
-                std::string reason="the task could not be saved";
-                if(status->detail=="social_performer_not_follower")reason="select one of your current followers";
-                else if(status->detail=="social_performer_not_selected")reason="address the follower who should make the visit";
-                else if(status->detail=="social_recipient_ambiguous")reason="the recipient name matches more than one actor";
-                else if(status->detail=="social_recipient_unknown"||status->detail=="social_recipient_not_available")reason="the recipient is not available nearby";
-                else if(status->detail=="social_destination_ambiguous"||status->detail=="social_destination_unobserved")reason="the destination is not identified in this scene";
-                else if(status->detail=="social_task_capacity")reason="the saved task limit has been reached";
-                push_notification("SYNTH conversation task was not saved: "+reason);return true;
-            }
-        }
-        return false;
-    }
-    [[nodiscard]] bool social_player_busy(bool owns_rpc=false) {
-        return runtime_paused()||composing_.load(std::memory_order_acquire)||dialogue_.recording()||
-            actions_.active()!=0||speech_.jobs_active()||
-            requests_.responses()>(owns_rpc ? social_progress_tasks_.load(std::memory_order_acquire) : 0)||
-            !speech_.playback_idle()||!speech_.captions_idle();
-    }
-    void queue_social_checkpoint(Snapshot snapshot) {
-        std::uint64_t serial{};
-        {std::scoped_lock lock{social_mutex_};serial=social_checkpoint_serial_;}
-        (void)network_.try_submit("network",tasks::TaskClass::background,
-            core::SnapshotClock::now()+std::chrono::milliseconds{request_timeout_ms()},cancellation_.token(),
-            tasks::TaskLanes::track_activity(social_checkpoint_tasks_,context_.track_observation(
-            [this,snapshot=std::move(snapshot),serial](const core::CancellationToken& cancellation) {
-                if(cancellation.is_cancelled()||social_player_busy())return;
-                try {
-                    const auto transaction=client_.begin_context_turn();
-                    if(cancellation.is_cancelled()||social_player_busy()||core::SnapshotClock::now()-snapshot->captured_at()>std::chrono::seconds{2})return;
-                    {
-                        std::scoped_lock lock{social_mutex_};
-                        if(!social_checkpoint_needed_||social_dialogue_owner_||social_progress_tasks_.load(std::memory_order_acquire)!=0)return;
-                    }
-                    const auto outcome=publish_snapshot(snapshot,std::nullopt,cancellation);
-                    if(outcome.status!=RequestStatus::complete||(context_.save_bound()&&!outcome.save_checkpoint_acknowledged)||
-                        cancellation.is_cancelled()||terminal_.load(std::memory_order_acquire))return;
-                    std::optional<std::string> notice;
-                    {
-                        std::scoped_lock lock{social_mutex_};
-                        if(serial!=social_checkpoint_serial_)return;
-                        social_checkpoint_needed_=false;notice=std::move(social_checkpoint_notice_);social_checkpoint_notice_.reset();
-                    }
-                    if(notice)push_notification(std::move(*notice));
-                } catch(const std::exception&) {} // The pending frontier is retried on a fresh capture.
-            })));
-    }
-    void clear_social_execution_locked() {
-        if(social_execution_owner_)social_execution_owner_->cancel();
-        if(social_dialogue_owner_)social_dialogue_owner_->cancel();
-        social_execution_owner_.reset();social_dialogue_owner_.reset();social_execution_id_.clear();
-        social_delivery_.clear();social_pending_progress_.reset();social_release_requested_=false;++social_progress_serial_;
-    }
-    void stop_social_task(bool failed) {
-        std::scoped_lock lock{social_mutex_};
-        if(!social_tasks_.active_task())return;
-        if(failed)social_tasks_.abort();else social_tasks_.stop();
-        if(social_dialogue_owner_)social_dialogue_owner_->cancel();
-        social_delivery_.clear();social_pending_progress_.reset();social_release_requested_=true;++social_progress_serial_;
-    }
-    void fail_social_execution(std::string_view execution) {
-        std::scoped_lock lock{social_mutex_};
-        if(social_execution_id_!=execution||!social_tasks_.active_task())return;
-        social_tasks_.abort();social_release_requested_=true;
-        if(social_dialogue_owner_)social_dialogue_owner_->cancel();
-        social_pending_progress_.reset();social_delivery_.clear();++social_progress_serial_;
-    }
-    void fail_social_progress(const runtime::SocialTaskCommand& command) {
-        if(command.kind==runtime::SocialTaskCommandKind::claim) {
-            std::scoped_lock lock{social_mutex_};
-            if(social_execution_id_==command.execution_id) {social_tasks_.claim_failed();clear_social_execution_locked();}
-        } else fail_social_execution(command.execution_id);
-    }
-    void accept_social_offer(const runtime::SocialTaskDescriptor& task,const Snapshot& snapshot) {
-        if(!client_.social_tasks_ready()||!snapshot||snapshot->generation()!=cancellation_.token().generation())return;
-        std::scoped_lock lock{social_mutex_};
-        const auto known=social_checkpoint_revisions_.find(task.task_id);
-        if(known==social_checkpoint_revisions_.end()||known->second<task.revision) {
-            if(known==social_checkpoint_revisions_.end()&&social_checkpoint_revisions_.size()>=16)social_checkpoint_revisions_.erase(social_checkpoint_revisions_.begin());
-            social_checkpoint_revisions_[task.task_id]=task.revision;social_checkpoint_needed_=true;++social_checkpoint_serial_;
-        }
-        if(const auto* active=social_tasks_.active_task();active&&active->task_id==task.task_id&&
-            (task.status=="completed"||task.status=="cancelled"||task.status=="failed"))social_release_requested_=true;
-        social_tasks_.upsert_authoritative(task,snapshot->generation().value(),
-            {snapshot->player().form_id(),snapshot->player().origin_plugin(),snapshot->player().playthrough_id()});
-    }
-    void queue_social_progress(Snapshot snapshot) {
-        runtime::SocialTaskCommand command;core::CancellationToken owner;std::uint64_t serial{};
-        {
-            std::scoped_lock lock{social_mutex_};
-            if(!social_pending_progress_||!social_execution_owner_)return;
-            command=*social_pending_progress_;owner=social_execution_owner_->token();serial=social_progress_serial_;
-        }
-        const auto rpc_deadline=core::SnapshotClock::now()+std::chrono::milliseconds{request_timeout_ms()};
-        const bool cleanup_report=command.kind==runtime::SocialTaskCommandKind::failed||command.kind==runtime::SocialTaskCommandKind::cancelled;
-        const auto accepted=network_.try_submit("network",tasks::TaskClass::background,
-            cleanup_report ? rpc_deadline : std::min(command.deadline,rpc_deadline),owner,
-            tasks::TaskLanes::track_activity(social_progress_tasks_,requests_.track_response(
-            [this,snapshot=std::move(snapshot),command,serial](const core::CancellationToken& cancellation) {
-                if(cancellation.is_cancelled()||terminal_.load(std::memory_order_acquire)||social_player_busy(true))return;
-                {
-                    std::scoped_lock lock{social_mutex_};
-                    if(serial!=social_progress_serial_||!social_pending_progress_||social_execution_id_!=command.execution_id)return;
-                    social_pending_progress_.reset();
-                }
-                try {
-                    const auto transaction=client_.begin_context_turn();
-                    if(cancellation.is_cancelled()||social_player_busy(true)||
-                        core::SnapshotClock::now()-snapshot->captured_at()>std::chrono::seconds{2}) {
-                        std::scoped_lock lock{social_mutex_};
-                        if(serial==social_progress_serial_)social_pending_progress_=command;
-                        return;
-                    }
-                    core::CancellationToken response_owner=cancellation;
-                    if(command.kind==runtime::SocialTaskCommandKind::arrived) {
-                        std::scoped_lock lock{social_mutex_};
-                        if(serial!=social_progress_serial_)return;
-                        social_dialogue_owner_.emplace(cancellation);
-                        response_owner=social_dialogue_owner_->token();
-                        social_delivery_.begin(command,snapshot->generation().value());
-                    }
-                    char form[11]{};std::snprintf(form,sizeof(form),"0x%08X",command.task.performer.form_id);
-                    protocol_native::Identity actor{form,command.task.performer.origin_plugin,
-                        command.task.performer.playthrough_id,command.task.performer_name};
-                    for(const auto& captured:snapshot->actors())if(social_wire_actor_matches(identity(captured),command.task.performer))actor=identity(captured);
-                    const bool cleanup=command.kind==runtime::SocialTaskCommandKind::failed||command.kind==runtime::SocialTaskCommandKind::cancelled;
-                    auto publication=cleanup ? publish_snapshot(snapshot,std::nullopt,response_owner)
-                        : publish_snapshot(snapshot,actor,response_owner,nullptr,{},{},{},{},&command.task);
-                    if(publication.status!=RequestStatus::complete||response_owner.is_cancelled()) {
-                        fail_social_progress(command);return;
-                    }
-                    auto request_command=command;
-                    if(command.kind==runtime::SocialTaskCommandKind::failed||command.kind==runtime::SocialTaskCommandKind::cancelled) {
-                        // Stop can overtake a claim/arrival ACK. Cleanup uses the
-                        // fresh authoritative revision for this exact execution,
-                        // never a stale optimistic revision or another visit owner.
-                        for(const auto& line:publication.lines)if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&line.payload);
-                            offer&&offer->task.task_id==command.task.task_id&&
-                            runtime::social_same_actor(offer->task.performer,command.task.performer)&&
-                            runtime::social_same_actor(offer->task.recipient,command.task.recipient)&&
-                            (!offer->task.execution_id||*offer->task.execution_id==command.execution_id))request_command.task=offer->task;
-                    }
-                    publication.context_binding.invalidate_response=[this,execution=command.execution_id] {fail_social_execution(execution);};
-                    const auto outcome=client_.social_task_progress(request_command,
-                        [this,snapshot,response_owner,command,serial](const protocol_native::Line& line) {
-                            if(response_owner.is_cancelled())return;
-                            {
-                                std::scoped_lock lock{social_mutex_};
-                                if(serial!=social_progress_serial_)return;
-                                if(command.kind==runtime::SocialTaskCommandKind::arrived)social_delivery_.root_request(line.request_id);
-                            }
-                            handle_line(line,snapshot,response_owner,command.kind==runtime::SocialTaskCommandKind::arrived);
-                        },publication.context_binding);
-                    if(outcome.status!=RequestStatus::complete) {
-                        fail_social_progress(command);
-                        if(outcome.status!=RequestStatus::cancelled)push_notification("SYNTH saved visit stopped; progress was not acknowledged");
-                    } else if(command.kind==runtime::SocialTaskCommandKind::failed||command.kind==runtime::SocialTaskCommandKind::cancelled) {
-                        std::scoped_lock lock{social_mutex_};
-                        if(social_execution_id_==command.execution_id&&!social_native_command_)clear_social_execution_locked();
-                    }
-                } catch(const std::exception&) {
-                    fail_social_progress(command);
-                    push_notification("SYNTH saved visit stopped; progress could not be saved");
-                }
-            })));
-        (void)accepted; // A full lane retains the pending command for a later bounded pump.
-    }
-
     // Atomically retain the emitted actor and parent with their copied world/cancellation owner.
     struct PendingRechat final {
         protocol_native::Identity actor;
@@ -1880,11 +1602,8 @@ private:
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
     [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}) {
-        // A walk survives unrelated player input. An already-started exchange is
-        // interrupted locally and releases its visit instead of presenting late speech.
-        bool interrupt_social{};
-        {std::scoped_lock lock{social_mutex_};interrupt_social=social_dialogue_owner_.has_value();}
-        if(interrupt_social)stop_social_task(false);
+        // A walk survives unrelated player input; only an already-started exchange is interrupted.
+        social_.interrupt_dialogue();
         conversation_holds_.clear();
         trace_->record(diagnostics::ConversationStage::turn_admitted,cancellation_.token().generation().value());
         const auto turn = dialogue_.replace_turn();
@@ -1906,15 +1625,7 @@ private:
 
     // A late stream failure invalidates its owned work, never the replacement turn's audio.
     void invalidate_response(core::CancellationToken cancellation) {
-        if(!dialogue_.cancel_turn_if_owner(cancellation)) {
-            std::string execution;
-            {
-                std::scoped_lock lock{social_mutex_};
-                if(!social_dialogue_owner_||!social_dialogue_owner_->cancel_if_owner(cancellation))return;
-                execution=social_execution_id_;
-            }
-            fail_social_execution(execution);
-        }
+        if(!dialogue_.cancel_turn_if_owner(cancellation)&&!social_.invalidate_dialogue(cancellation))return;
         dialogue_.cancel_interrupted_turn();
     }
 
@@ -2039,18 +1750,6 @@ private:
                                 player_event, actor_events, controls, social_pair);
     }
 
-    // Context hook, on the publishing worker after a fresh, current, complete publication.
-    void hydrate_social_tasks(const RequestOutcome& outcome, const core::RuntimeSnapshot& snapshot) {
-        std::vector<runtime::SocialTaskDescriptor> tasks;
-        for(const auto& line:outcome.lines)if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&line.payload))tasks.push_back(offer->task);
-        std::scoped_lock lock{social_mutex_};
-        if(const auto* active=social_tasks_.active_task();active&&std::ranges::none_of(tasks,[&](const auto& task) {
-            return task.task_id==active->task_id&&task.status!="completed"&&task.status!="failed"&&task.status!="cancelled";
-        }))social_release_requested_=true;
-        social_tasks_.hydrate(std::move(tasks),snapshot.generation().value(),
-            {snapshot.player().form_id(),snapshot.player().origin_plugin(),snapshot.player().playthrough_id()});
-    }
-
     [[nodiscard]] std::optional<context::TargetContext> selected_target(
         const core::RuntimeSnapshot& snapshot, bool automatic, const integration::PromptTarget* retained = nullptr) {
         const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
@@ -2139,7 +1838,7 @@ private:
             || terminal_.load(std::memory_order_acquire)) return;
         trace_->record(diagnostics::ConversationStage::line_applied,line.generation,line.context_sequence,line.request_id,line.line_id);
         if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&line.payload)) {
-            accept_social_offer(offer->task,snapshot);return;
+            social_.accept_offer(offer->task,snapshot);return;
         }
         if (const auto* status = std::get_if<protocol_native::Status>(&line.payload);
             status && status->code == "speech_not_recognized") {
@@ -2156,7 +1855,7 @@ private:
             return;
         }
         if (const auto* end = std::get_if<protocol_native::End>(&line.payload); end && allow_followup) {
-            if(end->status=="complete") {std::scoped_lock lock{social_mutex_};social_delivery_.complete_request(line.request_id);}
+            if(end->status=="complete")social_.complete_request(line.request_id);
             std::scoped_lock lock{rechat_mutex_};
             if (pending_rechat_ && pending_rechat_->parent.request_id == line.request_id)
                 pending_rechat_->response_complete = end->status == "complete";
@@ -2171,8 +1870,7 @@ private:
             if (snapshot->variant() == core::RuntimeVariant::vr && configuration_.behavior.show_subtitles)
                 push_notification((speaker.empty() ? "SYNTH" : speaker) + ": " + dialogue->text);
             const auto caption = make_caption(line, *dialogue, cancellation, snapshot, combat_bark);
-            bool social_reply{};
-            {std::scoped_lock lock{social_mutex_};social_reply=social_delivery_.track(line,caption);}
+            const bool social_reply=social_.track(line,caption);
             speech_.deliver(line, *dialogue, snapshot, cancellation, caption, prefetch);
             if (!allow_followup||social_reply) return;
             if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue->speaker)) {
@@ -2204,7 +1902,7 @@ private:
         }
         const auto* action = std::get_if<protocol_native::Action>(&line.payload);
         if (action == nullptr || !allow_followup) return;
-        {std::scoped_lock lock{social_mutex_};if(social_delivery_.owns_request(line.request_id))return;}
+        if(social_.owns_request(line.request_id))return;
         if (line.generation != snapshot->generation().value()) {
             return;
         }
@@ -2235,8 +1933,7 @@ private:
     }
 
     void queue_rechat(PendingRechat rechat) {
-        std::string social_execution;
-        {std::scoped_lock lock{social_mutex_};if(social_delivery_.owns_request(rechat.parent.request_id))social_execution=social_execution_id_;}
+        const auto social_execution=social_.execution_for_request(rechat.parent.request_id);
         const auto prefetch = rechat.prefetch;
         if (rechat.prefetch) {
             rechat.binding.cancellation = rechat.prefetch->token();
@@ -2282,7 +1979,7 @@ private:
                         rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
                     const auto outcome = client_.trigger(
                         "rechat", rechat.actor, [this, snapshot = rechat.snapshot, cancellation, prefetch = rechat.prefetch, parent_request=rechat.parent.request_id,social_execution](const protocol_native::Line& line) {
-                            {std::scoped_lock lock{social_mutex_};social_delivery_.child_request(parent_request,line.request_id);}
+                            social_.child_request(parent_request,line.request_id);
                             if (prefetch) {
                                 trace_->record(diagnostics::ConversationStage::prefetch_received,line.generation,line.context_sequence,line.request_id,line.line_id);
                                 prefetch->append(line);
@@ -2298,20 +1995,20 @@ private:
                                 else if (status->detail == "ineligible") stage = diagnostics::ConversationStage::continuation_ineligible;
                                 trace_->record(stage,line.generation,line.context_sequence,line.request_id,line.line_id);
                                 if(!social_execution.empty()&&(status->detail=="no_candidate"||status->detail=="private"||
-                                    status->detail=="budget_exhausted"||status->detail=="ineligible"))fail_social_execution(social_execution);
+                                    status->detail=="budget_exhausted"||status->detail=="ineligible"))social_.fail_execution(social_execution);
                             }
                         }, std::nullopt, std::nullopt, rechat.binding, std::nullopt, std::nullopt, std::nullopt,
                         client_.uses_rechat_parent_contract() ? std::optional{rechat.parent} : std::nullopt);
                     if (rechat.prefetch) rechat.prefetch->finish(outcome.status == RequestStatus::complete);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
-                        if(!social_execution.empty())fail_social_execution(social_execution);
+                        if(!social_execution.empty())social_.fail_execution(social_execution);
                         conversation_holds_.suspend(cancellation);
                         trace_->record(diagnostics::ConversationStage::continuation_failed,rechat.binding.generation,
                             rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
                         push_notification("SYNTH rechat stopped: " + outcome.detail);
                     }
                 } catch (const std::exception& error) {
-                    if(!social_execution.empty())fail_social_execution(social_execution);
+                    if(!social_execution.empty())social_.fail_execution(social_execution);
                     conversation_holds_.suspend(cancellation);
                     push_notification(std::string{"SYNTH rechat stopped: "} + error.what());
                     if (rechat.prefetch) rechat.prefetch->cancel();
@@ -2573,22 +2270,6 @@ private:
     WinHttpTransport transport_;
     SynthClient client_;
     core::CancellationSource cancellation_;
-    std::mutex social_mutex_;
-    runtime::SocialTaskController social_tasks_;
-    SocialTaskDelivery social_delivery_;
-    std::optional<core::CancellationSource> social_execution_owner_,social_dialogue_owner_;
-    std::string social_execution_id_;
-    std::optional<runtime::SocialTaskCommand> social_pending_progress_,social_native_command_;
-    std::atomic_size_t social_progress_tasks_{};
-    std::atomic_size_t social_checkpoint_tasks_{};
-    bool social_checkpoint_needed_{};
-    std::uint64_t social_checkpoint_serial_{};
-    std::unordered_map<std::string,std::uint64_t> social_checkpoint_revisions_;
-    std::optional<std::string> social_checkpoint_notice_;
-    std::uint64_t social_progress_serial_{};
-    bool social_release_requested_{};
-    core::SnapshotClock::time_point next_social_task_pump_{};
-    core::SnapshotClock::time_point next_social_capture_{};
     tasks::TaskLanes network_;
     tasks::TaskLanes control_{{tasks::LaneConfig{"control", 4, 4, 4}}, 1};
     std::atomic_bool terminal_{};
@@ -2652,6 +2333,11 @@ private:
     // delivery, the terminal/pause flags and the save store. Its queued tasks and the rollback
     // closure in each ContextBinding capture it; ~PluginSession joins the network lane first.
     ContextPublication context_;
+    // Borrows configuration, client, network lane, response accounting, context publication and the
+    // terminal flag. Its network tasks and progress bindings capture it and its callbacks capture this
+    // session; ~PluginSession joins the network lane first. Native visits run only in its game-thread
+    // pump and in the action queue's release hook, never from a worker.
+    SocialTaskExecution social_;
     // Declared last: borrows configuration, client, network lane, dispatcher, dialogue, context and
     // the terminal flag. Its network tasks capture it and its callbacks capture this session;
     // ~PluginSession joins the network lane first. Dispatcher tasks never capture it.
