@@ -29,6 +29,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,11 +38,12 @@ namespace synth::client {
 // Owns one session's registration and context publication: capability construction, server
 // initialization, full/delta context encoding and publication, the acknowledged world/quest frame,
 // the exact save binding and write epoch, the history checkpoint frontier with its wait notice,
-// the acknowledged inventory frame and the world observation retry gate. SaveContextStore stays
+// the acknowledged inventory frame, the world observation retry gate and the dynamic profile refresh
+// that publishes its own context first. SaveContextStore stays
 // the persisted-binding authority; this object only borrows it with the binding it was created for.
 //
-// Every publication runs on a network worker. Observation and session request tasks hold
-// client_.begin_context_turn() across publish(); the manual publish_context() task does not, so only
+// Every publication runs on a network worker. Observation, profile refresh and session request tasks
+// hold client_.begin_context_turn() across publish(); the manual publish_context() task does not, so only
 // SynthClient's own request lock spans its HTTP exchange. world_context_mutex_ guards only copied
 // observation values and is never held over HTTP or game work. Acknowledgement follows a complete, uncancelled, current-generation response:
 // the world/quest frame never moves behind a newer frame of the same generation, the save ACK is
@@ -51,7 +53,8 @@ namespace synth::client {
 // target selection policy, quest/player/actor delivery and the social/turn state. It reaches that
 // state only through three synchronous hooks: select_target on the submitting thread over the
 // copied snapshot (the host coordinator for initialization, where the result is unused, or the
-// publish_context() caller), and hydrate_social plus invalidate_response on the publishing worker.
+// publish_context() and refresh_dynamic_profiles() callers), and hydrate_social plus
+// invalidate_response on the publishing worker.
 //
 // Lifetimes: the borrowed configuration, client, network lane, response accounting, voice samples,
 // quest delivery, flags and save store outlive this object; it is declared after all of them. The
@@ -185,6 +188,54 @@ public:
             return false;
         }
         return submit(std::move(snapshot), false);
+    }
+
+    // Game thread: copy up to 16 audible identities and the selected target; the worker publishes
+    // that exact snapshot under the context transaction before requesting the refresh.
+    [[nodiscard]] bool refresh_dynamic_profiles(Snapshot snapshot, std::string_view scope, std::uint32_t target_form_id) {
+        if (!snapshot || !client_.ready() || terminal_.load(std::memory_order_acquire) ||
+            runtime_paused_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::vector<protocol_native::Identity> actors;
+        actors.reserve(std::min<std::size_t>(snapshot->actors().size(), 16));
+        for (const auto& actor : snapshot->actors()) {
+            if (scope == "narrator" || (scope == "target" && actor.form_id() != target_form_id)) continue;
+            if (actors.size() == 16) break;
+            if (targeting::distance(snapshot->player_pose().position(), actor.position()) <=
+                    configuration_.activation.automatic_hearing_distance &&
+                targeting::dialogue_actor_available(actor)) {
+                actors.push_back(identity(actor));
+            }
+        }
+        const auto include_narrator = scope == "narrator" ||
+            (scope == "automatic" && configuration_.behavior.dynamic_profile_include_narrator);
+        if (actors.empty() && !include_narrator) return false;
+        const auto target = select_target_(*snapshot);
+        const auto deadline = tasks::TaskLanes::Clock::now() +
+                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
+        const auto accepted = network_.try_submit(
+            "network", tasks::TaskClass::background, deadline, session_,
+            [this, actors = std::move(actors), include_narrator, snapshot = std::move(snapshot), target](
+                const core::CancellationToken& cancellation) {
+                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                try {
+                    const auto context_turn = client_.begin_context_turn();
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    const auto context_outcome = publish(snapshot, target, cancellation);
+                    if (context_outcome.status != RequestStatus::complete) {
+                        notify_("SYNTH profile context failed: " + context_outcome.detail);
+                        return;
+                    }
+                    const auto outcome = client_.refresh_dynamic_profiles(actors, include_narrator, context_outcome.context_binding);
+                    if (outcome.status != RequestStatus::complete) {
+                        notify_("SYNTH dynamic profile refresh failed: " + outcome.detail);
+                    }
+                } catch (const std::exception& error) {
+                    notify_(std::string{"SYNTH dynamic profile refresh: "} + error.what());
+                }
+            });
+        return accepted == tasks::SubmitResult::accepted;
     }
 
     [[nodiscard]] bool initialization_failed() const noexcept {

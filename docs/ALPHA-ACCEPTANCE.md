@@ -11,6 +11,12 @@
   `/talk` with no message or to an ineligible NPC shows a useful failure.
 - [ ] Subtitles-only or voice failure: text appears but the line stays unheard.
 
+## Session ownership composition
+
+- [ ] Flat and VR, separately, on the composed-session build: typed and voice turns, Stop,
+  combat interrupt, load, rechat, an action, a diary, PipVision and a control-menu mode change
+  behave as on the previous build, with no late audio or duplicate receipts.
+
 ## Generic gift inventory exchange
 
 - [x] Install the reviewed coordinated gift-menu DLL/PEX/backend update; installed hashes and server health verified.

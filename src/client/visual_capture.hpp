@@ -18,7 +18,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -251,10 +250,7 @@ private:
         return PlayerDialogue::identity(actor);
     }
     [[nodiscard]] static protocol_native::Identity identity(const context::TargetContext& actor) {
-        char form_id[11]{};
-        std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.identity().form().form_id());
-        return {form_id, actor.identity().form().plugin(), actor.identity().playthrough().value(),
-                actor.name()};
+        return PlayerDialogue::identity(actor);
     }
     [[nodiscard]] static std::string actor_key(const protocol_native::Identity& actor) {
         return PlayerDialogue::actor_key(actor);

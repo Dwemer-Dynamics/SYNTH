@@ -2,9 +2,11 @@
 
 #include "audio/dialogue_audio.hpp"
 #include "audio/native_playback.hpp"
+#include "client/conversation_holds.hpp"
 #include "client/rechat_prefetch.hpp"
 #include "client/speech_facing_binding.hpp"
 #include "client/speech_receipts.hpp"
+#include "client/wire_identity.hpp"
 #include "client/synth_client.hpp"
 #include "config/config.hpp"
 #include "diagnostics/conversation_trace.hpp"
@@ -22,17 +24,21 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace synth::client {
 
 // Owns ordered speech delivery for one session: the single-worker FIFO speech lane and its activity
-// count, TTS/media preparation, native playback, captions, the active spatial frame and the bounded
-// receipt outbox. Native work runs only through the IFalloutRuntime passed to game-thread methods.
+// count, TTS/media preparation, native playback, captions with their scene admission and copied
+// presentation validation, the active spatial frame and the bounded receipt outbox. Native work runs
+// only through the IFalloutRuntime passed to game-thread methods; the session supplies the shared
+// conversation holds and its pause/composing gate per call and routes a rejected presentation.
 // Borrowed dependencies (client, network lane, terminal flag) outlive this object; the session's
 // network lane is joined before destruction.
 class SpeechDelivery final {
@@ -90,9 +96,74 @@ public:
     [[nodiscard]] std::optional<audio::PlaybackFrame> playback_frame() const noexcept { return playback_.active_frame(); }
     void set_paused(bool paused) noexcept { playback_.set_paused(paused); }
 
-    [[nodiscard]] presentation::DialogueCaptions::Caption validation_candidate(core::SnapshotClock::time_point now) {
+    // Copied presentation ownership for the host's native capture, which runs outside the session.
+    [[nodiscard]] presentation::DialogueCaptions::Caption presentation_capture_candidate(
+        core::SnapshotClock::time_point now, bool suspended) {
+        if (terminal_.load(std::memory_order_acquire) || suspended) return {};
         auto candidate = playback_.validation_candidate(now);
         return candidate ? candidate : captions_.validation_candidate(now);
+    }
+
+    enum class PresentationCheck { ignored, accepted, rejected, rejected_combat };
+
+    // Game thread: validate a candidate's copied scene admission against the fresh capture. A rejected
+    // caption is discarded here; the session routes the response invalidation or dialogue Stop.
+    [[nodiscard]] PresentationCheck validate_presentation(const presentation::DialogueCaptions::Caption& caption,
+                                                          const Snapshot& snapshot) {
+        if (!caption || !caption->admission || caption->cancellation.is_cancelled() ||
+            terminal_.load(std::memory_order_acquire) || caption->generation != session_.generation().value())
+            return PresentationCheck::ignored;
+        const auto& admission = *caption->admission;
+        const auto now = core::SnapshotClock::now();
+        if (const auto reason = admission.rejection_reason(snapshot.get(),now)) {
+            trace_->record(*reason,caption->generation,caption->context_sequence,caption->request_id,caption->line_id);
+            caption->admission->rejected.store(true,std::memory_order_release);
+            caption->mark_delivery(presentation::DialogueDelivery::discarded);
+            return admission.combat_speaker_form_id != 0 ? PresentationCheck::rejected_combat : PresentationCheck::rejected;
+        }
+        caption->admission->accept(snapshot->captured_at());
+        return PresentationCheck::accepted;
+    }
+
+    // Line delivery: bind the caption's scene admission (speaker/listener copied from the response
+    // snapshot), its facing pair with conversation holds under the line's cancellation, and the receipt.
+    [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
+        const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
+        const core::CancellationToken& cancellation, const Snapshot& snapshot, bool combat_bark,
+        ConversationHolds& holds) {
+        auto admission = std::make_shared<presentation::SceneAdmission>();
+        admission->original = snapshot;
+        const auto retain = [&](const protocol_native::Identity& actor) {
+            if (!snapshot) { admission->rejected.store(true); return; }
+            const auto key = wire_actor_key(actor);
+            if (key == wire_actor_key(wire_identity(snapshot->player()))) return;
+            const auto found = std::ranges::find_if(snapshot->actors(),[&](const auto& value) {
+                return wire_actor_key(wire_identity(value)) == key; });
+            if (found == snapshot->actors().end()) { admission->rejected.store(true); return; }
+            admission->actors.push_back({cancellation,found->form_id(),found->base_form_id(),found->origin_plugin(),
+                found->base_origin_plugin(),found->playthrough_id(),found->name(),true});
+        };
+        if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue.speaker)) {
+            retain(*actor);
+            if (combat_bark && !admission->actors.empty())
+                admission->combat_speaker_form_id = admission->actors.front().form_id;
+        }
+        if (dialogue.listener) retain(*dialogue.listener);
+        const auto facing=snapshot ? bind_speech_facing(line,dialogue,*snapshot,cancellation) : nullptr;
+        if (facing) {
+            holds.add(facing->speaker,cancellation);
+            holds.add(facing->listener,cancellation);
+        }
+        auto on_terminal = receipt_hook(line, dialogue);
+        return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
+            .generation = line.generation,
+            .speaker = std::visit([](const auto& value) {
+                return value.display_name.empty() ? std::string{"SYNTH"} : value.display_name;
+            }, dialogue.speaker),
+            .text = dialogue.text, .cancellation = cancellation,
+            .facing = facing,
+            .trace = trace_, .request_id = line.request_id, .line_id = line.line_id, .context_sequence = line.context_sequence,
+            .admission = std::move(admission), .on_terminal = std::move(on_terminal)});
     }
 
     [[nodiscard]] presentation::DialogueCaptions::Caption subtitle_frame(

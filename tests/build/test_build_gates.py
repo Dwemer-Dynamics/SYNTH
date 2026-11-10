@@ -59,10 +59,15 @@ class BuildDefinitionTests(unittest.TestCase):
         self.assertIn("active_->clip.caption->scene_rejected()", pump)
         for path in ("src/audio/native_playback.hpp", "src/presentation/dialogue_presentation.hpp"):
             self.assertNotIn("capture_actor_snapshot", read(path))
+        delivery = read("src/client/speech_delivery.hpp")
+        self.assertIn("admission.rejection_reason(snapshot.get(),now)", delivery)
+        self.assertIn("trace_->record(*reason,caption->generation", delivery)
+        self.assertIn(".admission = std::move(admission)", delivery)
         session = read("src/client/plugin_session.hpp")
-        self.assertIn("admission.rejection_reason(snapshot.get(),now)", session)
-        self.assertIn("trace_->record(*reason,caption->generation", session)
-        self.assertIn(".admission = std::move(admission)", session)
+        self.assertNotIn("rejection_reason(", session)
+        routing = session.split("void submit_presentation_capture(", 1)[1].split("rechat_capture_target()", 1)[0]
+        self.assertIn("PresentationCheck::rejected_combat: invalidate_response(caption->cancellation)", routing)
+        self.assertIn("PresentationCheck::rejected: stop_dialogue()", routing)
 
     def test_flat_spin_lock_avoids_rw_lock_relocation(self) -> None:
         capture = read("src/adapters/commonlib_capture.hpp")
@@ -953,8 +958,9 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('capture_ = std::move(deferred)', deferred)
         self.assertNotIn('route_line_(', deferred)
         release = rechat.split('if (rechat->prefetched_lines) {', 1)[1].split('rechat->snapshot=std::move(snapshot)', 1)[0]
-        self.assertIn('retained_target_(*snapshot,retained)', release)
-        self.assertIn('return selected_target(snapshot, false, &retained).has_value();', session)
+        self.assertIn('retained_target(*snapshot,retained)', release)
+        self.assertIn('return dialogue_.selected_target(snapshot, false, &retained).has_value();', rechat)
+        self.assertNotIn('selected_target(snapshot, false, &retained)', session)
         self.assertLess(release.index('snapshot->captured_at()>std::chrono::seconds{2}'), release.index('prefetch->release('))
         self.assertLess(release.index('prefetch->release('), release.index('route_line_('))
         self.assertIn('!available(action->actor)', release)
@@ -1384,7 +1390,9 @@ class WaitPackageGates(unittest.TestCase):
         self.assertIn('session->submit_text(snapshot, std::move(submission->text), &target)', host)
         self.assertIn('capture_actor_snapshot(now,target.form_id)', host)
         session = read('src/client/plugin_session.hpp')
-        retained = session.split('if (retained) {', 1)[1].split('if (snapshot.variant()', 1)[0]
+        self.assertNotIn('std::optional<context::TargetContext> selected_target(', session)
+        selection = read('src/client/player_dialogue.hpp').split('std::optional<context::TargetContext> selected_target(', 1)[1]
+        retained = selection.split('if (retained) {', 1)[1].split('if (snapshot.variant()', 1)[0]
         for guard in ('session.is_cancelled()', 'retained->matches(actor)', 'eligible(actor)', 'maximum_distance'):
             self.assertIn(guard, retained)
         self.assertIn('return {}; // Never silently retarget', retained)
@@ -1436,7 +1444,7 @@ class WaitPackageGates(unittest.TestCase):
         for guard in ('conversation_area_available()', 'retained->matches(actor)',
                       'retained->session.is_cancelled()', 'player_speech_audible', 'distance > range'):
             self.assertIn(guard, conversation)
-        command = session.split('std::optional<context::TargetContext> selected_target(', 1)[1].split(
+        command = dialogue.split('std::optional<context::TargetContext> selected_target(', 1)[1].split(
             'std::optional<context::TargetContext> pointed_subject(', 1)[0]
         self.assertIn('selected.target || !automatic', command)
         self.assertIn('retained->conversation_mode', dialogue)

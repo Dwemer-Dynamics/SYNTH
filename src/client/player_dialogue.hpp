@@ -1,7 +1,9 @@
 #pragma once
 
 #include "client/ambient_exchange.hpp"
+#include "client/automatic_activation.hpp"
 #include "client/synth_client.hpp"
+#include "client/wire_identity.hpp"
 #include "config/config.hpp"
 #include "diagnostics/conversation_trace.hpp"
 #include "input/native_microphone.hpp"
@@ -11,10 +13,8 @@
 #include "tasks/task_lanes.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstddef>
-#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -33,7 +33,8 @@ namespace synth::client {
 // Owns player dialogue input for one session: the player-turn cancellation source and its reserved
 // server-cancel dispatch, persistent external conversation ownership with actor end-conversation
 // cooldowns and rechat suppression, push-to-talk/open-microphone recording with the target and
-// controls bound at speech admission, typed text admission and player conversation target selection.
+// controls bound at speech admission, typed text admission, player conversation target selection and
+// the shared exact selected/pointed/external target policy.
 // Recording, binding and admission run on the game thread; the turn source and the conversation state
 // are locked separately (turn before conversation, never the reverse) and workers may use them.
 // Request submission, response routing and cross-feature Stop/replacement sequencing stay with the
@@ -94,18 +95,17 @@ public:
         return !text.empty() && text.size() <= maximum_text_bytes;
     }
 
+    // Wire identity and actor key forward to the single engine-free authority in wire_identity.hpp.
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {
-        char form_id[11]{};
-        std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.form_id());
-        return {form_id, actor.origin_plugin(), actor.playthrough_id(), actor.name()};
+        return wire_identity(actor);
+    }
+
+    [[nodiscard]] static protocol_native::Identity identity(const context::TargetContext& actor) {
+        return wire_identity(actor);
     }
 
     [[nodiscard]] static std::string actor_key(const protocol_native::Identity& actor) {
-        auto plugin = actor.origin_plugin;
-        std::ranges::transform(plugin, plugin.begin(), [](unsigned char character) {
-            return static_cast<char>(std::tolower(character));
-        });
-        return actor.playthrough_id + "|" + plugin + "|" + actor.form_id;
+        return wire_actor_key(actor);
     }
 
     // Player turn ownership. Replacement is game-thread admission only: no HTTP or worker joins.
@@ -455,6 +455,88 @@ public:
             result.push_back(std::move(target));
         }
         return result;
+    }
+
+    // Shared exact target for activation, context, diary, profile and rechat revalidation. A retained
+    // target never retargets; automatic flat selection uses the physical automatic-hearing limit.
+    [[nodiscard]] std::optional<context::TargetContext> selected_target(
+        const core::RuntimeSnapshot& snapshot, bool automatic, const integration::PromptTarget* retained = nullptr) {
+        const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
+        const auto now = core::SnapshotClock::now();
+        const auto eligible = [&](const core::ActorSnapshot& actor) {
+            if (!targeting::dialogue_actor_available(actor) ||
+                (configuration_.behavior.scene_safety && actor.talking_to_player()) ||
+                (automatic && !configuration_.activation.include_hostile &&
+                 actor.hostile_to_player())) {
+                return false;
+            }
+            if (on_cooldown(actor_key(identity(actor)), now)) return false;
+            if (!automatic || configuration_.activation.include_creatures) return true;
+            return targeting::automatic_actor_class_supported(actor.race(), false);
+        };
+        if(automatic&&snapshot.variant()==core::RuntimeVariant::flat)
+            return select_flat_automatic_activation(snapshot,now,session_.generation(),
+                configuration_.activation.automatic_hearing_distance,eligible).target;
+        if (retained) {
+            if (retained->session.is_cancelled() || retained->session.generation() != snapshot.generation() ||
+                snapshot.generation() != session_.generation()) return {};
+            for (const auto& actor : snapshot.actors()) {
+                if (!retained->matches(actor) || !eligible(actor)) continue;
+                const auto distance = targeting::distance(snapshot.player_pose().position(), actor.position());
+                if (distance > targeting::SelectionBounds{}.maximum_distance) return {};
+                return context::TargetContext{context::identity_of(actor), actor.name(), actor.position(),
+                    distance, snapshot.generation(), snapshot.frame()};
+            }
+            return {}; // Never silently retarget a draft after pause or actor replacement.
+        }
+        if (snapshot.variant() == core::RuntimeVariant::flat) {
+            auto selected = targeting::select_flat_crosshair(snapshot, playthrough, {}, eligible);
+            if (selected.target || !automatic) return std::move(selected.target);
+        } else {
+            auto selected = targeting::select_vr_controller_ray(
+                snapshot, playthrough, targeting::Hand::right, now, {}, eligible);
+            if (!selected.target) {
+                selected = targeting::select_vr_hmd_gaze(snapshot, playthrough, now, {}, eligible);
+            }
+            if (selected.target) return std::move(selected.target);
+        }
+        auto selected = targeting::select_nearest(
+            snapshot, playthrough, snapshot.player_pose().position(),
+            automatic ? configuration_.activation.automatic_hearing_distance
+                      : (snapshot.world() && snapshot.world()->interior
+                             ? configuration_.activation.interior_distance
+                             : configuration_.activation.exterior_distance),
+            eligible);
+        return std::move(selected.target);
+    }
+
+    // Pointed subject for diary and portrait commands: availability only, no cooldown or range policy.
+    [[nodiscard]] static std::optional<context::TargetContext> pointed_subject(const core::RuntimeSnapshot& snapshot) {
+        const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
+        const auto eligible = [](const core::ActorSnapshot& actor) {
+            return targeting::dialogue_actor_available(actor);
+        };
+        if (snapshot.variant() == core::RuntimeVariant::flat) {
+            return targeting::select_flat_crosshair(snapshot, playthrough, {}, eligible).target;
+        }
+        const auto now = core::SnapshotClock::now();
+        auto selected = targeting::select_vr_controller_ray(
+            snapshot, playthrough, targeting::Hand::right, now, {}, eligible);
+        if (!selected.target) {
+            selected = targeting::select_vr_hmd_gaze(snapshot, playthrough, now, {}, eligible);
+        }
+        return std::move(selected.target);
+    }
+
+    // External request/prompt actor: the bounded scene lookup plus cooldown, hostility and combat policy.
+    [[nodiscard]] const core::ActorSnapshot* external_actor(const core::RuntimeSnapshot& snapshot, std::uint32_t form_id,
+                                                            core::SnapshotClock::time_point now) {
+        const auto* actor = integration::external_actor(snapshot, form_id, now,
+            configuration_.activation.automatic_hearing_distance);
+        if (!actor || on_cooldown(actor_key(identity(*actor)), now) ||
+            (!configuration_.activation.include_hostile && actor->hostile_to_player()) ||
+            (actor->in_combat() && !configuration_.behavior.enable_combat_dialogue)) return nullptr;
+        return actor;
     }
 
 private:
