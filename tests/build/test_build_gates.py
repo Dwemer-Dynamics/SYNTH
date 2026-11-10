@@ -387,8 +387,9 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
 
         session = read("src/client/plugin_session.hpp")
         delivery = read("src/client/speech_delivery.hpp")
+        actions = read("src/client/action_execution.hpp")
         # Queue rejection/expiry/discard must release all admission-time activity.
-        for counter, source in (("speech_jobs_", delivery), ("active_actions_", session), ("halt_requests_", session)):
+        for counter, source in (("speech_jobs_", delivery), ("active_actions_", actions), ("halt_requests_", session)):
             self.assertIn(f"tasks::TaskLanes::track_activity({counter},", source)
             self.assertNotIn(f"{counter}.fetch_add(", source)
             self.assertNotIn(f"{counter}.fetch_sub(", source)
@@ -829,9 +830,11 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertLess(session.index("    voice::SampleWorker voice_samples_;"), session.index("    ContextPublication context_;"))
         for moved in ("world_context_mutex_", "history_checkpoint_", "acknowledged_world_", "save_binding_", "save_context_"):
             self.assertNotIn(moved, session)
-        self.assertIn('}, pending.binding, std::move(inventory), std::move(transfer),', session)
-        self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory")', session)
-        self.assertIn("handle_line(continuation, continuation_snapshot, cancellation)", session)
+        actions = read("src/client/action_execution.hpp")
+        self.assertIn('}, pending.binding, std::move(inventory), std::move(transfer),', actions)
+        self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory")', actions)
+        self.assertIn("route_line_(continuation, continuation_snapshot, cancellation)", actions)
+        self.assertLess(session.index("    ContextPublication context_;"), session.index("    ActionExecution actions_;"))
         self.assertIn("pending_rechat_ = PendingRechat{*actor, snapshot,", session)
         self.assertIn("response_binding(line, cancellation)", session)
         self.assertIn("{line.generation, line.context_sequence, cancellation, line.turn_id, {},", session)
@@ -851,7 +854,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertNotIn("requests_.responses().", session)
         self.assertNotIn("active_responses_", session)
         self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
-        self.assertIn('pending_actions_.empty() && !rechat_capture_', session)
+        self.assertIn('if (actions_.while_idle([&] {', session)
+        self.assertIn('if (!rechat_capture_ && pending_rechat_ && playing &&', session)
         self.assertIn('prefetch->append(line);', session)
         self.assertIn('if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);', session)
         capture_target = session.split('rechat_capture_target() {', 1)[1].split('void submit_rechat_capture(', 1)[0]
@@ -892,7 +896,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         flat_capabilities = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("}", 1)[0]
         self.assertIn('"action.inventory_observation"', flat_capabilities)
         self.assertEqual(capabilities.count('"action.inventory_observation"'), 1)
-        execution = session.split("void execute_action(PendingAction pending)", 1)[1].split(
+        execution = read("src/client/action_execution.hpp").split("void execute_action(PendingAction pending)", 1)[1].split(
             "static protocol_native::Identity identity(", 1)[0]
         self.assertLess(execution.index("!client_.equipment_actions_ready()"), execution.index("dispatcher_.try_enqueue("))
         self.assertIn('control_.try_submit("control"', cancel_dispatch)
@@ -922,13 +926,12 @@ class PowerShellBuildScriptTests(unittest.TestCase):
                 self.assertNotRegex(script, r"if \(-not \$IsWindows\)")
 
     def test_consume_is_flat_only_and_requires_its_acknowledged_receipt_contract(self) -> None:
-        session = read("src/client/plugin_session.hpp")
         capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         flat_capabilities = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("}", 1)[0]
         for capability in ('"action.consume"', '"action.consume_inventory"'):
             self.assertIn(capability, flat_capabilities)
             self.assertEqual(capabilities.count(capability), 1)
-        execution = session.split("void execute_action(PendingAction pending)", 1)[1].split(
+        execution = read("src/client/action_execution.hpp").split("void execute_action(PendingAction pending)", 1)[1].split(
             "static protocol_native::Identity identity(", 1)[0]
         self.assertLess(execution.index("!client_.consumption_ready()"), execution.index("dispatcher_.try_enqueue("))
         self.assertIn("RuntimeActionName::consume", execution)
@@ -978,7 +981,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
                 self.assertIsNone(direct_command.search(script))
 
     def test_transfer_requires_paired_native_evidence_and_flat_advertisement(self) -> None:
-        session = read("src/client/plugin_session.hpp")
+        session = read("src/client/action_execution.hpp")
         capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         self.assertNotIn('"action.give_item"', capabilities)
         flat = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr)", 1)[0]
@@ -997,7 +1000,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("completion->result->transfer->valid_for(request)", session)
         self.assertIn("prepare_transfer_inventory(snapshot,action,cancellation,transfer_observation,client_.extended_inventory_ready())", session)
         self.assertIn("continuation_snapshot=std::move(prepared.snapshot);transfer=std::move(prepared.transfer)", session)
-        self.assertIn("handle_line(continuation, continuation_snapshot, cancellation)", session)
+        self.assertIn("route_line_(continuation, continuation_snapshot, cancellation)", session)
+        self.assertIn("actions_{{configuration_, client_, network_, dispatcher_, dialogue_, context_, terminal_, cancellation_.token(),", read("src/client/plugin_session.hpp"))
         self.assertIn("pending.binding, std::move(inventory), std::move(transfer)", session)
         native = read("src/adapters/commonlib_actions.hpp")
         transfer = native.split("case runtime::RuntimeActionName::give_item: {", 1)[1].split(
@@ -1353,7 +1357,19 @@ class ConversationApproachGates(unittest.TestCase):
         self.assertIn('conversation_approach_mode(mode)',requests)
         self.assertNotIn('hold_conversation_actor',source)
         actions=source[source.index('const auto* action = std::get_if<protocol_native::Action>'):source.index('// Continuations retain the same rollback owner')]
-        self.assertLess(actions.index('conversation_holds_.suspend(cancellation)'),actions.index('pending_actions_.push_back'))
+        self.assertLess(actions.index('conversation_holds_.suspend(cancellation)'),actions.index('actions_.enqueue(*action, snapshot, response_binding(line, cancellation))'))
+        # The queue lock never spans the social release's native call; dispatch requires the same front.
+        pump=source[source.index('void pump(std::uint64_t generation'):source.index('// Return copied presentation ownership')]
+        self.assertNotIn('drain_social_action(',pump)
+        self.assertIn('if (actions_.pump(runtime) != ActionExecution::Pump::idle) return;',pump)
+        queue=read('src/client/action_execution.hpp')
+        queue=queue[queue.index('Pump pump(runtime::IFalloutRuntime& runtime) {'):queue.index('private:')]
+        self.assertEqual(2,queue.count('std::scoped_lock lock{action_mutex_};'))
+        locks=[index for index in range(len(queue)) if queue.startswith('std::scoped_lock lock{action_mutex_};',index)]
+        self.assertLess(locks[0],queue.index('release_social_(*actor, runtime)'))
+        self.assertLess(queue.index('runtime.conversation_actions_ready()'),locks[1])
+        self.assertLess(locks[1],queue.index('pending_actions_.front().serial != *front) return Pump::blocked;'))
+        self.assertLess(queue.index('pending_actions_.front().serial != *front'),queue.index('pending_actions_.pop_front()'))
         modes=read('src/client/conversation_holds.hpp')
         self.assertIn('entry.hold.approach_player=entry.hold.approach_player || approach_player',modes)
 
