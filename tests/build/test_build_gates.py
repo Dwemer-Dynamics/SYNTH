@@ -740,7 +740,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertNotIn("acknowledge_journal", observations)
         stop = session.split("void request_stop() noexcept {", 1)[1].split("voice_samples_.request_stop();", 1)[0]
         self.assertLess(stop.index("social_.reset();"), stop.index("observations_.stop();"))
-        self.assertLess(stop.index("observations_.stop();"), stop.index("automatic_diaries_.clear();"))
+        self.assertLess(stop.index("observations_.stop();"), stop.index("diary_.stop();"))
         retire = observations.split("void stop() noexcept {", 1)[1].split("}", 1)[0]
         self.assertLess(retire.index("clear_enemy_awareness();"), retire.index("quest_events_.stop();"))
         self.assertLess(retire.index("quest_events_.stop();"), retire.index("actor_events_.stop();"))
@@ -914,8 +914,10 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("deadline, voice->turn))", voice)
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
-        # Rechat owns deferred prefetch delivery and the child RPC; social owns its progress response.
-        self.assertEqual(session.count("requests_.track_response("), 1)
+        # Rechat owns deferred prefetch delivery and the child RPC; social owns its progress response;
+        # PipVision owns its capture response.
+        self.assertEqual(session.count("requests_.track_response("), 0)
+        self.assertEqual(read("src/client/visual_capture.hpp").count("requests_.track_response("), 1)
         self.assertEqual(read("src/client/activation_triggers.hpp").count("requests_.track_response("), 2)
         self.assertEqual(rechat.count("requests_.track_response("), 2)
         self.assertEqual(social.count("requests_.track_response("), 1)
@@ -992,7 +994,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertNotIn("mutex", cancel)
         self.assertIn("WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING", transport)
         self.assertIn("now >= deadline", transport)
-        self.assertIn("publish_snapshot(snapshot, subject, cancellation)", session)
+        self.assertIn("context_.publish(snapshot, subject, cancellation)", read("src/client/visual_capture.hpp"))
 
     def test_windows_detection_is_powershell_51_safe(self) -> None:
         for relative in self.scripts:
@@ -1035,6 +1037,36 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("target->session.generation() == generation", execution)
         self.assertLess(execution.index("targeted && !actor"), execution.index("session->request_npc_diary(snapshot, &*target)"))
         self.assertIn("request->generation != generation.value()", execution)
+
+    def test_diary_and_pipvision_state_have_focused_owners(self) -> None:
+        session = read("src/client/plugin_session.hpp")
+        diary = read("src/client/diary_requests.hpp")
+        vision = read("src/client/visual_capture.hpp")
+        for moved in ("diary_mutex_", "pending_diary_", "diary_tasks_", "automatic_diaries_", "PendingDiary",
+                      "next_automatic_diary_attempt_", "visual_tasks_", "capture_game_window_pixels", "encode_jpeg",
+                      "send_visual_capture", "request_diary(", "fetch_diary_status", "nearest_visual_subject"):
+            self.assertNotIn(moved.replace("request_diary(", "client_.request_diary("), session)
+        for forbidden in ("PluginSession", "RE::", "REL::", "IFalloutRuntime", "speech_.", "actions_.", "rechat_."):
+            self.assertNotIn(forbidden, diary)
+            self.assertNotIn(forbidden, vision)
+        # Cross-feature checkpoint admission and selection stay in the session.
+        needed = session.split("bool diary_checkpoint_needed() {", 1)[1].split("bool checkpoint_diary(", 1)[0]
+        for gate in ("requests_.responses() != 0", "actions_.active() != 0", "speech_.jobs_active()",
+                     "dialogue_.recording()", "!speech_.playback_idle()", "diary_.checkpoint_due()"):
+            self.assertIn(gate, needed)
+        manual = diary.split("bool request(", 1)[1].split("bool checkpoint_due()", 1)[0]
+        self.assertLess(manual.index("SYNTH is still tracking the previous diary request"), manual.index("(select)(*snapshot)"))
+        self.assertLess(manual.index("(select)(*snapshot)"), manual.index("network_.try_submit("))
+        self.assertIn("tasks::TaskLanes::track_activity(diary_tasks_,", diary)
+        self.assertEqual(diary.count("tasks::TaskLanes::track_activity(diary_tasks_,"), 4)
+        self.assertLess(session.index("    ActivationTriggers activation_;"), session.index("    DiaryRequests diary_;"))
+        self.assertLess(session.index("    DiaryRequests diary_;"), session.index("    VisualCapture vision_;"))
+        submit = vision.split("bool submit(", 1)[1].split("private:", 1)[0]
+        self.assertLess(submit.index("observations_.enrich_selected_actor("), submit.index("capture_game_window_pixels()"))
+        self.assertLess(submit.index("capture_game_window_pixels()"), submit.index("network_.try_submit("))
+        self.assertLess(submit.index("media_capture::encode_jpeg(*pixels)"), submit.index("client_.upload_media("))
+        self.assertIn("tasks::TaskLanes::track_activity(visual_tasks_,", submit)
+        self.assertIn("line_(line, snapshot, cancellation);", submit)
 
     def test_diary_hotkey_keeps_crosshair_identity_and_blocks_menu_input(self) -> None:
         entry = read("src/flat/plugin_entry.cpp")
