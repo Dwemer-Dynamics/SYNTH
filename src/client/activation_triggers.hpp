@@ -45,8 +45,8 @@ namespace synth::client {
 // Locks: activation_mutex_ and activity_mutex_ are leaves over copied values. Reactor selection
 // try-locks the acknowledged actor list and then PlayerDialogue's conversation state, and returns
 // on contention; the worker takes the list lock alone. No lock here is held across HTTP, a callback,
-// the enricher or a notification. The open-microphone voice read in automatic_current() is the
-// session's existing plain-flag read, unchanged.
+// the enricher or a notification. automatic_current() also runs on the network worker; its voice
+// read is PlayerDialogue's single game-thread-published voice activity value.
 //
 // Lifetimes: the borrowed configuration, client, network lane, response accounting, context
 // publication, dialogue, observed-event owner and flags outlive this object; the session declares it

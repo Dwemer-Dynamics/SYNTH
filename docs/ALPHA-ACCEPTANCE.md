@@ -16,6 +16,13 @@
 - [ ] Flat and VR, separately, on the composed-session build: typed and voice turns, Stop,
   combat interrupt, load, rechat, an action, a diary, PipVision and a control-menu mode change
   behave as on the previous build, with no late audio or duplicate receipts.
+- [x] Voice-state Stage B candidate, local prerequisite only: x64 flat and VR builds, both
+  package and manifest audits, and exact packaged-DLL matches, paired with server #10 at
+  `3e637c6` (server #11 is documentation-only). This is not runtime acceptance.
+- [ ] Flat, on the voice-state build: with open microphone listening passively, automatic
+  activation still fires; detected speech or held push-to-talk suppresses it and no automatic
+  reply starts mid-speech; mute, Stop and load cancel capture without leaving it suppressed.
+  VR, separately: push-to-talk and open microphone behave as before.
 
 ## Generic gift inventory exchange
 
