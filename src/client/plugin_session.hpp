@@ -18,11 +18,10 @@
 #include "client/social_task_execution.hpp"
 #include "client/rechat_continuation.hpp"
 #include "client/quest_event_delivery.hpp"
-#include "client/actor_event_delivery.hpp"
+#include "client/observed_event_delivery.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/snapshot.hpp"
-#include "core/player_event_sampler.hpp"
 #include "core/save_context.hpp"
 #include "core/automatic_diary_queue.hpp"
 #include "integration/external_requests.hpp"
@@ -61,10 +60,10 @@ namespace synth::client {
 class PluginSession final {
 public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
-    using ActorEnricher = std::function<Snapshot(const Snapshot&, std::uint32_t)>;
+    using ActorEnricher = ObservedEventDelivery::ActorEnricher;
 
     // Installed on the game thread when the coordinator-created session is adopted.
-    void set_actor_enricher(ActorEnricher enrich) { actor_enricher_ = std::move(enrich); }
+    void set_actor_enricher(ActorEnricher enrich) { observations_.set_actor_enricher(std::move(enrich)); }
 
     PluginSession(config::Config configuration,
                   core::RuntimeVariant variant,
@@ -94,11 +93,7 @@ public:
           network_({tasks::LaneConfig{"network", configuration_.limits.max_pending_requests, 1, 3}}, 2),
           automatic_diary_enabled_{variant == core::RuntimeVariant::flat && rest_events_available},
           automatic_diaries_{generation},
-          quest_events_enabled_{variant == core::RuntimeVariant::flat && quest_events_available},
           quest_events_{generation},
-          actor_events_enabled_{variant == core::RuntimeVariant::flat && actor_events_available},
-          actor_events_{client_.runtime_session_id(),generation},
-          player_events_{generation, variant},
           dialogue_{configuration_, client_, control_, cancellation_.token(), trace_,
                     [this](std::string message) { push_notification(std::move(message)); }},
           requests_{{client_, network_, terminal_, conversation_holds_,
@@ -114,7 +109,8 @@ public:
                                    [this](std::string message) { push_notification(std::move(message)); }}},
           voice_samples_{configuration_.server.base_url, configuration_.server.connect_timeout_ms,
                          cancellation_.token(), client_.runtime_session_id()},
-          context_{{configuration_, client_, network_, requests_, voice_samples_, quest_events_, quest_events_enabled_,
+          context_{{configuration_, client_, network_, requests_, voice_samples_, quest_events_,
+                    ObservedEventDelivery::quest_events_enabled(variant, quest_events_available),
                     terminal_, runtime_paused_, cancellation_.token(), save_context, std::move(save_binding),
                     [this](const core::RuntimeSnapshot& snapshot) {
                         const auto selected = selected_target(snapshot, false);
@@ -152,7 +148,15 @@ public:
                    [this](const core::RuntimeSnapshot& snapshot, const integration::PromptTarget& retained) {
                        return selected_target(snapshot, false, &retained).has_value();
                    },
-                   [this](std::string message) { push_notification(std::move(message)); }}} {}
+                   [this](std::string message) { push_notification(std::move(message)); }}},
+          observations_{{configuration_, client_, network_, context_, quest_events_, terminal_, runtime_paused_, cancellation_.token(),
+                         variant, quest_events_available, actor_events_available,
+                         [this] {
+                             return dialogue_.recording() || requests_.responses() != 0 || actions_.active() != 0 ||
+                                 speech_.jobs_active() || !speech_.playback_idle();
+                         },
+                         [this] { return current_turn_token(); },
+                         [this](std::string message) { push_notification(std::move(message)); }}} {}
 
     PluginSession(const PluginSession&) = delete;
     PluginSession& operator=(const PluginSession&) = delete;
@@ -181,9 +185,7 @@ public:
         context_.stop_save_writer();
         cancellation_.cancel();
         social_.reset();
-        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
-        quest_events_.stop();
-        actor_events_.stop();
+        observations_.stop();
         { std::scoped_lock lock{diary_mutex_}; automatic_diaries_.clear(); }
         voice_samples_.request_stop();
     }
@@ -228,194 +230,41 @@ public:
         return context_.observe_world(std::move(snapshot), inventory_refresh, current_turn_token());
     }
 
-    // The adapter must bind copied scalars to this generation's capture before calling; no engine pointers enter the queue.
+    // Observed-event entry points; ObservedEventDelivery owns capture admission, cadence and receipts.
     [[nodiscard]] bool observe_quest_events(Snapshot snapshot, std::span<const core::QuestEvent> events) {
-        if (!quest_events_enabled_ || !context_.quest_events_registered() ||
-            terminal_.load(std::memory_order_acquire)) return false;
-        return quest_events_.enqueue(std::move(snapshot), events);
+        return observations_.observe_quest_events(std::move(snapshot), events);
     }
+    void pump_quest_events() { observations_.pump_quest_events(); }
+    [[nodiscard]] std::uint64_t dropped_quest_events() const noexcept { return observations_.dropped_quest_events(); }
+    [[nodiscard]] std::uint64_t unobserved_quest_events() const noexcept { return observations_.unobserved_quest_events(); }
+    [[nodiscard]] bool quest_events_ready() const noexcept { return observations_.quest_events_ready(); }
+    [[nodiscard]] bool quest_event_capture_ready() const noexcept { return observations_.quest_event_capture_ready(); }
 
-    // Called by the game pump; one background attempt per interval, with all encoding and HTTP on the network lane.
-    void pump_quest_events() {
-        if (!quest_events_enabled_ || !context_.quest_events_registered() || !quest_events_.pending() ||
-            terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            dialogue_.recording() || requests_.responses() != 0 ||
-            actions_.active() != 0 || speech_.jobs_active() ||
-            !speech_.playback_idle() || quest_event_tasks_.load(std::memory_order_acquire) != 0) return;
-        const auto now = tasks::TaskLanes::Clock::now();
-        if (now < next_quest_event_attempt_) return;
-        next_quest_event_attempt_ = now + std::chrono::seconds{5};
-        (void)network_.try_submit("network", tasks::TaskClass::background,
-            now + std::chrono::milliseconds{request_timeout_ms()}, current_turn_token(),
-            tasks::TaskLanes::track_activity(quest_event_tasks_,
-            [this](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                    runtime_paused_.load(std::memory_order_acquire)) return;
-                std::shared_ptr<const QuestEventDelivery::Prepared> batch;
-                try {
-                    batch = quest_events_.prepare();
-                    if (!batch) return;
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto result = publish_snapshot(batch->snapshot, std::nullopt, cancellation, nullptr, batch->batch);
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    if (result.status == RequestStatus::complete) {
-                        (void)quest_events_.finish(batch, true);
-                        quest_event_failure_reported_.store(false, std::memory_order_release);
-                    } else if (result.status == RequestStatus::http_failure && result.http_status >= 400 &&
-                               result.http_status < 500 && result.http_status != 408 && result.http_status != 429) {
-                        (void)quest_events_.finish(batch, false);
-                        push_notification("SYNTH quest events rejected; check logs before enabling further capture");
-                    } else if (!quest_event_failure_reported_.exchange(true, std::memory_order_acq_rel)) {
-                        push_notification("SYNTH quest events not acknowledged; retaining capture for retry");
-                    }
-                } catch (const std::invalid_argument&) {
-                    (void)quest_events_.finish(batch, false);
-                    push_notification("SYNTH quest batch failed validation and was not sent");
-                } catch (const std::exception&) {
-                    if (!quest_event_failure_reported_.exchange(true, std::memory_order_acq_rel))
-                        push_notification("SYNTH quest event delivery failed; retaining capture for retry");
-                }
-            }));
-    }
-
-    [[nodiscard]] std::uint64_t dropped_quest_events() const noexcept { return quest_events_.dropped(); }
-    [[nodiscard]] std::uint64_t unobserved_quest_events() const noexcept { return quest_events_.unobserved(); }
-    [[nodiscard]] bool quest_events_ready() const noexcept {
-        return context_.quest_events_registered() && !terminal_.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] bool quest_event_capture_ready() const noexcept { return quest_events_ready() && !quest_events_.full(); }
-
-    [[nodiscard]] bool actor_events_ready() const noexcept {
-        return actor_events_enabled_ && client_.actor_events_ready() && !terminal_.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] bool actor_event_capture_ready() const noexcept { return actor_events_ready() && !actor_events_.full(); }
-    [[nodiscard]] const std::string& actor_event_session_id() const noexcept { return client_.runtime_session_id(); }
-    [[nodiscard]] std::uint64_t dropped_actor_events() const noexcept { return actor_events_.dropped(); }
+    [[nodiscard]] bool actor_events_ready() const noexcept { return observations_.actor_events_ready(); }
+    [[nodiscard]] bool actor_event_capture_ready() const noexcept { return observations_.actor_event_capture_ready(); }
+    [[nodiscard]] const std::string& actor_event_session_id() const noexcept { return observations_.actor_event_session_id(); }
+    [[nodiscard]] std::uint64_t dropped_actor_events() const noexcept { return observations_.dropped_actor_events(); }
     [[nodiscard]] bool observe_actor_events(ActorEventDelivery::Capture capture) {
-        return actor_event_capture_ready() && actor_events_.enqueue(std::move(capture));
+        return observations_.observe_actor_events(std::move(capture));
     }
+    void pump_actor_events() { observations_.pump_actor_events(); }
 
-    // Game-pump scheduling only. Fragment preparation, exact-state selection and HTTP all run on the bounded network lane.
-    void pump_actor_events() {
-        if (!actor_events_enabled_ || !client_.actor_events_ready() || !actor_events_.pending() ||
-            terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            dialogue_.recording() || requests_.responses()!=0 ||
-            actions_.active()!=0 || speech_.jobs_active() ||
-            !speech_.playback_idle() || actor_event_tasks_.load(std::memory_order_acquire)!=0) return;
-        const auto now=tasks::TaskLanes::Clock::now();
-        if (now<next_actor_event_attempt_) return;
-        next_actor_event_attempt_=now+std::chrono::seconds{5};
-        (void)network_.try_submit("network",tasks::TaskClass::background,
-            now+std::chrono::milliseconds{request_timeout_ms()},current_turn_token(),
-            tasks::TaskLanes::track_activity(actor_event_tasks_,[this](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                    runtime_paused_.load(std::memory_order_acquire)) return;
-                std::shared_ptr<const ActorEventDelivery::Prepared> batch;
-                try {
-                    batch=actor_events_.prepare();if (!batch) return;
-                    const auto context_turn=client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto result=publish_snapshot(batch->capture->scene,std::nullopt,cancellation,nullptr,std::nullopt,std::nullopt,batch);
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    if (result.status==RequestStatus::complete) {
-                        (void)actor_events_.finish(batch,true);actor_event_failure_reported_.store(false,std::memory_order_release);
-                    } else if (result.status==RequestStatus::http_failure && result.http_status>=400 &&
-                        result.http_status<500 && result.http_status!=408 && result.http_status!=429) {
-                        (void)actor_events_.finish(batch,false);
-                        push_notification("SYNTH actor events rejected; check logs before further capture");
-                    } else if (!actor_event_failure_reported_.exchange(true,std::memory_order_acq_rel))
-                        push_notification("SYNTH actor events not acknowledged; retaining original capture for retry");
-                } catch (const std::invalid_argument&) {
-                    (void)actor_events_.finish(batch,false);
-                    push_notification("SYNTH actor batch failed validation and was not sent");
-                } catch (const std::exception&) {
-                    if (!actor_event_failure_reported_.exchange(true,std::memory_order_acq_rel))
-                        push_notification("SYNTH actor event delivery failed; retaining original capture for retry");
-                }
-            }));
-    }
-
-    // Game-pump-only capture cadence: independent of networking, microphone and dialogue activity.
     [[nodiscard]] bool player_event_sample_due(core::SnapshotClock::time_point now) {
-        return !terminal_.load(std::memory_order_acquire) && client_.player_events_ready() && player_events_.due(now);
+        return observations_.player_event_sample_due(now);
     }
 
-    // Game-pump-only scalar capture ownership. This never publishes context or starts network/provider work.
     [[nodiscard]] std::optional<core::CombatantIdentity> enemy_awareness_capture_target(
         core::SnapshotClock::time_point now,bool player_in_combat) {
-        if (terminal_.load(std::memory_order_acquire) || runtime_paused() || !client_.enemy_awareness_ready()) return {};
-        std::scoped_lock lock{enemy_awareness_mutex_};
-        if (terminal_.load(std::memory_order_acquire)) return {};
-        return enemy_awareness_sampler_.due(monotonic_milliseconds(now),player_in_combat,cancellation_.token().generation().value());
+        return observations_.enemy_awareness_capture_target(now, player_in_combat);
     }
     void observe_enemy_awareness(const core::CombatantIdentity& owner,const core::EnemyAwarenessSnapshot& captured,
                                  std::uint64_t generation,core::SnapshotClock::time_point now) {
-        if (terminal_.load(std::memory_order_acquire) || generation!=cancellation_.token().generation().value() || !captured.available) return;
-        std::scoped_lock lock{enemy_awareness_mutex_};
-        if (terminal_.load(std::memory_order_acquire) || !enemy_awareness_sampler_.owns(owner,generation)) return;
-        (void)enemy_awareness_cache_.observe(owner,captured,generation,monotonic_milliseconds(now));
+        observations_.observe_enemy_awareness(owner, captured, generation, now);
     }
 
-    void observe_player_events(std::optional<core::PlayerEventSample> sample) {
-        if (terminal_.load(std::memory_order_acquire)) return;
-        const auto previous = player_events_.front() ? player_events_.front()->serial : 0;
-        if (sample) (void)player_events_.observe(std::move(*sample));
-        else player_events_.unavailable();
-        if (player_event_owner_ && previous != (player_events_.front() ? player_events_.front()->serial : 0))
-            player_event_owner_->cancel();
-    }
-
-    [[nodiscard]] std::array<std::uint64_t, 2> player_event_health() const noexcept {
-        return {player_events_.pending(), player_events_.dropped()};
-    }
-
-    // Apply worker receipts on the producer thread, then attach the immutable event to a fresh scene.
-    [[nodiscard]] bool publish_player_event(Snapshot snapshot) {
-        const auto receipt = player_event_receipt_.exchange(0, std::memory_order_acq_rel);
-        if (receipt != 0) (void)player_events_.acknowledge(receipt & core::RuntimeGeneration::maximum_wire_value,
-                                                       (receipt >> 63) == 0, client_.player_reactions_ready());
-        const auto* pending = player_events_.front();
-        if (!pending || !snapshot || !client_.player_events_ready() || terminal_.load(std::memory_order_acquire) ||
-            runtime_paused() || dialogue_.recording() || !speech_.playback_idle() ||
-            requests_.responses() != 0 || actions_.active() != 0 ||
-            speech_.jobs_active() || player_event_tasks_.load(std::memory_order_acquire) != 0) return false;
-        const auto& observed = pending->after;
-        if (snapshot->generation() != observed.generation || snapshot->variant() != observed.variant ||
-            snapshot->player().form_id() != observed.form_id || snapshot->player().origin_plugin() != observed.origin_plugin ||
-            snapshot->player().playthrough_id() != observed.playthrough_id) return false;
-        const auto now = core::SnapshotClock::now();
-        if (now < next_player_event_attempt_ || now < observed.observed_at) return false;
-        next_player_event_attempt_ = now + std::chrono::seconds{5};
-        const protocol_native::NativePlayerEvent event{*pending, static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - observed.observed_at).count())};
-        player_event_owner_.emplace(current_turn_token());
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
-            now + std::chrono::milliseconds{request_timeout_ms()}, player_event_owner_->token(),
-            tasks::TaskLanes::track_activity(player_event_tasks_,
-            [this, snapshot=std::move(snapshot), event](const core::CancellationToken& cancellation) {
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) || runtime_paused() ||
-                        core::SnapshotClock::now() - snapshot->captured_at() > std::chrono::seconds{2}) return;
-                    const auto outcome = publish_snapshot(snapshot, std::nullopt, cancellation, nullptr, std::nullopt, event);
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    if (outcome.status == RequestStatus::complete) {
-                        player_event_receipt_.store(event.transition.serial, std::memory_order_release);
-                        player_event_failure_reported_.store(false, std::memory_order_release);
-                    } else if (outcome.status == RequestStatus::http_failure && outcome.http_status >= 400 &&
-                               outcome.http_status < 500 && outcome.http_status != 408 && outcome.http_status != 429) {
-                        player_event_receipt_.store(event.transition.serial | (1ULL << 63), std::memory_order_release);
-                        push_notification("SYNTH player event rejected; check logs");
-                    } else if (!player_event_failure_reported_.exchange(true, std::memory_order_acq_rel))
-                        push_notification("SYNTH player event not acknowledged; retaining evidence for retry");
-                } catch (const std::exception&) {
-                    if (!player_event_failure_reported_.exchange(true, std::memory_order_acq_rel))
-                        push_notification("SYNTH player event delivery failed; retaining evidence for retry");
-                }
-            }));
-        return accepted == tasks::SubmitResult::accepted;
-    }
+    void observe_player_events(std::optional<core::PlayerEventSample> sample) { observations_.observe_player_events(std::move(sample)); }
+    [[nodiscard]] std::array<std::uint64_t, 2> player_event_health() const noexcept { return observations_.player_event_health(); }
+    [[nodiscard]] bool publish_player_event(Snapshot snapshot) { return observations_.publish_player_event(std::move(snapshot)); }
 
     [[nodiscard]] bool activate_target(Snapshot snapshot, bool manual) {
         if (!snapshot || !client_.ready() || runtime_paused_.load(std::memory_order_acquire)) {
@@ -533,7 +382,7 @@ public:
 
     void hard_halt() noexcept {
         terminal_.store(true, std::memory_order_release);
-        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
+        observations_.clear_enemy_awareness();
         halting_.store(true, std::memory_order_release);
         dialogue_.cancel_microphone();
         transport_.cancel_all();
@@ -687,7 +536,7 @@ public:
     // Dialogue-only interruption leaves the connection and runtime session alive.
     void stop_dialogue() {
         if (terminal_.load(std::memory_order_acquire)) return;
-        { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
+        observations_.clear_enemy_awareness();
         cancel_voice_capture();
         actions_.stop_wait();
         social_.stop(false);
@@ -726,13 +575,13 @@ public:
 
     // Only acknowledged, recent transitions can request one comment; lack of a speaker never blocks history delivery.
     [[nodiscard]] bool maybe_trigger_player_reaction(Snapshot snapshot, core::SnapshotClock::time_point now) {
-        const auto* event = player_events_.reaction(now);
+        const auto* event = observations_.player_reaction(now);
         if (!event || !snapshot || !client_.player_reactions_ready() || snapshot->variant() != core::RuntimeVariant::flat ||
             snapshot->player().in_combat() ||
             dialogue_.recording() || runtime_paused() || terminal_.load(std::memory_order_acquire) ||
             !client_.ready() || !speech_.playback_idle() || speech_.jobs_active() ||
             requests_.responses() != 0 || actions_.active() != 0 ||
-            player_event_tasks_.load(std::memory_order_acquire) != 0) return false;
+            observations_.player_event_tasks() != 0) return false;
         const auto& observed = event->after;
         if (snapshot->generation() != observed.generation || snapshot->player().form_id() != observed.form_id ||
             snapshot->player().origin_plugin() != observed.origin_plugin || snapshot->player().playthrough_id() != observed.playthrough_id)
@@ -742,7 +591,7 @@ public:
         const auto serial = event->serial;
         if (!queue_context_trigger("player_reaction", identity(*selected), std::move(snapshot),
             "player reaction stopped", std::nullopt, std::nullopt, serial, observed.observed_at + std::chrono::seconds{60})) return false;
-        (void)player_events_.consume_reaction(serial);
+        (void)observations_.consume_player_reaction(serial);
         return true;
     }
 
@@ -852,7 +701,7 @@ public:
         if (!halting_.load(std::memory_order_acquire) ||
             halt_requests_.load(std::memory_order_acquire) != 0 ||
             context_.observation_tasks() != 0 ||
-            player_event_tasks_.load(std::memory_order_acquire) != 0 ||
+            observations_.player_event_tasks() != 0 ||
             speech_.jobs_active() ||
             requests_.responses() != 0 ||
             actions_.active() != 0) {
@@ -1916,44 +1765,11 @@ private:
         unsigned checkpoint_failures{};
     };
 
-    // Call only before worker admission; continuations keep their original immutable enriched snapshot.
+    // Game-thread runtime capture before worker admission; see ObservedEventDelivery::enrich_selected_actor.
     [[nodiscard]] bool enrich_selected_actor(Snapshot& snapshot, const protocol_native::Identity& selected) {
-        if (!actor_enricher_) return true; // Engine-free sessions keep their explicitly provided fixture evidence.
-        if (!snapshot || snapshot->generation() != cancellation_.token().generation() || terminal_.load(std::memory_order_acquire)) return false;
-        const auto key = actor_key(selected);
-        const auto found = std::ranges::find_if(snapshot->actors(), [&](const auto& actor) {
-            return actor_key(identity(actor)) == key;
-        });
-        if (found == snapshot->actors().end()) return false;
-        try {
-            auto enriched = actor_enricher_(snapshot, found->form_id());
-            if (!enriched) { push_notification("SYNTH selected actor changed or capture is unavailable; try again"); return false; }
-            // Capture is game-thread owned; cache mutation and retirement are mutually exclusive.
-            const auto observed=std::ranges::find_if(enriched->actors(),[&](const auto& actor){return actor_key(identity(actor))==key;});
-            if (observed!=enriched->actors().end() && observed->enemy_awareness().available) {
-                std::scoped_lock lock{enemy_awareness_mutex_};
-                if (terminal_.load(std::memory_order_acquire) || enriched->generation()!=cancellation_.token().generation()) return false;
-                const auto now=monotonic_milliseconds(core::SnapshotClock::now());
-                enemy_awareness_sampler_.select({observed->form_id(),observed->origin_plugin(),observed->playthrough_id(),observed->name(),observed->race()},enriched->generation().value());
-                const auto cached=enemy_awareness_cache_.observe({observed->form_id(),observed->origin_plugin(),observed->playthrough_id(),observed->name(),observed->race()},
-                    observed->enemy_awareness(),enriched->generation().value(),now);
-                enriched=std::make_shared<const core::RuntimeSnapshot>(enriched->with_actor_details(observed->form_id(),observed->with_enemy_awareness(cached)));
-            }
-            snapshot = std::move(enriched);
-            return true;
-        } catch (const std::exception& error) {
-            push_notification(std::string{"SYNTH selected actor capture: "} + error.what());
-            return false;
-        }
+        return observations_.enrich_selected_actor(snapshot, selected);
     }
 
-    [[nodiscard]] static std::uint64_t monotonic_milliseconds(core::SnapshotClock::time_point now) noexcept {
-        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
-    }
-    ActorEnricher actor_enricher_;
-    std::mutex enemy_awareness_mutex_;
-    core::EnemyAwarenessCache enemy_awareness_cache_;
-    core::EnemyAwarenessSampler enemy_awareness_sampler_;
     std::vector<std::string> active_quest_actors_; // Successful activation ACKs only; bounded, session-owned.
     runtime::GameThreadDispatcher& dispatcher_;
     config::Config configuration_;
@@ -1976,23 +1792,9 @@ private:
     std::optional<PendingDiary> pending_diary_;
     const bool automatic_diary_enabled_;
     core::AutomaticDiaryQueue automatic_diaries_;
-    const bool quest_events_enabled_;
+    // The single quest event buffer. Declared before both borrowers: context_ acknowledges journal
+    // witnesses on its workers, and observations_ owns its scheduling, delivery and stop.
     QuestEventDelivery quest_events_;
-    const bool actor_events_enabled_;
-    ActorEventDelivery actor_events_;
-    std::atomic_size_t actor_event_tasks_{};
-    std::atomic_bool actor_event_failure_reported_{};
-    tasks::TaskLanes::Deadline next_actor_event_attempt_{};
-    core::PlayerEventSampler player_events_;
-    std::optional<core::CancellationSource> player_event_owner_;
-    core::SnapshotClock::time_point next_player_event_attempt_{};
-    std::atomic_size_t player_event_tasks_{};
-    // Serials occupy 53 wire-safe bits; bit 63 atomically marks a terminal rejection instead of an ACK.
-    std::atomic_uint64_t player_event_receipt_{};
-    std::atomic_bool player_event_failure_reported_{};
-    std::atomic_size_t quest_event_tasks_{};
-    std::atomic_bool quest_event_failure_reported_{};
-    tasks::TaskLanes::Deadline next_quest_event_attempt_{};
     tasks::TaskLanes::Deadline next_automatic_diary_attempt_{};
     std::mutex activity_mutex_;
     core::SnapshotClock::time_point last_activity_at_{core::SnapshotClock::now()};
@@ -2030,12 +1832,17 @@ private:
     // flag. Its network tasks capture it and its callbacks capture this session; ~PluginSession joins
     // the network lane first. Dispatcher tasks never capture it.
     ActionExecution actions_;
-    // Declared last: borrows configuration, client, network lane, response accounting, speech,
-    // context, social tasks, the action queue (for the action-then-rechat gates), dialogue, holds,
-    // trace and the terminal/pause flags. Its network tasks capture it and its callbacks capture this
-    // session; ~PluginSession joins the network lane first. Speculative media jobs on the speech lane
-    // capture only the copied line and shared prefetch.
+    // Borrows configuration, client, network lane, response accounting, speech, context, social
+    // tasks, the action queue (for the action-then-rechat gates), dialogue, holds, trace and the
+    // terminal/pause flags. Its network tasks capture it and its callbacks capture this session;
+    // ~PluginSession joins the network lane first. Speculative media jobs on the speech lane capture
+    // only the copied line and shared prefetch.
     RechatContinuation rechat_;
+    // Declared last: borrows configuration, client, network lane, context, quest delivery and the
+    // terminal/pause flags. Its busy, turn and notification callbacks capture this session; busy reads dialogue,
+    // response, action and speech state on the game thread. Its network tasks capture it, and
+    // ~PluginSession joins the network lane first, so no task outlives it.
+    ObservedEventDelivery observations_;
 };
 
 }  // namespace synth::client

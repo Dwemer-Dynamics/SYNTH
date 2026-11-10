@@ -703,30 +703,66 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("session->observe_player_events(std::nullopt)", unavailable)
         sample = entry.split("if (!menu_mode && session->player_event_sample_due(now))", 1)[1].split("if (!menu_mode && session->quest_event_capture_ready())", 1)[0]
         self.assertIn("session.get() == owner_session && runtime->generation() == owner_generation", sample)
-        due = read("src/client/plugin_session.hpp").split("bool player_event_sample_due(", 1)[1].split("void observe_player_events", 1)[0]
+        due = read("src/client/observed_event_delivery.hpp").split("bool player_event_sample_due(", 1)[1].split("std::optional<core::CombatantIdentity> enemy_awareness_capture_target(", 1)[0]
         for forbidden in ("active_responses_", "active_actions_", "playback_", "microphone_", "try_submit", "health()"):
             self.assertNotIn(forbidden, due)
         self.assertIn("std::chrono::seconds{1}", read("src/core/player_event_sampler.hpp"))
 
     def test_player_event_delivery_uses_fresh_context_and_game_thread_receipts(self) -> None:
-        session = read("src/client/plugin_session.hpp")
-        delivery = session.split("bool publish_player_event(Snapshot snapshot)", 1)[1].split("bool activate_target", 1)[0]
+        observations = read("src/client/observed_event_delivery.hpp")
+        delivery = observations.split("bool publish_player_event(Snapshot snapshot)", 1)[1].split("player_reaction(core::SnapshotClock::time_point now)", 1)[0]
         self.assertIn("player_event_receipt_.exchange", delivery)
         self.assertIn("player_events_.acknowledge", delivery)
+        self.assertLess(delivery.index("busy_()"), delivery.index("network_.try_submit("))
+        self.assertIn("player_event_owner_.emplace(current_turn_());", delivery)
         worker = delivery.split("[this, snapshot=", 1)[1]
         self.assertNotIn("player_events_.", worker)
         for expected in ("client_.begin_context_turn()", "snapshot->captured_at() > std::chrono::seconds{2}",
                          "std::nullopt, event)", "player_event_receipt_.store", "cancellation.is_cancelled()"):
             self.assertIn(expected, worker)
+        session = read("src/client/plugin_session.hpp")
+        self.assertIn("{ return observations_.publish_player_event(std::move(snapshot)); }", session)
+        # Delivery state has one owner; the session keeps only cross-feature gates and forwards.
+        for moved in ("quest_events_.", "actor_events_.", "player_events_.", "player_event_receipt_", "player_event_owner_",
+                      "quest_event_tasks_", "actor_event_tasks_", "player_event_tasks_", "next_quest_event_attempt_",
+                      "next_actor_event_attempt_", "next_player_event_attempt_", "enemy_awareness_mutex_",
+                      "enemy_awareness_cache_", "enemy_awareness_sampler_", "actor_enricher_"):
+            self.assertNotIn(moved, session)
+        busy = session.split("observations_{{", 1)[1].split("ObservedEventDelivery observations_;", 1)[0]
+        for expected in ("dialogue_.recording()", "requests_.responses() != 0", "actions_.active() != 0",
+                         "speech_.jobs_active()", "!speech_.playback_idle()", "current_turn_token()"):
+            self.assertIn(expected, busy)
+        self.assertLess(session.index("    RechatContinuation rechat_;"), session.index("    ObservedEventDelivery observations_;"))
+        # One quest buffer, owned by the session and borrowed by both context and observations.
+        self.assertLess(session.index("    QuestEventDelivery quest_events_;"), session.index("    ContextPublication context_;"))
+        self.assertIn("observations_{{configuration_, client_, network_, context_, quest_events_,", session)
+        self.assertIn("    QuestEventDelivery& quest_events_;", observations)
+        self.assertNotIn("acknowledge_journal", observations)
+        stop = session.split("void request_stop() noexcept {", 1)[1].split("voice_samples_.request_stop();", 1)[0]
+        self.assertLess(stop.index("social_.reset();"), stop.index("observations_.stop();"))
+        self.assertLess(stop.index("observations_.stop();"), stop.index("automatic_diaries_.clear();"))
+        retire = observations.split("void stop() noexcept {", 1)[1].split("}", 1)[0]
+        self.assertLess(retire.index("clear_enemy_awareness();"), retire.index("quest_events_.stop();"))
+        self.assertLess(retire.index("quest_events_.stop();"), retire.index("actor_events_.stop();"))
+        context = read("src/client/context_publication.hpp")
+        self.assertIn("if (quest_events_enabled_) quest_events_.acknowledge_journal(owned_snapshot, outcome.context_binding.sequence);", context)
+        for forbidden in ("PluginSession", "RE::", "REL::", "IFalloutRuntime", "dialogue_.", "speech_.", "actions_."):
+            self.assertNotIn(forbidden, observations)
+        enrich = observations.split("bool enrich_selected_actor(", 1)[1].split("private:", 1)[0]
+        self.assertLess(enrich.index("actor_enricher_(snapshot, found->form_id())"), enrich.index("std::scoped_lock lock{enemy_awareness_mutex_}"))
         entry = read("src/flat/plugin_entry.cpp")
         self.assertLess(entry.index("const auto player_history ="), entry.index("const auto combat_bark ="))
 
     def test_player_reactions_are_receipt_gated_fresh_and_one_shot(self) -> None:
         session = read("src/client/plugin_session.hpp")
         reaction = session.split("bool maybe_trigger_player_reaction(", 1)[1].split("private:", 1)[0]
-        for expected in ("player_events_.reaction(now)", "client_.player_reactions_ready()", "snapshot->player().in_combat()",
-                         "select_observation_reactor", "std::chrono::seconds{60}", "player_events_.consume_reaction(serial)"):
+        for expected in ("observations_.player_reaction(now)", "client_.player_reactions_ready()", "snapshot->player().in_combat()",
+                         "select_observation_reactor", "std::chrono::seconds{60}", "observations_.consume_player_reaction(serial)",
+                         "observations_.player_event_tasks() != 0"):
             self.assertIn(expected, reaction)
+        observations = read("src/client/observed_event_delivery.hpp")
+        self.assertIn("return player_events_.reaction(now);", observations)
+        self.assertIn("return player_events_.consume_reaction(serial);", observations)
         for forbidden in (".get()", "begin_context_turn", "publish_snapshot", "RE::", "REL::"):
             self.assertNotIn(forbidden, reaction)
         worker = session.split("bool queue_context_trigger(", 1)[1].split("static std::string make_runtime_session_id", 1)[0]
