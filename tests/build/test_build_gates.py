@@ -758,13 +758,20 @@ class PowerShellBuildScriptTests(unittest.TestCase):
     def test_microphone_turn_publishes_owned_context_before_dialogue(self) -> None:
         session = read("src/client/plugin_session.hpp")
         voice = session.split("bool end_voice_capture(", 1)[1].split("prepare_chat_target(const Snapshot& snapshot)", 1)[0]
-        self.assertLess(voice.index("begin_context_turn()"), voice.index("publish_snapshot(snapshot,"))
-        self.assertLess(voice.index("publish_snapshot(snapshot,"), voice.index("client_.send_audio("))
-        self.assertIn("context_outcome.context_binding, controls", voice)
-        self.assertIn("context_outcome.context_binding", voice)
-        self.assertIn("SYNTH voice context failed:", voice)
         self.assertIn("const auto controls = voice->controls;", voice)
         self.assertNotIn("control_state().selection", voice)
+        self.assertLess(voice.index("enrich_selected_actor(snapshot, target)"), voice.index("requests_.submit_voice("))
+        self.assertLess(voice.index("requests_.submit_voice("), voice.index("dialogue_.own_external_work(actor_key(target))"))
+        requests = read("src/client/dialogue_requests.hpp")
+        voice_request = requests.split("bool submit_voice(", 1)[1].split("private:", 1)[0]
+        self.assertLess(voice_request.index("client_.upload_media("), voice_request.index("begin_context_turn()"))
+        self.assertLess(voice_request.index("begin_context_turn()"), voice_request.index("publish_(snapshot,"))
+        self.assertLess(voice_request.index("publish_(snapshot,"), voice_request.index("client_.send_audio("))
+        self.assertIn("context_outcome.context_binding, controls", voice_request)
+        self.assertIn("SYNTH voice context failed:", voice_request)
+        self.assertIn("SYNTH network queue is full; voice input discarded", voice_request)
+        self.assertIn("holds_.suspend(cancellation);", voice_request)
+        self.assertIn("deadline, std::move(turn),", voice_request)
         dialogue = read("src/client/player_dialogue.hpp")
         recording = dialogue.split("std::optional<VoiceTurn> end_voice_capture(", 1)[1].split("pump_open_microphone(", 1)[0]
         self.assertIn("std::exchange(voice_target_, std::nullopt)", recording)
@@ -787,10 +794,20 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("return queue_text_for_actor(std::move(snapshot), std::move(turn->text), target, turn->controls, turn->intent);", text_admission)
         self.assertIn("dialogue_.admit_text(*snapshot, std::move(text), retained, client_.native_turn_ready(),", text_admission)
         text_turn = session.split("bool queue_text_for_actor(", 1)[1].split("static std::optional<std::string> clipboard_text", 1)[0]
-        self.assertLess(text_turn.index("begin_context_turn()"), text_turn.index("publish_snapshot(snapshot,"))
-        self.assertLess(text_turn.index("publish_snapshot(snapshot,"), text_turn.index("client_.send_text("))
-        self.assertIn("context_outcome.context_binding, controls", text_turn)
-        self.assertIn("context_outcome.context_binding", text_turn)
+        self.assertLess(text_turn.index("enrich_selected_actor(snapshot, target)"), text_turn.index("requests_.submit_text("))
+        self.assertLess(text_turn.index("requests_.submit_text("), text_turn.index("claim_external_work(actor_key(target))"))
+        text_request = requests.split("bool submit_text(", 1)[1].split("bool submit_voice(", 1)[0]
+        self.assertLess(text_request.index("begin_context_turn()"), text_request.index("publish_(snapshot,"))
+        self.assertLess(text_request.index("publish_(snapshot,"), text_request.index("client_.send_text("))
+        self.assertIn("context_outcome.context_binding, controls, intent", text_request)
+        self.assertIn("SYNTH network queue is full; text input discarded", text_request)
+        self.assertIn("deadline, std::move(turn),", text_request)
+        wiring = session.split("requests_{{client_, network_, terminal_, conversation_holds_,", 1)[1].split("speech_{", 1)[0]
+        for expected in ("publish_snapshot(snapshot, target, std::move(cancellation), nullptr, {}, {}, {}, controls)",
+                         "handle_line(line, snapshot, cancellation); }", "return notify_social_input(outcome);"):
+            self.assertIn(expected, wiring)
+        for forbidden in ("RE::", "REL::", "PluginSession", "IFalloutRuntime"):
+            self.assertNotIn(forbidden, requests)
         self.assertIn(".protocol_version = 2", session)
         publication = session.split("RequestOutcome publish_snapshot(", 1)[1].split("selected_target(", 1)[0]
         self.assertIn("client_.publish_context(0,", publication)
@@ -804,12 +821,17 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("invalidate_response(cancellation)", session)
         self.assertIn("{line.request_id, line.line_id}", session)
         self.assertIn("client_.uses_rechat_parent_contract() ? std::optional{rechat.parent}", session)
-        self.assertIn("deadline, begin_player_turn(actor_key(target)),", text_turn)
-        self.assertIn("deadline, voice->turn,", voice)
+        self.assertIn("deadline, begin_player_turn(actor_key(target)))", text_turn)
+        self.assertIn("deadline, voice->turn))", voice)
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
         # Includes deferred prefetch delivery and the separately owned social-task progress response.
-        self.assertEqual(session.count("track_activity(active_responses_,"), 9)
+        self.assertEqual(session.count("requests_.track_response("), 7)
+        self.assertEqual(requests.count("track_activity(responses_,"), 3)
+        self.assertIn("std::size_t responses() const noexcept { return responses_.load(std::memory_order_acquire); }", requests)
+        self.assertNotIn("std::atomic_size_t& responses()", requests)
+        self.assertNotIn("requests_.responses().", session)
+        self.assertNotIn("active_responses_", session)
         self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
         self.assertIn('pending_actions_.empty() && !rechat_capture_', session)
         self.assertIn('prefetch->append(line);', session)
@@ -1308,8 +1330,10 @@ class ConversationApproachGates(unittest.TestCase):
 
     def test_approach_is_player_input_only_and_actions_revoke_before_queueing(self):
         source=read('src/client/plugin_session.hpp')
-        self.assertEqual(2,source.count('hold_conversation_actor(target,cancellation,controls.mode)'))
-        self.assertIn('conversation_approach_mode(mode)',source)
+        requests=read('src/client/dialogue_requests.hpp')
+        self.assertEqual(2,requests.count('hold_conversation_actor(target,cancellation,controls.mode)'))
+        self.assertIn('conversation_approach_mode(mode)',requests)
+        self.assertNotIn('hold_conversation_actor',source)
         actions=source[source.index('const auto* action = std::get_if<protocol_native::Action>'):source.index('// Continuations retain the same rollback owner')]
         self.assertLess(actions.index('conversation_holds_.suspend(cancellation)'),actions.index('pending_actions_.push_back'))
         modes=read('src/client/conversation_holds.hpp')
