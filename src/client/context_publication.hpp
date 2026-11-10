@@ -252,6 +252,10 @@ public:
         if (save_context_) save_context_->stop_writer(save_binding_.epoch);
     }
 
+    [[nodiscard]] bool save_writer_current() const {
+        return !save_context_ || save_context_->writer_current(save_binding_.epoch);
+    }
+
     // A bound save requires an ACK as part of a checkpoint; without one, publication alone suffices.
     [[nodiscard]] bool save_bound() const noexcept { return save_context_ != nullptr; }
 
@@ -375,6 +379,8 @@ public:
             throw std::invalid_argument{"actor event context does not own this fragment"};
         if(social_pair&&(!client_.social_tasks_ready()||actor_events||quest_events||player_event||!target||
             !social_wire_actor_matches(*target,social_pair->performer)))throw std::invalid_argument{"invalid saved visit context"};
+        // A reload, revert, retirement or replacement revoked this writer: its snapshot is never published.
+        if (!save_writer_current()) return RequestOutcome{RequestStatus::stale_response, {}, {}, "save writer revoked"};
 
         std::vector<protocol_native::Identity> audience;
         std::vector<protocol_native::ActorState> actor_states;
@@ -546,6 +552,9 @@ public:
                 poi.display_name, poi.kind, poi.position.x, poi.position.y, poi.position.z,
                 poi.distance, poi.locked, poi.looking_at});
         }
+        // Rechecked immediately before the HTTP send and after its response, ahead of any publication-derived
+        // state, ACK or notification. A request already in flight may have reached the server.
+        if (!save_writer_current()) return RequestOutcome{RequestStatus::stale_response, {}, {}, "save writer revoked"};
         auto outcome = client_.publish_context(0, snapshot.player().playthrough_id(),
                                        identity(snapshot.player()),
                                        target,
@@ -564,6 +573,11 @@ public:
                                        protocol_native::retained_collection_observation(
                                            snapshot.actors_observation(), snapshot.actors().size(), audience.size()), quest_events, player_event,
                                        actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt);
+        if (!cancellation.is_cancelled() && !save_writer_current()) {
+            outcome.status = RequestStatus::stale_response;
+            outcome.detail = "save writer revoked";
+            return outcome;
+        }
         if (outcome.status == RequestStatus::complete && !cancellation.is_cancelled() &&
             !terminal_.load(std::memory_order_acquire)) {
             if (quest_events_enabled_) quest_events_.acknowledge_journal(owned_snapshot, outcome.context_binding.sequence);
@@ -642,6 +656,16 @@ private:
                 if (cancellation.is_cancelled()) {
                     return;
                 }
+                // Checked immediately before and after each HTTP exchange. A cancelled or terminal task stays
+                // silent; a revoked writer also fails initialization but never notifies or configures.
+                const auto stopped = [&] {
+                    return cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire);
+                };
+                const auto revoked = [&] {
+                    if (save_writer_current()) return false;
+                    if (initialize_first) initialization_failed_.store(true, std::memory_order_release);
+                    return true;
+                };
 
                 try {
                     if (initialize_first) {
@@ -655,8 +679,10 @@ private:
                                 plugin.compile_index, plugin.small_file_compile_index,
                                 plugin.partial_index});
                         }
+                        if (stopped() || revoked()) return;
                         const auto outcome = client_.initialize(
-                            snapshot->generation().value(), hmd_fresh, plugins);
+                            snapshot->generation().value(), hmd_fresh, plugins, cancellation);
+                        if (stopped() || revoked()) return;
                         if (outcome.status != RequestStatus::complete) {
                             notify_("SYNTH server initialization failed: " + outcome.detail);
                             initialization_failed_.store(true, std::memory_order_release);
@@ -669,13 +695,17 @@ private:
                         voice_samples_.configure(std::move(voice_plugins));
                         return;
                     }
+                    if (stopped() || revoked()) return;
                     const auto outcome = publish(snapshot, target, cancellation);
+                    if (stopped() || revoked()) return;
                     if (outcome.status == RequestStatus::complete) {
                         notify_("SYNTH context updated");
                     } else {
                         notify_("SYNTH context update failed: " + outcome.detail);
                     }
                 } catch (const std::exception& error) {
+                    // Stale, cancelled or terminal work stays silent; a revoked writer fails only its own init.
+                    if (stopped() || revoked()) return;
                     notify_(std::string{"SYNTH session: "} + error.what());
                     if (initialize_first) {
                         initialization_failed_.store(true, std::memory_order_release);

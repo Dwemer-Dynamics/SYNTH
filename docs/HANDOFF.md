@@ -40,6 +40,66 @@ inventories proving donor zero and player one. Taking ordinary items from the
 player pack is now supported by the installed direct transfer; the general gift menu remains a candidate; reverse caps transfer works.
 See ACTION-INVENTORY-OBSERVATIONS.md.
 
+## SYNTH-owned playthrough identity
+
+The shared `playthrough_id` is now a SYNTH-owned random UUID v4, not the engine
+`currentPlayerID` (which remains a readiness check only) and not a server checkpoint.
+It is drawn once with the system-preferred BCrypt generator at NewGame, or at a
+successful PostLoadGame that needs a fresh identity, outside the store lock and never
+in a frame or co-save callback. The co-save keeps one bounded SCTX version 2 record:
+lane, UUID and an optional exact saved checkpoint for that UUID. It is written on every
+save, even before any session, network or ACK; a failed write logs once and is not retried.
+
+Each load callback claims the open load when it starts, before reading, and stages only into
+that load, including on failure or exception. A second callback in one load is a duplicate.
+PostLoadGame is consumed once: the load result is the pointer value itself, which must be
+exactly 1 with dataLen exactly 1 and is never dereferenced. A valid staged record is activated
+in one locked step. Otherwise a fresh UUID is drawn outside the lock and is discarded if any
+later world change (another load, NewGame or a Revert) happened meanwhile. A PostLoadGame
+that arrives while a callback is still reading, a repeated PostLoadGame, or a reader left
+over from an earlier load cannot restore or publish anything. Only an identity actually
+resolved for the current world makes SYNTH ready; a failed, stale or random-failed
+resolution leaves it closed. A NewGame whose draw went stale has no lifecycle effect at all:
+the later world change that superseded it already did its own teardown, so a stale earlier
+completion cannot tear down a newer resolved world. A random failure (or exception) at NewGame
+still tears the old world down without readiness.
+
+A missing callback, legacy version 1, malformed, duplicate, unsupported, other-lane,
+incomplete or revert-contradicted record gets a fresh UUID with no saved checkpoint and one
+log line. Earlier server rows are not rekeyed or deleted. An unstamped save therefore gets
+a new identity, a separate history, on every load until a normal save made from it stores one.
+
+F4SE (flat 0.7.9 and VR 0.6.21) publishes NewGame only after the original NewGame_Internal
+returns, so any Revert inside the original precedes that publication and happens before the
+new identity exists. The exact engine event order is still an in-game acceptance item. Any later Revert outside
+a load revokes the identity at once, even if no session ever bound and SYNTH is offline or
+disabled. Capture and dispatch close immediately, and the session teardown goes through the
+existing deferred lifecycle path. Inside an open load a Revert keeps the load but rejects any
+record a callback has already begun to stage.
+
+Every resolution, load and revert also changes a lifetime stamp. The bootstrap reads it just
+before its capture and binds only if it still matches, so a snapshot from before a reload is
+rejected even when the reload restored the same UUID. VR also uses the lifetime as its
+capture epoch, so ordinary capture and actor enrichment never cross a PreLoadGame, NewGame or
+Revert; flat keeps its picked-reference stamp, which those events invalidate at once.
+
+The session host checks the world lifetime and the writer before it creates a session, before
+it queues initialization, when it publishes the result and when the game thread takes it.
+Host initialization only queues the init request; it never waits for HTTP. A terminal result
+without a session (an error, a rejected or throwing initialization, a disabled runtime) needs
+only the current host request and the same world lifetime, so it still completes the game
+thread's pending request after its own teardown or a same-world replacement revoked the
+writer. A live session additionally needs its exact writer; one that lost it in the same world
+is retired and reported as an error. Context publication and initialization check
+cancellation, termination and the writer immediately before and after each HTTP exchange:
+a revoked writer sends nothing, and a response that arrives after revocation produces no
+publication state, ACK, notification or initialization side effect. Initialization now
+carries its task's cancellation into the client. A request already in flight may have
+reached the server. Same-world replacement keeps the UUID and latest ACK under
+a new writer epoch and runtime session; the C1 explicit ACK and revision rules are unchanged.
+No protocol, schema or endpoint changes. The main-menu revert and an early autosave are not
+verified in game. See ALPHA-ACCEPTANCE.md.
+
 ## Current handoff priorities
 
 Rangroo's handoff scope is bios, world knowledge, diaries, actions, and basic

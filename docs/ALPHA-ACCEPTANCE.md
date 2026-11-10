@@ -25,6 +25,27 @@
   reply starts mid-speech; mute, Stop and load cancel capture without leaving it suppressed.
   VR, separately: push-to-talk and open microphone behave as before.
 
+## SYNTH-owned playthrough identity
+
+Check flat and VR separately.
+
+- [ ] A new game saved before the server connects reloads with the same identity (one
+  "restored" log line), and with its saved checkpoint after a later ACK.
+- [ ] Early autosave: the autosave right after a new game, before any ACK, already stores
+  the identity; reloading it logs "restored" with no saved checkpoint.
+- [ ] A pre-identity (legacy or unstamped) save logs one separation line and gets a fresh
+  identity, a separate history, on every load until a normal save from it stores one;
+  earlier server memory is untouched.
+- [ ] Wrong lane: a save last written by the other lane logs one separation line and gets
+  a fresh UUID with no saved checkpoint.
+- [ ] Failed load and return to the main menu leave no identity: capture and SYNTH stay
+  closed until the next successful load or new game.
+- [ ] Engine event order: NewGame is published after the original NewGame_Internal returns
+  (any Revert inside it logs nothing and the new identity still resolves), and PostLoadGame
+  reports success as pointer value 1 with dataLen 1.
+- [ ] Reloading during the first connection (init or context in flight) shows no "SYNTH
+  connected" or context notice from the old world, and SYNTH reconnects in the new one.
+
 ## Generic gift inventory exchange
 
 - [x] Install the reviewed coordinated gift-menu DLL/PEX/backend update; installed hashes and server health verified.

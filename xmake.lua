@@ -108,7 +108,7 @@ if has_config("build_flat") then
         -- Header-only consumer API: no import library, resolved at runtime.
         add_includedirs(menuframework_dir)
         add_deps("commonlibf4")
-        add_syslinks("winhttp", "xaudio2", "winmm", "shell32", "windowscodecs", "ole32", "oleaut32", "gdi32")
+        add_syslinks("winhttp", "xaudio2", "winmm", "shell32", "windowscodecs", "ole32", "oleaut32", "gdi32", "bcrypt")
         add_defines("SYNTH_WITH_F4SE=1", "WIN32_LEAN_AND_MEAN", "NOMINMAX",
                     "_WIN32_WINNT=0x0A00", "WINVER=0x0A00")
     target_end()

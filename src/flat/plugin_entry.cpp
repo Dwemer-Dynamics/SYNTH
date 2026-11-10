@@ -389,13 +389,15 @@ void invalidate_sessions(bool discard_speech = false) noexcept {
     retire_session(discard_speech);
 }
 
+// `lifetime` is read immediately before the bootstrap capture: a snapshot from an earlier lifetime of the
+// same restored UUID cannot bind a writer.
 void queue_session_initialization(
-    const std::shared_ptr<const synth::core::RuntimeSnapshot>& snapshot) {
+    const std::shared_ptr<const synth::core::RuntimeSnapshot>& snapshot, std::uint64_t lifetime) {
     if (!snapshot || pending_session_request != 0 || runtime_disabled || !session_host ||
         !dispatcher) {
         return;
     }
-    pending_session_request = session_host->request_initialize(snapshot, *dispatcher,
+    pending_session_request = session_host->request_initialize(snapshot, *dispatcher, lifetime,
         synth::adapters::FlatRestEvents::available(), synth::adapters::FlatQuestEvents::available(),
         synth::adapters::FlatActorEvents::available());
     if (pending_session_request != 0) {
@@ -487,8 +489,9 @@ void reload_settings_if_changed(synth::core::SnapshotClock::time_point now, bool
     if (runtime) face_animation.reset(*runtime);
     voice_capture_down = false;
     pip_vision_gesture.reset();
+    const auto lifetime = synth::adapters::commonlib::save_context_store.lifetime();
     queue_session_initialization(runtime->capture_snapshot(
-        now, synth::runtime::RuntimeCapturePurpose::bootstrap));
+        now, synth::runtime::RuntimeCapturePurpose::bootstrap), lifetime);
     present_notification("SYNTH settings reload queued");
 }
 
@@ -716,10 +719,11 @@ void pump_runtime_impl() {
         if (!session) {
             if (pending_session_request != 0 || runtime_disabled) return;
             REX::INFO("SYNTH runtime: beginning stable menu-free bootstrap capture");
+            const auto lifetime = synth::adapters::commonlib::save_context_store.lifetime();
             auto snapshot = runtime->capture_snapshot(
                 now, synth::runtime::RuntimeCapturePurpose::bootstrap);
             REX::INFO("SYNTH runtime: bootstrap capture complete");
-            queue_session_initialization(snapshot);
+            queue_session_initialization(snapshot, lifetime);
             // Trace the next pump after the handoff that previously froze. The
             // coordinator now owns configuration I/O, worker startup and HTTP.
             if (pump_trace == PumpTrace::idle) pump_trace = PumpTrace::armed;
@@ -1260,6 +1264,63 @@ void apply_lifecycle(LifecycleAction action) {
     }
 }
 
+// One line per NewGame/PostLoadGame resolution. The UUID itself is not logged.
+void report_identity(const synth::core::ResolvedIdentity& identity) noexcept {
+    using synth::core::IdentityResolution;
+    try {
+        switch (identity.resolution) {
+        case IdentityResolution::restored:
+            REX::INFO("SYNTH playthrough identity restored from the loaded save");
+            break;
+        case IdentityResolution::new_game:
+            REX::INFO("SYNTH playthrough identity created for a new game");
+            break;
+        case IdentityResolution::separated:
+            REX::WARN("SYNTH playthrough identity: {}; this world starts a separate history and does not continue "
+                      "earlier server memory", synth::core::to_string(identity.cause));
+            break;
+        case IdentityResolution::random_failed:
+            REX::WARN("SYNTH playthrough identity unavailable: system random generation failed; SYNTH stays "
+                      "inactive in this world");
+            break;
+        case IdentityResolution::load_failed:
+            REX::INFO("SYNTH playthrough identity: the load failed; no identity is active");
+            break;
+        case IdentityResolution::stale:
+            break;
+        }
+    } catch (...) {}
+}
+
+// Callback-time lifecycle work: clear event sources now, then hand teardown to the game-thread pump.
+void defer_lifecycle(LifecycleAction action) noexcept {
+    if (action == LifecycleAction::invalidate || action == LifecycleAction::invalidate_and_ready || action == LifecycleAction::stop) {
+        synth::adapters::FlatInventoryChanges::invalidate();
+        synth::adapters::FlatActorEvents::invalidate();
+        synth::adapters::FlatPickedReference::invalidate();
+        synth::adapters::FlatRestEvents::invalidate();
+        synth::adapters::FlatQuestEvents::invalidate();
+    }
+    if (action==LifecycleAction::invalidate || action==LifecycleAction::invalidate_and_ready || action==LifecycleAction::stop) {
+        synth::integration::external_requests.set_available(false);
+        synth::radio::probe_mailbox.invalidate();
+    }
+    deferred_lifecycle.push(action);
+}
+
+// Revert outside a load already revoked the identity, which closes capture and dispatch at once; the
+// session teardown follows the existing deferred lifecycle path.
+void on_identity_revoked() noexcept {
+    defer_lifecycle(lifecycle.handle(synth::adapters::LifecycleEvent::return_to_main_menu));
+}
+
+void on_save_write_failed() noexcept {
+    try {
+        REX::WARN("SYNTH playthrough identity: the co-save record could not be written; loading this save "
+                  "later starts a separate history");
+    } catch (...) {}
+}
+
 void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
     if (message == nullptr) {
         return;
@@ -1278,38 +1339,51 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
         synth::ui::MenuFramework::register_surface();
         return;
     case F4SE::MessagingInterface::kPreLoadGame:
-        (void)synth::adapters::commonlib::save_context_store.reset();
+        synth::adapters::commonlib::save_context_store.begin_load();
         action = lifecycle.handle(synth::adapters::LifecycleEvent::pre_load_game);
         break;
-    case F4SE::MessagingInterface::kPostLoadGame:
-        if (message->data == nullptr) {
-            (void)synth::adapters::commonlib::save_context_store.reset();
-            return;
-        }
+    case F4SE::MessagingInterface::kPostLoadGame: {
+        // The load result is the pointer value itself: exactly 1 with dataLen exactly 1. It is never
+        // dereferenced, and any other value is a failed load.
+        const auto loaded = message->dataLen == 1 && reinterpret_cast<std::uintptr_t>(message->data) == 1;
+        synth::core::ResolvedIdentity identity{synth::core::IdentityResolution::stale};
+        try {
+            identity = synth::adapters::commonlib::save_context_store.finish_load(
+                loaded, synth::adapters::commonlib::system_random_identity);
+        } catch (...) {}
+        report_identity(identity);
+        // Only a resolved current identity reopens the world; a failed, stale or repeated PostLoadGame
+        // leaves PreLoadGame's teardown in place and capture closed.
+        if (!synth::core::identity_resolved(identity)) return;
         action = lifecycle.handle(synth::adapters::LifecycleEvent::post_load_game);
         break;
-    case F4SE::MessagingInterface::kNewGame:
-        (void)synth::adapters::commonlib::save_context_store.reset();
-        action = lifecycle.handle(synth::adapters::LifecycleEvent::new_game);
+    }
+    case F4SE::MessagingInterface::kNewGame: {
+        synth::core::ResolvedIdentity identity{synth::core::IdentityResolution::stale};
+        try {
+            identity = synth::adapters::commonlib::save_context_store.start_new_game(
+                synth::adapters::commonlib::system_random_identity);
+        } catch (...) {
+            // No identity was produced: fail closed and tear the old world down, as for random_failed.
+            identity = {synth::core::IdentityResolution::random_failed};
+        }
+        report_identity(identity);
+        // A stale outcome was superseded by a later world change that owns its own lifecycle, so it has none.
+        // Without an identity the old world is still torn down, but nothing becomes ready.
+        const auto outcome = synth::core::new_game_lifecycle(identity);
+        if (outcome == synth::core::NewGameLifecycle::none) return;
+        action = lifecycle.handle(outcome == synth::core::NewGameLifecycle::ready
+                                      ? synth::adapters::LifecycleEvent::new_game
+                                      : synth::adapters::LifecycleEvent::return_to_main_menu);
         break;
+    }
     case F4SE::MessagingInterface::kGameDataReady:
         action = lifecycle.handle(synth::adapters::LifecycleEvent::game_data_ready);
         break;
     default:
         return;
     }
-    if (action == LifecycleAction::invalidate || action == LifecycleAction::invalidate_and_ready || action == LifecycleAction::stop) {
-        synth::adapters::FlatInventoryChanges::invalidate();
-        synth::adapters::FlatActorEvents::invalidate();
-        synth::adapters::FlatPickedReference::invalidate();
-        synth::adapters::FlatRestEvents::invalidate();
-        synth::adapters::FlatQuestEvents::invalidate();
-    }
-    if (action==LifecycleAction::invalidate || action==LifecycleAction::invalidate_and_ready || action==LifecycleAction::stop) {
-        synth::integration::external_requests.set_available(false);
-        synth::radio::probe_mailbox.invalidate();
-    }
-    deferred_lifecycle.push(action);
+    defer_lifecycle(action);
 }
 
 }  // namespace
@@ -1357,7 +1431,7 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* load) {
     } else {
         REX::WARN("SYNTH native fault recorder could not open its diagnostic output");
     }
-    if (!synth::adapters::commonlib::register_save_context()) return false;
+    if (!synth::adapters::commonlib::register_save_context({on_identity_revoked, on_save_write_failed})) return false;
     if (!synth::adapters::commonlib::register_papyrus_api())
         REX::WARN("SYNTH Papyrus registration unavailable; native dialogue remains enabled");
     const auto* messaging = F4SE::GetMessagingInterface();
