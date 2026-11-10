@@ -386,26 +386,47 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertNotIn("session.reset()", pump_body)
 
         session = read("src/client/plugin_session.hpp")
+        delivery = read("src/client/speech_delivery.hpp")
         # Queue rejection/expiry/discard must release all admission-time activity.
-        for counter in ("speech_jobs_", "active_actions_", "halt_requests_"):
-            self.assertIn(f"tasks::TaskLanes::track_activity({counter},", session)
-            self.assertNotIn(f"{counter}.fetch_add(", session)
-            self.assertNotIn(f"{counter}.fetch_sub(", session)
+        for counter, source in (("speech_jobs_", delivery), ("active_actions_", session), ("halt_requests_", session)):
+            self.assertIn(f"tasks::TaskLanes::track_activity({counter},", source)
+            self.assertNotIn(f"{counter}.fetch_add(", source)
+            self.assertNotIn(f"{counter}.fetch_sub(", source)
         destructor = session[session.index("~PluginSession()") : session.index(
             "[[nodiscard]] bool initialize(")]
         self.assertIn("network_.shutdown(tasks::ShutdownMode::cancel_pending);", destructor)
-        self.assertIn("speech_.shutdown(tasks::ShutdownMode::cancel_pending);", destructor)
-        self.assertIn('tasks::TaskLanes speech_{{tasks::LaneConfig{"speech", 16, 4, 3}}, 1};', session)
-        speech = session.split("void queue_speech(", 1)[1].split("void enqueue_prepared_speech(", 1)[0]
+        # The network lane, which carries receipt drains into the speech owner, is joined first.
+        teardown = [destructor.index(step) for step in (
+            "request_stop();", "microphone_.cancel();", "transport_.cancel_all();", "network_.shutdown(",
+            "speech_.join_jobs();", "control_.shutdown(", "speech_.halt_playback();")]
+        self.assertEqual(teardown, sorted(teardown))
+        fallback = delivery.split("~SpeechDelivery() {", 1)[1].split("}", 1)[0]
+        self.assertLess(fallback.index("join_jobs();"), fallback.index("halt_playback();"))
+        self.assertIn("void join_jobs() noexcept { speech_.shutdown(tasks::ShutdownMode::cancel_pending); }", delivery)
+        self.assertIn('tasks::TaskLanes speech_{{tasks::LaneConfig{"speech", 16, 4, 3}}, 1};', delivery)
+        self.assertIn("SpeechDelivery speech_;", session)
+        self.assertLess(session.index("std::deque<std::string> notifications_;"), session.index("SpeechDelivery speech_;"))
+        speech = delivery.split("void queue_speech(", 1)[1].split("void enqueue_prepared_speech(", 1)[0]
         self.assertIn("speech_.try_submit(", speech)
         self.assertNotIn("network_.try_submit(", speech)
-        speculative = speech.split("void prepare_rechat_media(", 1)[1]
+        speculative = delivery.split("void prepare_rechat_media(", 1)[1].split("private:", 1)[0]
+        self.assertIn("speech_.try_submit(", speculative)
         self.assertNotIn("playback_.enqueue(", speculative)
         self.assertNotIn("captions_.enqueue(", speculative)
         self.assertIn("prefetch->finish_media(std::move(bytes))", speculative)
         self.assertIn("prefetch->prepared_media(line.line_id)", speech)
-        self.assertIn("speech_.discard_pending();", session)
-        self.assertIn("speech_.discard_cancelled();", session)
+        self.assertIn("{ return speech_.discard_pending(); }", delivery)
+        self.assertIn("{ return speech_.discard_cancelled(); }", delivery)
+        hard_halt = session.split("void hard_halt() noexcept", 1)[1].split("const auto submitted", 1)[0]
+        halt_order = [hard_halt.index(step) for step in (
+            "speech_.halt_playback();", "dispatcher_.discard_pending();", "(void)network_.discard_pending();",
+            "(void)speech_.discard_pending_jobs();")]
+        self.assertEqual(halt_order, sorted(halt_order))
+        turn = session.split("core::CancellationToken begin_player_turn(", 1)[1].split("return turn;", 1)[0]
+        turn_order = [turn.index(step) for step in (
+            "(void)network_.discard_cancelled();", "(void)speech_.discard_cancelled_jobs();",
+            "external_owner_.begin(std::move(actor));", "cancel_interrupted_turn();", "speech_.interrupt_playback();")]
+        self.assertEqual(turn_order, sorted(turn_order))
         self.assertNotIn("retire_remote_session", destructor)
         host = read("src/client/plugin_session_host.hpp")
         self.assertIn("retire_and_destroy(retired)", host)
@@ -782,7 +803,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
         self.assertIn('pending_actions_.empty() && !rechat_capture_', session)
         self.assertIn('prefetch->append(line);', session)
-        self.assertIn('if (prefetch->claim_media(line)) prepare_rechat_media(line, prefetch);', session)
+        self.assertIn('if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);', session)
         capture_target = session.split('rechat_capture_target() {', 1)[1].split('void submit_rechat_capture(', 1)[0]
         self.assertIn('if (runtime_paused() || player_voice_active()) return {};', capture_target)
         voice_priority = session.split('bool player_voice_active() const {', 1)[1].split('bool ambient_mode_ready()', 1)[0]
@@ -805,7 +826,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('!available(action->actor)', release)
         self.assertIn('!available(*action->target)', release)
         self.assertIn('prefetch->cancel(); return;', release)
-        self.assertIn("configuration_.audio.post_clip_ms, cancellation", session)
+        self.assertIn("audio_.post_clip_ms, cancellation", read("src/client/speech_delivery.hpp"))
         admission = session.split("core::CancellationToken begin_player_turn(std::string actor = {})", 1)[1].split(
             "request_timeout_ms()", 1)[0]
         self.assertNotIn("transport_", admission)
@@ -1215,7 +1236,7 @@ class WaitPackageGates(unittest.TestCase):
         session = read('src/client/plugin_session.hpp')
         method = session[session.index('void set_runtime_paused(bool paused)'):session.index('bool runtime_paused() const')]
         self.assertNotIn('push_notification', method)
-        self.assertIn('playback_.set_paused', method)
+        self.assertIn('speech_.set_paused', method)
         self.assertIn('cancel_voice_capture()', method)
         cancellation = session.split('void cancel_voice_capture()', 1)[1].split('void bind_voice_target(', 1)[0]
         for operation in ('microphone_.cancel()', 'open_mic_voice_detected_ = false',
