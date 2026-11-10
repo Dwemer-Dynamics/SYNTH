@@ -397,7 +397,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertIn("network_.shutdown(tasks::ShutdownMode::cancel_pending);", destructor)
         # The network lane, which carries receipt drains into the speech owner, is joined first.
         teardown = [destructor.index(step) for step in (
-            "request_stop();", "microphone_.cancel();", "transport_.cancel_all();", "network_.shutdown(",
+            "request_stop();", "dialogue_.cancel_microphone();", "transport_.cancel_all();", "network_.shutdown(",
             "speech_.join_jobs();", "control_.shutdown(", "speech_.halt_playback();")]
         self.assertEqual(teardown, sorted(teardown))
         fallback = delivery.split("~SpeechDelivery() {", 1)[1].split("}", 1)[0]
@@ -424,9 +424,12 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertEqual(halt_order, sorted(halt_order))
         turn = session.split("core::CancellationToken begin_player_turn(", 1)[1].split("return turn;", 1)[0]
         turn_order = [turn.index(step) for step in (
-            "(void)network_.discard_cancelled();", "(void)speech_.discard_cancelled_jobs();",
-            "external_owner_.begin(std::move(actor));", "cancel_interrupted_turn();", "speech_.interrupt_playback();")]
+            "dialogue_.replace_turn();", "(void)network_.discard_cancelled();", "(void)speech_.discard_cancelled_jobs();",
+            "dialogue_.begin_external(std::move(actor));",
+            "dialogue_.cancel_interrupted_turn();", "speech_.interrupt_playback();")]
         self.assertEqual(turn_order, sorted(turn_order))
+        self.assertLess(session.index("std::deque<std::string> notifications_;"), session.index("PlayerDialogue dialogue_;"))
+        self.assertLess(session.index("PlayerDialogue dialogue_;"), session.index("SpeechDelivery speech_;"))
         self.assertNotIn("retire_remote_session", destructor)
         host = read("src/client/plugin_session_host.hpp")
         self.assertIn("retire_and_destroy(retired)", host)
@@ -734,8 +737,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
     def test_combat_interrupts_a_turn_without_retiring_the_runtime_session(self) -> None:
         session = read("src/client/plugin_session.hpp")
         interruption = session.split("void interrupt_dialogue_for_combat()", 1)[1].split("void hard_halt()", 1)[0]
-        for expected in ("cancel_voice_capture()", "external_owner_.owner()",
-                         'begin_player_turn(actor.value_or(""))', "external_owner_.begin(std::move(actor))", "mark_activity()"):
+        for expected in ("cancel_voice_capture()", "dialogue_.external_owner()",
+                         'begin_player_turn(actor.value_or(""))', "dialogue_.begin_external(std::move(actor))", "mark_activity()"):
             self.assertIn(expected, interruption)
         for forbidden in ("terminal_.store", "halting_.store", "cancel_all", "hard_halt(", "retire", "invalidate",
                           "active_quest_actors_.clear", "conversation_cooldowns_.clear", "dispatcher_.discard_pending"):
@@ -760,10 +763,15 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("context_outcome.context_binding, controls", voice)
         self.assertIn("context_outcome.context_binding", voice)
         self.assertIn("SYNTH voice context failed:", voice)
-        self.assertIn("std::exchange(voice_target_, std::nullopt)", voice)
-        self.assertIn("conversation_target(*snapshot, controls, &*retained)", voice)
-        self.assertIn("const auto controls = voice_controls_", voice)
+        self.assertIn("const auto controls = voice->controls;", voice)
         self.assertNotIn("control_state().selection", voice)
+        dialogue = read("src/client/player_dialogue.hpp")
+        recording = dialogue.split("std::optional<VoiceTurn> end_voice_capture(", 1)[1].split("pump_open_microphone(", 1)[0]
+        self.assertIn("std::exchange(voice_target_, std::nullopt)", recording)
+        self.assertIn("conversation_target(*snapshot, controls, &*retained,", recording)
+        self.assertIn("const auto controls = voice_controls_", recording)
+        self.assertIn("voice_turn_};", recording)
+        self.assertNotIn("current_controls()", recording)
         for lane in ("flat", "vr"):
             entry = read(f"src/{lane}/plugin_entry.cpp")
             self.assertIn("session->begin_voice_capture(snapshot)", entry)
@@ -776,7 +784,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
             self.assertIn("session->cancel_voice_capture()", capture)
             self.assertIn("voice_capture_down = false", capture)
         text_admission = session.split("bool submit_text(", 1)[1].split("bool external_ready()", 1)[0]
-        self.assertIn("return queue_text_for_actor(std::move(snapshot),std::move(text),target, controls, intent);", text_admission)
+        self.assertIn("return queue_text_for_actor(std::move(snapshot), std::move(turn->text), target, turn->controls, turn->intent);", text_admission)
+        self.assertIn("dialogue_.admit_text(*snapshot, std::move(text), retained, client_.native_turn_ready(),", text_admission)
         text_turn = session.split("bool queue_text_for_actor(", 1)[1].split("static std::optional<std::string> clipboard_text", 1)[0]
         self.assertLess(text_turn.index("begin_context_turn()"), text_turn.index("publish_snapshot(snapshot,"))
         self.assertLess(text_turn.index("publish_snapshot(snapshot,"), text_turn.index("client_.send_text("))
@@ -796,8 +805,9 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("{line.request_id, line.line_id}", session)
         self.assertIn("client_.uses_rechat_parent_contract() ? std::optional{rechat.parent}", session)
         self.assertIn("deadline, begin_player_turn(actor_key(target)),", text_turn)
-        self.assertIn("deadline, voice_turn_,", voice)
-        self.assertIn("voice_turn_ = begin_player_turn();", session)
+        self.assertIn("deadline, voice->turn,", voice)
+        self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
+        self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
         # Includes deferred prefetch delivery and the separately owned social-task progress response.
         self.assertEqual(session.count("track_activity(active_responses_,"), 9)
         self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
@@ -806,13 +816,14 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);', session)
         capture_target = session.split('rechat_capture_target() {', 1)[1].split('void submit_rechat_capture(', 1)[0]
         self.assertIn('if (runtime_paused() || player_voice_active()) return {};', capture_target)
-        voice_priority = session.split('bool player_voice_active() const {', 1)[1].split('bool ambient_mode_ready()', 1)[0]
+        self.assertIn('bool player_voice_active() const { return dialogue_.voice_active(); }', session)
+        voice_priority = dialogue.split('bool voice_active() const {', 1)[1].split('}', 1)[0]
         self.assertIn('ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_)', voice_priority)
         ambient_voice = read('src/client/ambient_exchange.hpp').split('bool ambient_player_voice_active(', 1)[1].split('bool ambient_actor_class_supported(', 1)[0]
         self.assertIn('return recording && (!passive_open_mic || voice_detected);', ambient_voice)
-        manual_voice = session.split('bool begin_voice_capture(', 1)[1].split('void cancel_voice_capture()', 1)[0]
+        manual_voice = dialogue.split('bool begin_voice_capture(', 1)[1].split('void cancel_voice_capture()', 1)[0]
         self.assertIn('open_mic_passive_recording_ = false;', manual_voice)
-        passive_voice = session.split('MicrophoneEvent pump_open_microphone(', 1)[1].split('[[nodiscard]]', 1)[0]
+        passive_voice = dialogue.split('OpenMicrophonePump pump_open_microphone(', 1)[1].split('[[nodiscard]]', 1)[0]
         self.assertIn('open_mic_passive_recording_ = true;', passive_voice)
         self.assertNotIn('is_cancelled() || runtime_paused()', capture_target)
         self.assertIn('diagnostics::ConversationStage::prefetch_received', session)
@@ -830,7 +841,11 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         admission = session.split("core::CancellationToken begin_player_turn(std::string actor = {})", 1)[1].split(
             "request_timeout_ms()", 1)[0]
         self.assertNotIn("transport_", admission)
-        self.assertIn("client_.take_interrupted_turn()", admission)
+        self.assertIn("dialogue_.cancel_interrupted_turn();", admission)
+        cancel_dispatch = dialogue.split("void cancel_interrupted_turn() {", 1)[1].split("void begin_external(", 1)[0]
+        self.assertIn("client_.take_interrupted_turn()", cancel_dispatch)
+        self.assertNotIn("transport_", cancel_dispatch)
+        self.assertNotIn("shutdown", cancel_dispatch)
         capabilities = session.split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         self.assertIn('"dialogue.rechat.ownership"', capabilities)
         self.assertLess(capabilities.index('"dialogue.rechat.ownership"'), capabilities.index("if (variant"))
@@ -840,8 +855,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         execution = session.split("void execute_action(PendingAction pending)", 1)[1].split(
             "static protocol_native::Identity identity(", 1)[0]
         self.assertLess(execution.index("!client_.equipment_actions_ready()"), execution.index("dispatcher_.try_enqueue("))
-        self.assertIn('control_.try_submit("control"', admission)
-        self.assertLess(admission.index("[this, anchor = *anchor]"), admission.index("client_.cancel("))
+        self.assertIn('control_.try_submit("control"', cancel_dispatch)
+        self.assertLess(cancel_dispatch.index("[this, anchor = *anchor]"), cancel_dispatch.index("client_.cancel("))
         client = read("src/client/synth_client.hpp")
         control_rpc = client.split("RequestOutcome cancel(", 1)[1].split("RequestOutcome send_action_result", 1)[0]
         self.assertNotIn("request_mutex_", control_rpc)
@@ -932,7 +947,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
                            '"action.take_caps_from_player"', '"action.player_caps_inventory"'):
             self.assertIn(capability, flat)
             self.assertEqual(capabilities.count(capability), 1)
-        self.assertIn("turn_cancellation_.cancel_if_owner(cancellation)", session)
+        self.assertIn("(void)dialogue_.cancel_turn_if_owner(cancellation);", session)
+        self.assertIn("turn_cancellation_.cancel_if_owner(cancellation)", read("src/client/player_dialogue.hpp"))
         self.assertIn("client_.cancel(pending.binding.context_request_id,pending.binding.generation)", session)
         self.assertLess(session.index("!client_.transfer_ready()"), session.index("prepare_transfer_action(*snapshot"))
         self.assertLess(session.index("!client_.caps_ready()"), session.index("prepare_transfer_action(*snapshot"))
@@ -1238,7 +1254,8 @@ class WaitPackageGates(unittest.TestCase):
         self.assertNotIn('push_notification', method)
         self.assertIn('speech_.set_paused', method)
         self.assertIn('cancel_voice_capture()', method)
-        cancellation = session.split('void cancel_voice_capture()', 1)[1].split('void bind_voice_target(', 1)[0]
+        self.assertIn('void cancel_voice_capture() { dialogue_.cancel_voice_capture(); }', session)
+        cancellation = read('src/client/player_dialogue.hpp').split('void cancel_voice_capture()', 1)[1].split('void bind_voice_target(', 1)[0]
         for operation in ('microphone_.cancel()', 'open_mic_voice_detected_ = false',
                           'voice_target_.reset()', 'external_owner_.end("")'):
             self.assertIn(operation, cancellation)
@@ -1255,19 +1272,21 @@ class WaitPackageGates(unittest.TestCase):
 
     def test_conversation_fallback_does_not_change_command_targeting(self):
         session = read('src/client/plugin_session.hpp')
-        prepare = session.split('prepare_chat_target(const Snapshot& snapshot)', 1)[1].split('bool submit_text', 1)[0]
+        dialogue = read('src/client/player_dialogue.hpp')
+        self.assertNotIn('conversation_target(', session)
+        prepare = dialogue.split('std::optional<integration::PromptTarget> prepare_chat_target(', 1)[1].split('prepare_chat_targets(', 1)[0]
         self.assertIn('conversation_target(*snapshot, controls', prepare)
-        voice = session.split('bool end_voice_capture', 1)[1].split('prepare_chat_target(const Snapshot& snapshot)', 1)[0]
-        self.assertIn('conversation_target(*snapshot, controls, &*retained)', voice)
-        conversation = session.split('std::optional<context::TargetContext> conversation_target(', 1)[1].split(
-            'std::optional<context::TargetContext> selected_target(', 1)[0]
+        voice = dialogue.split('std::optional<VoiceTurn> end_voice_capture(', 1)[1].split('pump_open_microphone(', 1)[0]
+        self.assertIn('conversation_target(*snapshot, controls, &*retained,', voice)
+        conversation = dialogue.split('std::optional<context::TargetContext> conversation_target(', 1)[1].split(
+            'const config::Config& configuration_;', 1)[0]
         for guard in ('conversation_area_available()', 'retained->matches(actor)',
                       'retained->session.is_cancelled()', 'player_speech_audible', 'distance > range'):
             self.assertIn(guard, conversation)
         command = session.split('std::optional<context::TargetContext> selected_target(', 1)[1].split(
             'std::optional<context::TargetContext> pointed_subject(', 1)[0]
         self.assertIn('selected.target || !automatic', command)
-        self.assertIn('retained->conversation_mode', session)
+        self.assertIn('retained->conversation_mode', dialogue)
 
 
 if __name__ == "__main__":
