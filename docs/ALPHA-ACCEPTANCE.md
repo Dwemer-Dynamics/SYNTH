@@ -2,7 +2,8 @@
 
 ## Stage 1 native typed turn
 
-- [ ] Build, package and audit both DLLs with the paired server candidate.
+- [x] Build, package and audit both DLLs with the paired server candidate: met locally by the
+  voice-state Stage B pair below, with server #10 at `3e637c6` (server #11 is documentation-only).
 - [ ] Flat and VR, separately: `/talk <message>` to a registered placed NPC streams
   sentence lines with NPC voice; each completed line records one heard row.
 - [ ] Interrupt mid-line, then load a save: interrupted/stale lines stay unheard
