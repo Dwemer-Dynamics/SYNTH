@@ -16,6 +16,7 @@
 #include "client/conversation_holds.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/dialogue_requests.hpp"
+#include "client/context_publication.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_delivery.hpp"
@@ -78,8 +79,6 @@ public:
                   core::SaveContextStore::Binding save_binding = {}, bool rest_events_available = false,
                   bool quest_events_available = false, bool actor_events_available = false)
         : dispatcher_{dispatcher},
-          save_context_{save_context},
-          save_binding_{std::move(save_binding)},
           configuration_{std::move(configuration)},
           transport_{configuration_.server.base_url,
                      configuration_.server.connect_timeout_ms},
@@ -90,7 +89,7 @@ public:
                       .client_version = "0.1.0",
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
-                      .capabilities = capabilities(variant, rest_events_available, quest_events_available, actor_events_available),
+                      .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
@@ -119,7 +118,18 @@ public:
           speech_{configuration_, {client_, network_, cancellation_.token(), terminal_, trace_,
                                    [this](std::string message) { push_notification(std::move(message)); }}},
           voice_samples_{configuration_.server.base_url, configuration_.server.connect_timeout_ms,
-                         cancellation_.token(), client_.runtime_session_id()} {
+                         cancellation_.token(), client_.runtime_session_id()},
+          context_{{configuration_, client_, network_, requests_, voice_samples_, quest_events_, quest_events_enabled_,
+                    terminal_, runtime_paused_, cancellation_.token(), save_context, std::move(save_binding),
+                    [this](const core::RuntimeSnapshot& snapshot) {
+                        const auto selected = selected_target(snapshot, false);
+                        return selected ? std::optional{identity(*selected)} : std::nullopt;
+                    },
+                    [this](const RequestOutcome& outcome, const core::RuntimeSnapshot& snapshot) {
+                        hydrate_social_tasks(outcome, snapshot);
+                    },
+                    [this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); },
+                    [this](std::string message) { push_notification(std::move(message)); }}} {
         social_tasks_.bind_session(client_.runtime_session_id());
     }
 
@@ -136,35 +146,18 @@ public:
         speech_.halt_playback();
     }
 
-    [[nodiscard]] bool initialize(Snapshot snapshot) {
-        if (!snapshot || snapshot->generation() != cancellation_.token().generation() ||
-            initialized_.exchange(true, std::memory_order_acq_rel)) {
-            return false;
-        }
-        if (!submit(std::move(snapshot), true)) {
-            initialized_.store(false, std::memory_order_release);
-            return false;
-        }
-        return true;
-    }
+    [[nodiscard]] bool initialize(Snapshot snapshot) { return context_.initialize(std::move(snapshot)); }
 
-    [[nodiscard]] bool publish_context(Snapshot snapshot) {
-        if (!snapshot || !client_.ready()) {
-            return false;
-        }
-        return submit(std::move(snapshot), false);
-    }
+    [[nodiscard]] bool publish_context(Snapshot snapshot) { return context_.publish_context(std::move(snapshot)); }
 
-    [[nodiscard]] bool initialization_failed() const noexcept {
-        return initialization_failed_.load(std::memory_order_acquire);
-    }
+    [[nodiscard]] bool initialization_failed() const noexcept { return context_.initialization_failed(); }
 
     // Save/settings invalidation stops admission immediately; the coordinator
     // performs potentially blocking transport/audio teardown after retirement.
     void request_stop() noexcept {
         trace_->record(diagnostics::ConversationStage::session_retired,cancellation_.token().generation().value());
         terminal_.store(true, std::memory_order_release);
-        if (save_context_) save_context_->stop_writer(save_binding_.epoch);
+        context_.stop_save_writer();
         cancellation_.cancel();
         { std::scoped_lock lock{social_mutex_}; social_tasks_.reset(); social_delivery_.clear(); social_pending_progress_.reset(); }
         { std::scoped_lock lock{enemy_awareness_mutex_}; enemy_awareness_cache_.clear(); enemy_awareness_sampler_.clear(); }
@@ -281,49 +274,31 @@ public:
             requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 ||
             speech_.jobs_active() || !speech_.playback_idle() ||
-            world_context_tasks_.load(std::memory_order_acquire) != 0);
+            context_.observation_tasks() != 0);
     }
 
     [[nodiscard]] std::uint64_t acknowledged_inventory_frame() const noexcept {
-        return acknowledged_inventory_frame_.load(std::memory_order_acquire);
+        return context_.acknowledged_inventory_frame();
     }
 
     // Persist observations without activation or model work. Inventory reconciliation may force unchanged world context.
     [[nodiscard]] bool observe_world_context(Snapshot snapshot, bool inventory_refresh = false) {
         if (!snapshot || !context_observation_ready() ||
             snapshot->generation() != cancellation_.token().generation() ||
-            !world_context_needed(*snapshot, inventory_refresh)) return false;
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
-            tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{request_timeout_ms()}, current_turn_token(),
-            tasks::TaskLanes::track_activity(world_context_tasks_,
-            [this, snapshot = std::move(snapshot), inventory_refresh](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                    runtime_paused_.load(std::memory_order_acquire)) return;
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    // A normal request may have acknowledged a newer scene while this work waited.
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                        runtime_paused_.load(std::memory_order_acquire) || !world_context_needed(*snapshot, inventory_refresh)) return;
-                    const auto result = publish_snapshot(snapshot, std::nullopt, cancellation);
-                    if (result.status == RequestStatus::complete) return;
-                } catch (const std::exception&) {}
-                if (!cancellation.is_cancelled() && !terminal_.load(std::memory_order_acquire) &&
-                    !world_context_failure_reported_.exchange(true, std::memory_order_acq_rel))
-                    push_notification("SYNTH world context was not saved; retrying on a later observation");
-            }));
-        return accepted == tasks::SubmitResult::accepted;
+            !context_.world_context_needed(*snapshot, inventory_refresh)) return false;
+        return context_.observe_world(std::move(snapshot), inventory_refresh, current_turn_token());
     }
 
     // The adapter must bind copied scalars to this generation's capture before calling; no engine pointers enter the queue.
     [[nodiscard]] bool observe_quest_events(Snapshot snapshot, std::span<const core::QuestEvent> events) {
-        if (!quest_events_enabled_ || !quest_event_ready_.load(std::memory_order_acquire) ||
+        if (!quest_events_enabled_ || !context_.quest_events_registered() ||
             terminal_.load(std::memory_order_acquire)) return false;
         return quest_events_.enqueue(std::move(snapshot), events);
     }
 
     // Called by the game pump; one background attempt per interval, with all encoding and HTTP on the network lane.
     void pump_quest_events() {
-        if (!quest_events_enabled_ || !quest_event_ready_.load(std::memory_order_acquire) || !quest_events_.pending() ||
+        if (!quest_events_enabled_ || !context_.quest_events_registered() || !quest_events_.pending() ||
             terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
             dialogue_.recording() || requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 || speech_.jobs_active() ||
@@ -368,7 +343,7 @@ public:
     [[nodiscard]] std::uint64_t dropped_quest_events() const noexcept { return quest_events_.dropped(); }
     [[nodiscard]] std::uint64_t unobserved_quest_events() const noexcept { return quest_events_.unobserved(); }
     [[nodiscard]] bool quest_events_ready() const noexcept {
-        return quest_event_ready_.load(std::memory_order_acquire) && !terminal_.load(std::memory_order_acquire);
+        return context_.quest_events_registered() && !terminal_.load(std::memory_order_acquire);
     }
     [[nodiscard]] bool quest_event_capture_ready() const noexcept { return quest_events_ready() && !quest_events_.full(); }
 
@@ -811,19 +786,12 @@ public:
             terminal_.load(std::memory_order_acquire) || !client_.ready() || !speech_.playback_idle() ||
             speech_.jobs_active() || requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) return false;
-        const auto journal = context::quest_observation(*snapshot);
-        std::uint64_t previous_sequence{};
-        {
-            std::unique_lock lock{world_context_mutex_, std::try_to_lock};
-            if (!lock.owns_lock() || !journal || !acknowledged_quest_context_ ||
-                acknowledged_quest_player_ != actor_key(identity(snapshot->player())) ||
-                !context::tracked_quest_changed(*acknowledged_quest_context_, *journal)) return false;
-            previous_sequence = acknowledged_quest_sequence_;
-        }
+        const auto previous_sequence = context_.quest_reaction_sequence(*snapshot);
+        if (!previous_sequence) return false;
         const auto selected = select_observation_reactor(*snapshot, now);
         if (!selected) return false;
         return queue_context_trigger("quest_updated", identity(*selected), std::move(snapshot),
-            "quest reaction stopped", std::nullopt, previous_sequence);
+            "quest reaction stopped", std::nullopt, *previous_sequence);
     }
 
     // Only acknowledged, recent transitions can request one comment; lack of a speaker never blocks history delivery.
@@ -956,7 +924,7 @@ public:
     [[nodiscard]] bool halt_complete() const {
         if (!halting_.load(std::memory_order_acquire) ||
             halt_requests_.load(std::memory_order_acquire) != 0 ||
-            world_context_tasks_.load(std::memory_order_acquire) != 0 ||
+            context_.observation_tasks() != 0 ||
             player_event_tasks_.load(std::memory_order_acquire) != 0 ||
             speech_.jobs_active() ||
             requests_.responses() != 0 ||
@@ -976,10 +944,7 @@ public:
 
     void pump(std::uint64_t generation, runtime::IFalloutRuntime& runtime) {
         runtime.assert_game_thread();
-        auto notice=wait_checkpoint_notice_.load(std::memory_order_acquire);
-        if(notice && !terminal_.load(std::memory_order_acquire) && generation==cancellation_.token().generation().value() &&
-            history_checkpoint_acknowledged_.load(std::memory_order_acquire)>=notice &&
-            wait_checkpoint_notice_.compare_exchange_strong(notice,0,std::memory_order_acq_rel))
+        if(context_.take_wait_checkpoint_notice(generation))
             push_notification("SYNTH wait outcome included in the next save");
         if (terminal_.load(std::memory_order_acquire)) {
             runtime.update_conversation_holds({});
@@ -1758,7 +1723,7 @@ private:
         {std::scoped_lock lock{social_mutex_};serial=social_checkpoint_serial_;}
         (void)network_.try_submit("network",tasks::TaskClass::background,
             core::SnapshotClock::now()+std::chrono::milliseconds{request_timeout_ms()},cancellation_.token(),
-            tasks::TaskLanes::track_activity(social_checkpoint_tasks_,tasks::TaskLanes::track_activity(world_context_tasks_,
+            tasks::TaskLanes::track_activity(social_checkpoint_tasks_,context_.track_observation(
             [this,snapshot=std::move(snapshot),serial](const core::CancellationToken& cancellation) {
                 if(cancellation.is_cancelled()||social_player_busy())return;
                 try {
@@ -1769,7 +1734,7 @@ private:
                         if(!social_checkpoint_needed_||social_dialogue_owner_||social_progress_tasks_.load(std::memory_order_acquire)!=0)return;
                     }
                     const auto outcome=publish_snapshot(snapshot,std::nullopt,cancellation);
-                    if(outcome.status!=RequestStatus::complete||(save_context_&&!outcome.save_checkpoint_acknowledged)||
+                    if(outcome.status!=RequestStatus::complete||(context_.save_bound()&&!outcome.save_checkpoint_acknowledged)||
                         cancellation.is_cancelled()||terminal_.load(std::memory_order_acquire))return;
                     std::optional<std::string> notice;
                     {
@@ -2053,10 +2018,7 @@ private:
                         !ambient_mode_ready())) return;
                     if (event_deadline && (core::SnapshotClock::now() > *event_deadline || runtime_paused() ||
                         core::SnapshotClock::now() - snapshot->captured_at() > std::chrono::seconds{2})) return;
-                    if (previous_sequence) {
-                        std::scoped_lock lock{world_context_mutex_};
-                        if (acknowledged_quest_sequence_ != *previous_sequence) return;
-                    }
+                    if (previous_sequence && !context_.quest_sequence_current(*previous_sequence)) return;
                     const auto context_outcome = kind == "bored"
                         ? publish_snapshot(snapshot, actor, cancellation, nullptr, {}, {}, {}, {"STANDARD", 1})
                         : publish_snapshot(snapshot, actor, cancellation);
@@ -2088,135 +2050,6 @@ private:
                std::to_string(sequence.fetch_add(1, std::memory_order_relaxed) + 1);
     }
 
-    [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
-                                                             bool quest_events_available, bool actor_events_available) {
-        std::vector<std::string> result{
-            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
-            "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
-            "media.image.upload", "visual_context.capture", "visual_context.describe",
-            "visual_context.portrait",
-            "profiles.dynamic.refresh", "diary.manual.npc", "diary.manual.narrator", "diary.manual.player", "diary.batch.status",
-            "context.actor_state", "context.actor_factions", "context.combat_targets", "context.world",
-            "context.loaded_plugins", "context.quests",
-            "context.nearby_items", "context.points_of_interest", "agents.manage",
-            "action.inspect_actor", "action.inspect_surroundings",
-            "action.check_inventory", "action.read_quests", "action.end_conversation",
-            "action.sheathe_weapon"};
-        append_wait_capabilities(result, variant);
-        if (variant==core::RuntimeVariant::flat) result.push_back("action.attack");
-        if (variant == core::RuntimeVariant::flat && quest_events_available) result.push_back("context.quest_events");
-        if (variant == core::RuntimeVariant::flat && actor_events_available) result.push_back("context.actor_events");
-        if (variant == core::RuntimeVariant::flat) {
-            result.push_back("social.tasks.v1");
-            result.push_back("context.location_identity");
-            result.push_back("context.combat_contacts");
-            result.push_back("context.enemy_awareness");
-            result.push_back("action.equip_item");
-            result.push_back("action.unequip_item");
-            result.push_back("action.inventory_observation");
-            result.push_back("action.consume");
-            result.push_back("action.consume_inventory");
-            result.push_back("action.give_item_to");
-            result.push_back("action.transfer_inventory");
-            result.push_back("action.give_caps_to");
-            result.push_back("action.caps_inventory");
-            result.push_back("action.take_caps_from_player");
-            result.push_back("action.player_caps_inventory");
-            result.push_back("action.take_item_from_player");
-            result.push_back("action.player_item_inventory");
-            result.push_back("action.open_inventory");
-            result.push_back("action.gift_menu_inventory");
-            result.push_back("context.inventory_512");
-            result.push_back("context.player_events");
-            result.push_back("dialogue.player_reactions");
-            result.push_back("context.quest_tracking");
-            result.push_back("dialogue.quest_reactions");
-        }
-        if (variant == core::RuntimeVariant::vr) {
-            result.push_back("runtime.hmd_pose");
-            result.push_back("runtime.controller_pose");
-        } else if (rest_events_available) {
-            result.push_back("diary.automatic.sleep");
-            result.push_back("diary.automatic.wait");
-        }
-        return result;
-    }
-
-    [[nodiscard]] bool submit(Snapshot snapshot, bool initialize_first) {
-        const auto selected = selected_target(*snapshot, false);
-        const auto target = selected ? std::optional{identity(*selected)} : std::nullopt;
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto result = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, cancellation_.token(),
-            requests_.track_response(
-            [this, snapshot = std::move(snapshot), initialize_first, target](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled()) {
-                    return;
-                }
-
-                try {
-                    if (initialize_first) {
-                        const auto hmd_fresh = snapshot->hmd_pose_capability(core::SnapshotClock::now()) ==
-                                               core::PoseCapability::fresh;
-                        std::vector<protocol_native::LoadedPlugin> plugins;
-                        plugins.reserve(snapshot->loaded_plugins().size());
-                        for (const auto& plugin : snapshot->loaded_plugins()) {
-                            plugins.push_back(protocol_native::LoadedPlugin{
-                                plugin.name, plugin.form_id_prefix, plugin.light,
-                                plugin.compile_index, plugin.small_file_compile_index,
-                                plugin.partial_index});
-                        }
-                        const auto outcome = client_.initialize(
-                            snapshot->generation().value(), hmd_fresh, plugins);
-                        if (outcome.status != RequestStatus::complete) {
-                            push_notification("SYNTH server initialization failed: " + outcome.detail);
-                            initialization_failed_.store(true, std::memory_order_release);
-                            return;
-                        }
-                        quest_event_ready_.store(quest_events_enabled_ && client_.quest_events_ready(), std::memory_order_release);
-                        push_notification("SYNTH connected");
-                        std::vector<std::string> voice_plugins;
-                        for (const auto& plugin : snapshot->loaded_plugins()) voice_plugins.push_back(plugin.name);
-                        voice_samples_.configure(std::move(voice_plugins));
-                        return;
-                    }
-                    const auto outcome = publish_snapshot(snapshot, target, cancellation);
-                    if (outcome.status == RequestStatus::complete) {
-                        push_notification("SYNTH context updated");
-                    } else {
-                        push_notification("SYNTH context update failed: " + outcome.detail);
-                    }
-                } catch (const std::exception& error) {
-                    push_notification(std::string{"SYNTH session: "} + error.what());
-                    if (initialize_first) {
-                        initialization_failed_.store(true, std::memory_order_release);
-                    }
-                }
-            }));
-        if (result != tasks::SubmitResult::accepted) {
-            push_notification("SYNTH network queue is full");
-            return false;
-        }
-        return true;
-    }
-
-    // This gate is also rechecked on the worker, under the serialized context transaction.
-    [[nodiscard]] bool world_context_needed(const core::RuntimeSnapshot& snapshot, bool inventory_refresh = false) {
-        const bool wait_checkpoint=history_checkpoint_serial_.load(std::memory_order_acquire)>
-            history_checkpoint_acknowledged_.load(std::memory_order_acquire);
-        if (inventory_refresh && snapshot.player().inventory_observation() == "unavailable") return false;
-        const auto observed = context::world_observation(snapshot);
-        const auto quests = context::quest_observation(snapshot);
-        if (!observed && !quests && !inventory_refresh && !wait_checkpoint) return false;
-        std::unique_lock lock{world_context_mutex_, std::try_to_lock};
-        if (!lock.owns_lock()) return false;
-        if (snapshot.generation().value() == acknowledged_world_generation_ &&
-            snapshot.frame() < acknowledged_world_frame_) return false;
-        return wait_checkpoint || inventory_refresh || (observed && observed != acknowledged_world_context_) ||
-               (quests && quests != acknowledged_quest_context_);
-    }
-
     [[nodiscard]] RequestOutcome publish_snapshot(const Snapshot& owned_snapshot,
                                                    const std::optional<protocol_native::Identity>& target, core::CancellationToken cancellation,
                                                    std::vector<protocol_native::Identity>* published_audience = nullptr,
@@ -2225,260 +2058,20 @@ private:
                                                    const std::shared_ptr<const ActorEventDelivery::Prepared>& actor_events = {},
                                                    const protocol_native::ControlSelection& controls = {},
                                                    const runtime::SocialTaskDescriptor* social_pair = nullptr) {
-        const auto& snapshot = *owned_snapshot;
-        const auto wait_checkpoint=history_checkpoint_serial_.load(std::memory_order_acquire);
-        if (actor_events && (actor_events->capture->scene!=owned_snapshot || target || quest_events || player_event ||
-            actor_events->actors.empty() || actor_events->actors.size()>ActorEventDelivery::actor_capacity))
-            throw std::invalid_argument{"actor event context does not own this fragment"};
-        if(social_pair&&(!client_.social_tasks_ready()||actor_events||quest_events||player_event||!target||
-            !social_wire_actor_matches(*target,social_pair->performer)))throw std::invalid_argument{"invalid saved visit context"};
+        return context_.publish(owned_snapshot, target, std::move(cancellation), published_audience, quest_events,
+                                player_event, actor_events, controls, social_pair);
+    }
 
-        std::vector<protocol_native::Identity> audience;
-        std::vector<protocol_native::ActorState> actor_states;
-        audience.reserve(std::min<std::size_t>(snapshot.actors().size(), 16));
-        actor_states.reserve(std::min<std::size_t>(snapshot.actors().size() + 1, 16));
-        auto hearing_distance = snapshot.world() && snapshot.world()->interior
-            ? configuration_.activation.interior_hearing_distance
-            : configuration_.activation.exterior_hearing_distance;
-        hearing_distance = static_cast<std::uint32_t>(targeting::conversation_range(hearing_distance, controls.mode));
-        const auto selected_actor_key = target ? actor_key(*target) : std::string{};
-        const auto make_state = [&](const core::ActorSnapshot& actor) {
-            if (!selected_actor_key.empty() && actor_key(identity(actor)) == selected_actor_key)
-                voice_samples_.request(actor.voice_type(), actor.name());
-            std::vector<protocol_native::InventoryItem> inventory;
-            inventory.reserve(actor.inventory().size());
-            for (const auto& item : actor.inventory()) {
-                char form_id[11]{};
-                std::snprintf(form_id, sizeof(form_id), "0x%08X", item.form_id);
-                inventory.push_back(protocol_native::InventoryItem{
-                    form_id, item.origin_plugin, item.display_name, item.count, item.form_type,
-                    item.value, item.weight, item.equipped});
-            }
-            std::vector<protocol_native::FactionMembership> factions;
-            factions.reserve(actor.factions().size());
-            for (const auto& faction : actor.factions()) {
-                char form_id[11]{};
-                std::snprintf(form_id, sizeof(form_id), "0x%08X", faction.form_id);
-                factions.push_back(protocol_native::FactionMembership{
-                    form_id, faction.origin_plugin, faction.display_name, faction.editor_id,
-                    faction.rank});
-            }
-            auto state = protocol_native::ActorState{
-                .actor = identity(actor),
-                .base_form_id = [&] {
-                    char form_id[11]{};
-                    std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.base_form_id());
-                    return std::string{form_id};
-                }(),
-                .base_origin_plugin = actor.base_origin_plugin(),
-                .x = actor.position().x,
-                .y = actor.position().y,
-                .z = actor.position().z,
-                .distance = targeting::distance(snapshot.player_pose().position(), actor.position()),
-                .alive = actor.alive(),
-                .disabled = actor.disabled(),
-                .in_combat = actor.in_combat(),
-                .hostile_to_player = actor.hostile_to_player(),
-                .sneaking = actor.sneaking(),
-                .level = static_cast<std::uint64_t>(std::max<std::int16_t>(0, actor.level())),
-                .race = actor.race(),
-                .sex = actor.sex(),
-                .voice_type = actor.voice_type(),
-                .teammate = actor.teammate(),
-                .health_percent = actor.health_percent(),
-                .action_points_percent = actor.action_points_percent(),
-                .inventory = std::move(inventory),
-                .line_of_sight = actor.line_of_sight()
-                                     ? (*actor.line_of_sight() ? "visible" : "blocked")
-                                     : "unknown",
-                .factions = std::move(factions),
-                .faction_observation = actor.faction_observation(),
-                .life_state = actor.life_state(),
-                .posture = actor.posture(),
-                .weapon_drawn = actor.weapon_drawn(),
-                .movement_speed = actor.movement_speed(),
-                .sprinting = actor.sprinting(),
-                .talking_to_player = actor.talking_to_player(),
-                .in_power_armor = actor.in_power_armor(),
-                .current_package = actor.current_package()
-                    ? protocol_native::PackageState{
-                          true,
-                          [&] {
-                              char form_id[11]{};
-                              std::snprintf(form_id, sizeof(form_id), "0x%08X",
-                                            actor.current_package()->form_id);
-                              return std::string{form_id};
-                          }(),
-                          actor.current_package()->origin_plugin,
-                          actor.current_package()->display_name,
-                          actor.current_package()->editor_id}
-                    : protocol_native::PackageState{},
-                .inventory_observation = actor.inventory_observation(),
-                .faction_completeness = actor.faction_completeness(),
-                .health_percent_available = actor.health_percent_available(),
-                .action_points_percent_available = actor.action_points_percent_available(),
-                .combat_target = protocol_native::CombatTargetState{
-                    actor.combat_target().observation,
-                    actor.combat_target().actor ? std::optional{protocol_native::Identity{
-                        [&] {
-                            char form_id[11]{};
-                            std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.combat_target().actor->form_id);
-                            return std::string{form_id};
-                        }(), actor.combat_target().actor->origin_plugin, actor.combat_target().actor->playthrough_id,
-                        actor.combat_target().actor->display_name}} : std::nullopt,
-                    actor.combat_target().actor ? actor.combat_target().actor->race : std::string{}},
-            };
-            if (actor.conversation_held()) state.conversation_held=true;
-            if (snapshot.variant()==core::RuntimeVariant::flat && actor.wait_held().has_value()) state.wait_held=actor.wait_held();
-            append_actor_combat_observations(state, actor, client_.combat_contacts_ready(), client_.enemy_awareness_ready());
-            return state;
-        };
-        actor_states.push_back(make_state(snapshot.player()));
-        const std::function<bool(const core::ActorSnapshot&)> selected = target
-            ? std::function<bool(const core::ActorSnapshot&)>{[&](const auto& actor) {
-                  return actor_key(identity(actor)) == selected_actor_key;
-              }} : std::function<bool(const core::ActorSnapshot&)>{};
-        if (actor_events) {
-            // This audience carries exact source identities, not a new hearing/visibility or witness claim.
-            for (const auto* resolved:actor_events->resolve_actor_states()) {
-                if (resolved==&snapshot.player()) continue;
-                audience.push_back(identity(*resolved));actor_states.push_back(make_state(*resolved));
-            }
-        } else if(social_pair) {
-            // Only a saved task's private progress scene expands past player hearing.
-            // Ordinary input witnesses keep their existing hearing selection unchanged.
-            for(const auto& required:{social_pair->performer,social_pair->recipient}) {
-                const core::ActorSnapshot* found{};
-                for(const auto& actor:snapshot.actors())if(social_wire_actor_matches(identity(actor),required)) {
-                    if(found)throw std::invalid_argument{"ambiguous saved visit actor"};found=&actor;
-                }
-                if(!found||!found->alive()||found->disabled()||!found->conversation_area_available()||
-                    targeting::distance(snapshot.player_pose().position(),found->position())>2000)
-                    throw std::invalid_argument{"saved visit actor unavailable"};
-                audience.push_back(identity(*found));actor_states.push_back(make_state(*found));
-            }
-        } else {
-            for (const auto* actor : targeting::context_participants(snapshot, hearing_distance, selected)) {
-                if (controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG") continue;
-                if (!controls.mode.empty() && !selected_actor_key.empty() && actor_key(identity(*actor)) != selected_actor_key &&
-                    (!actor->conversation_area_available() || !targeting::player_speech_audible(
-                        hearing_distance, targeting::distance(snapshot.player_pose().position(), actor->position())))) continue;
-                if ((controls.mode == "WHISPER" || controls.mode == "CLOSE") &&
-                    (actor_key(identity(*actor)) != selected_actor_key ||
-                     targeting::distance(snapshot.player_pose().position(), actor->position()) > 200)) continue;
-                audience.push_back(identity(*actor));
-                if (actor_states.size() < 16) actor_states.push_back(make_state(*actor));
-            }
-        }
-        std::vector<protocol_native::QuestState> active_quests;
-        active_quests.reserve(snapshot.active_quests().size());
-        for (const auto& quest : snapshot.active_quests()) {
-            char form_id[11]{};
-            std::snprintf(form_id, sizeof(form_id), "0x%08X", quest.form_id);
-            active_quests.push_back(protocol_native::QuestState{
-                form_id, quest.origin_plugin, quest.display_name, quest.editor_id,
-                quest.current_stage, quest.active_objectives, quest.objectives, quest.objectives_observation, quest.tracked});
-        }
-        const auto form_id = [](std::uint32_t value) {
-            char encoded[11]{};
-            std::snprintf(encoded, sizeof(encoded), "0x%08X", value);
-            return std::string{encoded};
-        };
-        std::vector<protocol_native::NearbyItemState> nearby_items;
-        nearby_items.reserve(snapshot.nearby_items().size());
-        for (const auto& item : snapshot.nearby_items()) {
-            nearby_items.push_back(protocol_native::NearbyItemState{
-                form_id(item.reference_id), form_id(item.base_form_id), form_id(item.cell_form_id),
-                item.reference_origin_plugin, item.base_origin_plugin, item.cell_origin_plugin,
-                item.display_name, item.position.x, item.position.y, item.position.z,
-                item.distance, item.weight, item.count, item.form_type, item.value,
-                item.stealing, item.looking_at, item.held});
-        }
-        std::vector<protocol_native::PointOfInterestState> points_of_interest;
-        points_of_interest.reserve(snapshot.points_of_interest().size());
-        for (const auto& poi : snapshot.points_of_interest()) {
-            points_of_interest.push_back(protocol_native::PointOfInterestState{
-                form_id(poi.reference_id), form_id(poi.base_form_id), form_id(poi.cell_form_id),
-                poi.reference_origin_plugin, poi.base_origin_plugin, poi.cell_origin_plugin,
-                poi.display_name, poi.kind, poi.position.x, poi.position.y, poi.position.z,
-                poi.distance, poi.locked, poi.looking_at});
-        }
-        auto outcome = client_.publish_context(0, snapshot.player().playthrough_id(),
-                                       identity(snapshot.player()),
-                                       target,
-                                       audience, actor_states,
-                                       snapshot.world()
-                                           ? std::optional{protocol_native::WorldState{
-                                                 snapshot.world()->location, snapshot.world()->cell,
-                                                 snapshot.world()->worldspace, snapshot.world()->weather,
-                                                 snapshot.world()->interior,
-                                                 snapshot.world()->game_time_ticks, snapshot.world()->scene,
-                                                 snapshot.world()->location_ref}}
-                                           : std::nullopt,
-                                       active_quests, nearby_items, points_of_interest,
-                                       {}, cancellation, save_binding_.loaded_context, snapshot.active_quests_observation(),
-                                       snapshot.nearby_items_observation(), snapshot.points_of_interest_observation(),
-                                       protocol_native::retained_collection_observation(
-                                           snapshot.actors_observation(), snapshot.actors().size(), audience.size()), quest_events, player_event,
-                                       actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt);
-        if (outcome.status == RequestStatus::complete && !cancellation.is_cancelled() &&
-            !terminal_.load(std::memory_order_acquire)) {
-            if (quest_events_enabled_) quest_events_.acknowledge_journal(owned_snapshot, outcome.context_binding.sequence);
-            std::scoped_lock lock{world_context_mutex_};
-            if (snapshot.generation().value() != acknowledged_world_generation_ ||
-                snapshot.frame() >= acknowledged_world_frame_) {
-                acknowledged_world_context_ = context::world_observation(snapshot);
-                if (auto quests = context::quest_observation(snapshot)) {
-                    acknowledged_quest_context_ = std::move(quests);
-                    acknowledged_quest_sequence_ = outcome.context_binding.sequence;
-                    acknowledged_quest_player_ = actor_key(identity(snapshot.player()));
-                }
-                acknowledged_world_frame_ = snapshot.frame();
-                acknowledged_world_generation_ = snapshot.generation().value();
-                world_context_failure_reported_.store(false, std::memory_order_release);
-            }
-        }
-        if (save_context_ && outcome.status == RequestStatus::complete && !cancellation.is_cancelled()
-            && !terminal_.load(std::memory_order_acquire)) {
-            outcome.save_checkpoint_acknowledged = save_context_->acknowledge(save_binding_.epoch,
-                {snapshot.player().playthrough_id(), client_.runtime_session_id(),
-                 outcome.context_binding.generation, outcome.context_binding.sequence});
-        }
-        if(wait_checkpoint && save_context_ && outcome.save_checkpoint_acknowledged &&
-            outcome.status==RequestStatus::complete && !cancellation.is_cancelled() &&
-            !terminal_.load(std::memory_order_acquire) && snapshot.generation()==cancellation_.token().generation()) {
-            auto before=history_checkpoint_acknowledged_.load(std::memory_order_acquire);
-            while(before<wait_checkpoint && !history_checkpoint_acknowledged_.compare_exchange_weak(
-                before,wait_checkpoint,std::memory_order_release,std::memory_order_acquire)) {}
-        }
-        // Acknowledgment belongs to copied values and the saved frontier, never merely to queue admission.
-        if (outcome.status == RequestStatus::complete && !cancellation.is_cancelled() &&
-            !terminal_.load(std::memory_order_acquire) &&
-            snapshot.generation() == cancellation_.token().generation() &&
-            snapshot.player().inventory_observation() != "unavailable" &&
-            (!save_context_ || outcome.save_checkpoint_acknowledged)) {
-            auto previous = acknowledged_inventory_frame_.load(std::memory_order_acquire);
-            while (snapshot.frame() > previous && !acknowledged_inventory_frame_.compare_exchange_weak(
-                previous, snapshot.frame(), std::memory_order_release, std::memory_order_acquire)) {}
-        }
-        if (published_audience && outcome.status == RequestStatus::complete) *published_audience = std::move(audience);
-        const auto now=core::SnapshotClock::now();
-        if(client_.social_tasks_ready()&&outcome.status==RequestStatus::complete&&!cancellation.is_cancelled()&&
-            !terminal_.load(std::memory_order_acquire)&&snapshot.generation()==cancellation_.token().generation()&&
-            now>=snapshot.captured_at()&&now-snapshot.captured_at()<=std::chrono::seconds{2}) {
-            std::vector<runtime::SocialTaskDescriptor> tasks;
-            for(const auto& line:outcome.lines)if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&line.payload))tasks.push_back(offer->task);
-            std::scoped_lock lock{social_mutex_};
-            if(const auto* active=social_tasks_.active_task();active&&std::ranges::none_of(tasks,[&](const auto& task) {
-                return task.task_id==active->task_id&&task.status!="completed"&&task.status!="failed"&&task.status!="cancelled";
-            }))social_release_requested_=true;
-            social_tasks_.hydrate(std::move(tasks),snapshot.generation().value(),
-                {snapshot.player().form_id(),snapshot.player().origin_plugin(),snapshot.player().playthrough_id()});
-        }
-        outcome.context_binding.invalidate_response = [this, cancellation] {
-            invalidate_response(cancellation);
-        };
-        return outcome;
+    // Context hook, on the publishing worker after a fresh, current, complete publication.
+    void hydrate_social_tasks(const RequestOutcome& outcome, const core::RuntimeSnapshot& snapshot) {
+        std::vector<runtime::SocialTaskDescriptor> tasks;
+        for(const auto& line:outcome.lines)if(const auto* offer=std::get_if<protocol_native::SocialTaskOffer>(&line.payload))tasks.push_back(offer->task);
+        std::scoped_lock lock{social_mutex_};
+        if(const auto* active=social_tasks_.active_task();active&&std::ranges::none_of(tasks,[&](const auto& task) {
+            return task.task_id==active->task_id&&task.status!="completed"&&task.status!="failed"&&task.status!="cancelled";
+        }))social_release_requested_=true;
+        social_tasks_.hydrate(std::move(tasks),snapshot.generation().value(),
+            {snapshot.player().form_id(),snapshot.player().origin_plugin(),snapshot.player().playthrough_id()});
     }
 
     [[nodiscard]] std::optional<context::TargetContext> selected_target(
@@ -2593,9 +2186,7 @@ private:
             return;
         }
         if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload)) {
-            if(save_context_ && snapshot->variant()==core::RuntimeVariant::flat &&
-                !cancellation.is_cancelled() && !terminal_.load(std::memory_order_acquire))
-                history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel);
+            context_.note_dialogue_history(snapshot->variant(), cancellation);
             mark_activity();
             const auto speaker = std::visit([](const auto& value) { return value.display_name; },
                                            dialogue->speaker);
@@ -3228,12 +2819,8 @@ private:
                         action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory");
                     if (outcome.status != RequestStatus::complete) {
                         push_notification("SYNTH action result delivery failed: " + outcome.detail);
-                    } else if((action.name=="wait_here"||action.name=="release_wait") && save_context_ &&
-                        !cancellation.is_cancelled() && !terminal_.load(std::memory_order_acquire)) {
-                        // The result is newer than its issuing snapshot. Reuse ordinary
-                        // world observation to acknowledge a frontier after the consequence.
-                        const auto serial=history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel)+1;
-                        wait_checkpoint_notice_.store(serial,std::memory_order_release);
+                    } else if(action.name=="wait_here"||action.name=="release_wait") {
+                        context_.note_wait_outcome(cancellation);
                     }
                 } catch (const std::exception& error) {
                     push_notification(std::string{"SYNTH action result: "} + error.what());
@@ -3463,8 +3050,6 @@ private:
     core::EnemyAwarenessSampler enemy_awareness_sampler_;
     std::vector<std::string> active_quest_actors_; // Successful activation ACKs only; bounded, session-owned.
     runtime::GameThreadDispatcher& dispatcher_;
-    core::SaveContextStore* save_context_{};
-    const core::SaveContextStore::Binding save_binding_;
     config::Config configuration_;
     mutable std::mutex control_mutex_;
     mutable ControlState control_state_;
@@ -3491,8 +3076,6 @@ private:
     core::SnapshotClock::time_point next_social_capture_{};
     tasks::TaskLanes network_;
     tasks::TaskLanes control_{{tasks::LaneConfig{"control", 4, 4, 4}}, 1};
-    std::atomic_bool initialized_{};
-    std::atomic_bool initialization_failed_{};
     std::atomic_bool terminal_{};
     std::atomic_bool runtime_paused_{};
     std::atomic_bool composing_{};
@@ -3502,17 +3085,6 @@ private:
     std::atomic_size_t visual_tasks_{};
     std::atomic_size_t active_actions_{};
     std::atomic_size_t diary_tasks_{};
-    std::atomic_size_t world_context_tasks_{};
-    std::atomic_uint64_t history_checkpoint_serial_{},history_checkpoint_acknowledged_{},wait_checkpoint_notice_{};
-    std::atomic_bool world_context_failure_reported_{};
-    std::atomic_uint64_t acknowledged_inventory_frame_{};
-    std::mutex world_context_mutex_;
-    std::optional<context::WorldObservation> acknowledged_world_context_;
-    std::optional<context::QuestObservation> acknowledged_quest_context_;
-    std::uint64_t acknowledged_quest_sequence_{};
-    std::string acknowledged_quest_player_;
-    std::uint64_t acknowledged_world_frame_{};
-    std::uint64_t acknowledged_world_generation_{};
     std::mutex diary_mutex_;
     std::optional<PendingDiary> pending_diary_;
     const bool automatic_diary_enabled_;
@@ -3532,7 +3104,6 @@ private:
     std::atomic_uint64_t player_event_receipt_{};
     std::atomic_bool player_event_failure_reported_{};
     std::atomic_size_t quest_event_tasks_{};
-    std::atomic_bool quest_event_ready_{};
     std::atomic_bool quest_event_failure_reported_{};
     tasks::TaskLanes::Deadline next_quest_event_attempt_{};
     tasks::TaskLanes::Deadline next_automatic_diary_attempt_{};
@@ -3565,6 +3136,10 @@ private:
     // runs, before any pump could have queued a receipt drain on the still-live network lane.
     SpeechDelivery speech_;
     voice::SampleWorker voice_samples_;
+    // Declared last: borrows configuration, client, network lane, response accounting, voice samples,
+    // quest delivery, the terminal/pause flags and the save store. Its queued tasks and the rollback
+    // closure in each ContextBinding capture it; ~PluginSession joins the network lane first.
+    ContextPublication context_;
 };
 
 }  // namespace synth::client

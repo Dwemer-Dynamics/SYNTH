@@ -566,11 +566,13 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertIn("session->bind_voice_target(snapshot)", entry)
         self.assertIn("session->voice_target_form_id()", entry)
 
-        initialize = session[session.index("if (initialize_first)") : session.index(
-            "const auto outcome = publish_snapshot(snapshot, target, cancellation);", session.index("if (initialize_first)")
+        context = read("src/client/context_publication.hpp")
+        initialize = context[context.index("if (initialize_first)") : context.index(
+            "const auto outcome = publish(snapshot, target, cancellation);", context.index("if (initialize_first)")
         )]
-        self.assertIn('push_notification("SYNTH connected")', initialize)
+        self.assertIn('notify_("SYNTH connected")', initialize)
         self.assertIn("return;", initialize)
+        self.assertIn("[[nodiscard]] bool initialize(Snapshot snapshot) { return context_.initialize(std::move(snapshot)); }", session)
 
     def test_chatbox_is_one_framework_window_that_synth_alone_owns(self) -> None:
         adapter = read("src/ui/menu_framework_ui.hpp")
@@ -809,9 +811,24 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         for forbidden in ("RE::", "REL::", "PluginSession", "IFalloutRuntime"):
             self.assertNotIn(forbidden, requests)
         self.assertIn(".protocol_version = 2", session)
-        publication = session.split("RequestOutcome publish_snapshot(", 1)[1].split("selected_target(", 1)[0]
+        context = read("src/client/context_publication.hpp")
+        publication = context.split("RequestOutcome publish(", 1)[1].split("private:", 1)[0]
         self.assertIn("client_.publish_context(0,", publication)
-        self.assertNotIn("selected_target(snapshot", publication)
+        self.assertNotIn("selected_target(", publication)
+        # Social hydration and response rollback stay session-owned; the publisher reaches them only by hooks.
+        self.assertLess(publication.index("*published_audience = std::move(audience)"), publication.index("hydrate_social_(outcome, snapshot);"))
+        self.assertLess(publication.index("hydrate_social_(outcome, snapshot);"), publication.index("invalidate_response_(cancellation);"))
+        self.assertLess(publication.index("save_context_->acknowledge(save_binding_.epoch,"), publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("))
+        self.assertLess(publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("), publication.index("acknowledged_inventory_frame_.compare_exchange_weak("))
+        for forbidden in ("social_mutex_", "social_tasks_.", "PluginSession", "RE::", "REL::", "IFalloutRuntime"):
+            self.assertNotIn(forbidden, context)
+        forwarder = session.split("RequestOutcome publish_snapshot(", 1)[1].split("void hydrate_social_tasks(", 1)[0]
+        self.assertIn("return context_.publish(owned_snapshot, target, std::move(cancellation), published_audience, quest_events,", forwarder)
+        self.assertIn("[this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); }", session)
+        self.assertIn("hydrate_social_tasks(outcome, snapshot);", session)
+        self.assertLess(session.index("    voice::SampleWorker voice_samples_;"), session.index("    ContextPublication context_;"))
+        for moved in ("world_context_mutex_", "history_checkpoint_", "acknowledged_world_", "save_binding_", "save_context_"):
+            self.assertNotIn(moved, session)
         self.assertIn('}, pending.binding, std::move(inventory), std::move(transfer),', session)
         self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory")', session)
         self.assertIn("handle_line(continuation, continuation_snapshot, cancellation)", session)
@@ -826,7 +843,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
         # Includes deferred prefetch delivery and the separately owned social-task progress response.
-        self.assertEqual(session.count("requests_.track_response("), 7)
+        self.assertEqual(session.count("requests_.track_response("), 6)
+        self.assertEqual(context.count("requests_.track_response("), 1)
         self.assertEqual(requests.count("track_activity(responses_,"), 3)
         self.assertIn("std::size_t responses() const noexcept { return responses_.load(std::memory_order_acquire); }", requests)
         self.assertNotIn("std::atomic_size_t& responses()", requests)
@@ -868,7 +886,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("client_.take_interrupted_turn()", cancel_dispatch)
         self.assertNotIn("transport_", cancel_dispatch)
         self.assertNotIn("shutdown", cancel_dispatch)
-        capabilities = session.split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
+        capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         self.assertIn('"dialogue.rechat.ownership"', capabilities)
         self.assertLess(capabilities.index('"dialogue.rechat.ownership"'), capabilities.index("if (variant"))
         flat_capabilities = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("}", 1)[0]
@@ -905,7 +923,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
 
     def test_consume_is_flat_only_and_requires_its_acknowledged_receipt_contract(self) -> None:
         session = read("src/client/plugin_session.hpp")
-        capabilities = session.split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
+        capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         flat_capabilities = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("}", 1)[0]
         for capability in ('"action.consume"', '"action.consume_inventory"'):
             self.assertIn(capability, flat_capabilities)
@@ -961,7 +979,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
 
     def test_transfer_requires_paired_native_evidence_and_flat_advertisement(self) -> None:
         session = read("src/client/plugin_session.hpp")
-        capabilities = session.split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
+        capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
         self.assertNotIn('"action.give_item"', capabilities)
         flat = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr)", 1)[0]
         for capability in ('"action.give_item_to"', '"action.transfer_inventory"',
