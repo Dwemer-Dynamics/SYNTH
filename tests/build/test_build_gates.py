@@ -807,7 +807,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("deadline, std::move(turn),", text_request)
         wiring = session.split("requests_{{client_, network_, terminal_, conversation_holds_,", 1)[1].split("speech_{", 1)[0]
         for expected in ("publish_snapshot(snapshot, target, std::move(cancellation), nullptr, {}, {}, {}, controls)",
-                         "handle_line(line, snapshot, cancellation); }", "return notify_social_input(outcome);"):
+                         "handle_line(line, snapshot, cancellation); }", "return social_.notify_input(outcome);"):
             self.assertIn(expected, wiring)
         for forbidden in ("RE::", "REL::", "PluginSession", "IFalloutRuntime"):
             self.assertNotIn(forbidden, requests)
@@ -816,17 +816,25 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         publication = context.split("RequestOutcome publish(", 1)[1].split("private:", 1)[0]
         self.assertIn("client_.publish_context(0,", publication)
         self.assertNotIn("selected_target(", publication)
-        # Social hydration and response rollback stay session-owned; the publisher reaches them only by hooks.
+        # Social hydration and response rollback stay outside the publisher; it reaches them only by hooks.
         self.assertLess(publication.index("*published_audience = std::move(audience)"), publication.index("hydrate_social_(outcome, snapshot);"))
         self.assertLess(publication.index("hydrate_social_(outcome, snapshot);"), publication.index("invalidate_response_(cancellation);"))
         self.assertLess(publication.index("save_context_->acknowledge(save_binding_.epoch,"), publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("))
         self.assertLess(publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("), publication.index("acknowledged_inventory_frame_.compare_exchange_weak("))
         for forbidden in ("social_mutex_", "social_tasks_.", "PluginSession", "RE::", "REL::", "IFalloutRuntime"):
             self.assertNotIn(forbidden, context)
-        forwarder = session.split("RequestOutcome publish_snapshot(", 1)[1].split("void hydrate_social_tasks(", 1)[0]
+        forwarder = session.split("RequestOutcome publish_snapshot(", 1)[1].split("std::optional<context::TargetContext> selected_target(", 1)[0]
         self.assertIn("return context_.publish(owned_snapshot, target, std::move(cancellation), published_audience, quest_events,", forwarder)
         self.assertIn("[this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); }", session)
-        self.assertIn("hydrate_social_tasks(outcome, snapshot);", session)
+        self.assertIn("social_.hydrate(outcome, snapshot);", session)
+        social = read("src/client/social_task_execution.hpp")
+        for forbidden in ("PluginSession", "RE::", "REL::"):
+            self.assertNotIn(forbidden, social)
+        for moved in ("social_mutex_", "social_tasks_", "social_delivery_", "social_execution_owner_", "social_dialogue_owner_"):
+            self.assertNotIn(moved, session)
+        self.assertLess(session.index("    ContextPublication context_;"), session.index("    SocialTaskExecution social_;"))
+        self.assertLess(session.index("    SocialTaskExecution social_;"), session.index("    ActionExecution actions_;"))
+        self.assertIn("return social_.release_for_action(actor, runtime);", session)
         self.assertLess(session.index("    voice::SampleWorker voice_samples_;"), session.index("    ContextPublication context_;"))
         for moved in ("world_context_mutex_", "history_checkpoint_", "acknowledged_world_", "save_binding_", "save_context_"):
             self.assertNotIn(moved, session)
@@ -846,7 +854,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
         # Includes deferred prefetch delivery and the separately owned social-task progress response.
-        self.assertEqual(session.count("requests_.track_response("), 6)
+        self.assertEqual(session.count("requests_.track_response("), 5)
+        self.assertEqual(social.count("requests_.track_response("), 1)
         self.assertEqual(context.count("requests_.track_response("), 1)
         self.assertEqual(requests.count("track_activity(responses_,"), 3)
         self.assertIn("std::size_t responses() const noexcept { return responses_.load(std::memory_order_acquire); }", requests)

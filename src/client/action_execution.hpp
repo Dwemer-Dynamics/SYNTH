@@ -38,12 +38,14 @@ namespace synth::client {
 // execute workflow with its receipt. Native work runs only as a dispatcher task on the game thread
 // through the selected IFalloutRuntime; the network worker waits on a shared completion and sends
 // exactly one bounded result. Wait outlives turn replacement: clear() drops queued actions but not
-// the Wait lifetime, which ends only on stop_wait() (local Stop) or with the session token
-// (halt/load/retirement).
+// the Wait lifetime, which ends only on stop_wait() (local Stop) or when the session token is
+// cancelled at retirement (load, new game, main menu, shutdown, or after a completed halt). Hard
+// halt itself only clears the queue: the flat entry releases installed native Wait packages through
+// its adapter before calling hard_halt(), and the token is cancelled when that session retires.
 //
-// The session keeps hold suspension before enqueue, the response binding and its rollback, social
-// release policy and conversation ending; it reaches them only through the route_line,
-// end_conversation and release_social callbacks. The queue lock is a leaf: it is never held across
+// The session keeps hold suspension before enqueue, the response binding and its rollback and
+// conversation ending, and its social task owner keeps the release policy; this object reaches them
+// only through the route_line, end_conversation and release_social callbacks. The queue lock is a leaf: it is never held across
 // a callback, a runtime call or HTTP, except that while_idle()/try_while_idle() run the caller's
 // rechat check under it. Lock order is therefore action queue, then rechat.
 //
