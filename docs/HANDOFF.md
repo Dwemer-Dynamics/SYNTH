@@ -242,6 +242,16 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
 
 ## Known gaps and deferred work
 
+- **Stage 1 native typed turn (source candidate).** The client advertises
+  `dialogue.native_turn`; only `/talk <message>` in the existing text entry
+  selects the native route (explicit per-turn intent). It sends `speech_receipt` only after the exact
+  `native_turn` init ACK (contract: `protocol/v2/README.md`). Terminal caption
+  delivery copies one receipt into a bounded outbox; a background network task,
+  never the cancel lane, sends it once without retry. Only completed audio is
+  reported as heard. Text-only/reading-timer lines send no receipt because no
+  renderer acknowledgement exists, so the server keeps them unheard. Not yet built
+  as a DLL, packaged or tested in flat/VR gameplay.
+
 - **Prepared NPC combat-target identification.** [COMBAT-TARGETS.md](COMBAT-TARGETS.md)
   describes bounded native target-handle capture, explicit v2 acknowledgement and
   response-speaker prompt ownership. Other targets do not become listeners or

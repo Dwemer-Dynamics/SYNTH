@@ -129,6 +129,15 @@ public:
     [[nodiscard]] bool rechat_scene_ready() const noexcept {
         return rechat_scene_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Native typed turns and their delivery receipts require this init's exact acknowledgement.
+    [[nodiscard]] bool uses_native_turn_contract() const noexcept {
+        return options_.protocol_version == 2 &&
+            std::ranges::find(options_.capabilities, "dialogue.native_turn") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "dialogue.turn_ownership") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool native_turn_ready() const noexcept {
+        return native_turn_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool social_tasks_ready() const noexcept {
         return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -266,6 +275,7 @@ public:
             publication_sequence_ = 0;
             rechat_scene_negotiated_.store(false, std::memory_order_release);
             social_tasks_negotiated_.store(false, std::memory_order_release);
+            native_turn_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -300,6 +310,9 @@ public:
                 std::holds_alternative<protocol_native::Start>(outcome.lines.front().payload) &&
                 std::holds_alternative<protocol_native::End>(outcome.lines.back().payload);
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
+            native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
+                std::memory_order_release);
             social_tasks_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->social_tasks &&
                 std::ranges::find(options_.capabilities,"social.tasks.v1")!=options_.capabilities.end() &&
@@ -496,7 +509,8 @@ public:
     }
 
     [[nodiscard]] RequestOutcome send_text(std::string text, LineCallback callback = {},
-                                            ContextBinding binding = {}, const protocol_native::ControlSelection& selection = {}) {
+                                            ContextBinding binding = {}, const protocol_native::ControlSelection& selection = {},
+                                            protocol_native::TextIntent intent = protocol_native::TextIntent::unmarked) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id;
         std::string turn_id;
@@ -506,12 +520,32 @@ public:
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
             if (text.empty() || text.size() > 4096) throw std::invalid_argument{"dialogue text is out of bounds"};
+            if (intent == protocol_native::TextIntent::conversation && !native_turn_ready())
+                throw std::invalid_argument{"the server did not accept native conversation turns"};
             request_id = next_id("text");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
-            body = protocol_native::encode_input_text(context(request_id, turn_id, binding), std::move(text), selection);
+            body = protocol_native::encode_input_text(context(request_id, turn_id, binding), std::move(text), selection, intent);
         }
         return send_event(request_id, turn_id, generation, std::move(body), std::move(callback), true, "/main.php", binding, true);
+    }
+
+    // Worker-only, fail-closed delivery receipt. It is never retried: a lost transport leaves the line unheard.
+    [[nodiscard]] RequestOutcome send_speech_receipt(const protocol_native::SpeechReceipt& receipt, ContextBinding binding) {
+        std::scoped_lock request_lock{request_mutex_};
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            if (!native_turn_ready() || binding.generation != generation_ || binding.sequence == 0 || binding.turn_id.empty())
+                throw std::invalid_argument{"speech receipt owner is not current"};
+            request_id = next_id("receipt");
+            turn_id = binding.turn_id;
+            generation = generation_;
+            body = protocol_native::encode_speech_receipt(context(request_id, turn_id, binding), receipt);
+        }
+        return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", binding, false, 5000);
     }
 
     [[nodiscard]] RequestOutcome activate(const protocol_native::Identity& actor,
@@ -1286,6 +1320,7 @@ private:
     std::atomic_bool quest_reactions_negotiated_{};
     std::atomic_bool rechat_scene_negotiated_{};
     std::atomic_bool social_tasks_negotiated_{};
+    std::atomic_bool native_turn_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};

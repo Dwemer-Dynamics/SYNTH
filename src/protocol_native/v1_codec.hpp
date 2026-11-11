@@ -171,8 +171,9 @@ struct Dialogue {
     std::optional<Media> media;
     std::optional<Speech> speech;
     std::optional<Identity> listener;
+    bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
@@ -299,12 +300,17 @@ inline Line decode_line(std::string_view wire) {
         line.payload=Start{text(payload,"server_version")};
     }
     else if(type=="dialogue") {
-        if (version == 2) closed_object(payload, {"speaker", "text", "media", "speech", "listener"});
+        if (version == 2) closed_object(payload, {"speaker", "text", "media", "speech", "listener", "native_turn"});
         else closed_object(payload, {"speaker", "text", "media", "speech"});
         Dialogue d{speaker(required(payload,"speaker")), text(payload,"text"), std::nullopt,
                    std::nullopt};
         if(auto* m=payload.find("media")) d.media=media(*m);
         if(auto* s=payload.find("speech")) d.speech=speech(*s);
+        if(const auto* marker=payload.find("native_turn")) {
+            if(!marker->as_bool() || !std::holds_alternative<Identity>(d.speaker))
+                throw std::invalid_argument{"native_turn marker requires an identified speaker"};
+            d.native_turn=true;
+        }
         if (const auto* listener=payload.find("listener")) {
             d.listener=identity(*listener);
             const auto* actor=std::get_if<Identity>(&d.speaker);
@@ -357,7 +363,7 @@ inline Line decode_line(std::string_view wire) {
         line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -365,7 +371,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("ambient_npc") ? required(payload,"ambient_npc").as_bool() : false,
             payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
             payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
-            payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false};
+            payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false,
+            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -717,7 +724,7 @@ inline std::string encode_event(const EventContext& context, std::string type, j
     if (context.protocol_version == 2) {
         const bool bound = type == "input_text" || type == "input_audio" || type == "activate"
             || type == "trigger" || type == "profile_refresh" || type == "diary_request" || type == "action_result"
-            || type == "social_task_request" || type == "social_task_progress";
+            || type == "social_task_request" || type == "social_task_progress" || type == "speech_receipt";
         if (context.context_sequence > 9'007'199'254'740'991ULL
             || (bound ? context.context_sequence == 0 : context.context_sequence != 0))
             throw std::invalid_argument{"event context binding is invalid"};
@@ -752,6 +759,42 @@ inline std::string encode_social_task_progress(const EventContext& context,const
         payload.emplace_back("proof",json::Value{object({{"request_id",command.proof_request_id},{"line_id",command.proof_line_id}})});
     }
     return encode_event(context,"social_task_progress",json::Value{std::move(payload)});
+}
+// Native-turn characters are placed references: exact 0x + 8 hex digits, never a dynamic FF reference.
+inline bool placed_reference_form(std::string_view form) noexcept {
+    const auto hex = [](char value) {
+        return (value >= '0' && value <= '9') || (value >= 'A' && value <= 'F') || (value >= 'a' && value <= 'f');
+    };
+    const auto upper_f = [](char value) { return value == 'F' || value == 'f'; };
+    return form.size() == 10 && form.starts_with("0x") && std::ranges::all_of(form.substr(2), hex) &&
+        !(upper_f(form[2]) && upper_f(form[3]));
+}
+// Terminal delivery outcome of one native-turn line. Text and speaker are read from the server record.
+enum class SpeechReceiptOutcome { audio_completed, text_presented, interrupted, failed };
+struct SpeechReceipt {
+    std::string dialogue_request_id, line_id;
+    Identity character;
+    SpeechReceiptOutcome outcome{SpeechReceiptOutcome::failed};
+};
+inline std::string encode_speech_receipt(const EventContext& context, const SpeechReceipt& receipt) {
+    const auto has = [&](std::string_view capability) {
+        return std::ranges::find(context.capabilities, capability) != context.capabilities.end();
+    };
+    const auto prefix = receipt.dialogue_request_id + ":dialogue:";
+    const auto ordinal = receipt.line_id.size() > prefix.size() && receipt.line_id.starts_with(prefix)
+        ? std::string_view{receipt.line_id}.substr(prefix.size()) : std::string_view{};
+    if (context.protocol_version != 2 || !has("dialogue.native_turn") || !has("dialogue.turn_ownership") ||
+        !runtime::social_id(receipt.dialogue_request_id) || receipt.line_id.size() > 160 || ordinal.empty() || ordinal.size() > 6 ||
+        ordinal.front() == '0' || !std::ranges::all_of(ordinal, [](char value) { return value >= '0' && value <= '9'; }) ||
+        !placed_reference_form(receipt.character.form_id) || receipt.character.origin_plugin.empty() ||
+        !runtime::social_id(receipt.character.playthrough_id))
+        throw std::invalid_argument{"speech receipt does not own its native-turn line"};
+    const char* outcome = receipt.outcome == SpeechReceiptOutcome::audio_completed ? "audio_completed" :
+        receipt.outcome == SpeechReceiptOutcome::text_presented ? "text_presented" :
+        receipt.outcome == SpeechReceiptOutcome::interrupted ? "interrupted" : "failed";
+    return encode_event(context, "speech_receipt", json::Value{object({
+        {"dialogue_request_id", receipt.dialogue_request_id}, {"line_id", receipt.line_id},
+        {"character", identity_value(receipt.character)}, {"outcome", outcome}})});
 }
 inline std::string encode_init(const EventContext& context, std::string locale, bool hmd_pose_fresh=false,
                                const std::vector<LoadedPlugin>& loaded_plugins = {}) {
@@ -792,9 +835,19 @@ inline std::string encode_control(const EventContext& context, std::string setti
     return encode_event(context, "control", json::Value{object({{"setting", std::move(setting)}, {"value", std::move(value)}})});
 }
 
-inline std::string encode_input_text(const EventContext& context, std::string text_value, const ControlSelection& selection = {}) {
+// Per-turn intent is separate from session capability: only an explicit conversation turn (/talk) may
+// select the native route; unmarked text keeps existing action-capable routing.
+enum class TextIntent { unmarked, conversation };
+inline std::string encode_input_text(const EventContext& context, std::string text_value, const ControlSelection& selection = {},
+                                     TextIntent intent = TextIntent::unmarked) {
     auto payload = object({{"text",std::move(text_value)}});
     append_control_selection(payload, context, selection);
+    if (intent == TextIntent::conversation) {
+        const auto has = [&](std::string_view value) { return std::ranges::find(context.capabilities, value) != context.capabilities.end(); };
+        if (context.protocol_version != 2 || context.context_sequence == 0 || !has("dialogue.native_turn") || !has("dialogue.turn_ownership"))
+            throw std::invalid_argument{"conversation intent requires a bound native-turn context"};
+        payload.emplace_back("intent", json::Value{std::string{"conversation"}});
+    }
     return encode_event(context,"input_text",json::Value{std::move(payload)});
 }
 inline std::string encode_input_audio(const EventContext& context, const Media& value, const ControlSelection& selection = {}) {

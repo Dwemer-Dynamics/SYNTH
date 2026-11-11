@@ -1,5 +1,50 @@
 # SYNTH protocol v2
 
+## Native typed turn and speech receipts (2026-11-09, Stage 1)
+
+`dialogue.native_turn` requires v2 and `dialogue.turn_ownership`. Only the init
+whose status carries `native_turn: true` grants it; flat and VR both advertise it.
+Entry point: the player types `/talk <message>` in the existing text entry. The
+client strips the prefix, rejects an empty message or an unnegotiated session
+locally with a notification, and sends the remaining text as `input_text` with
+`payload.intent: "conversation"`. Intent is per turn and separate from session
+capability; it requires `dialogue.native_turn`, `dialogue.turn_ownership` and a
+bound context sequence, and any other value is rejected. Unmarked typed text,
+including action requests (Wait, Follow, gifts, Jev), keeps its existing route
+unchanged; capability alone never selects the native route.
+
+A conversation-intent turn never falls back to legacy. Before admission the server
+answers an ineligible request with terminal status `native_turn_ineligible` and a
+reason detail: `conversation_mode_unsupported` (narrator or other non-addressed
+modes), `target_missing`, `target_not_placed_reference` (dynamic `0xFF`),
+`npc_not_registered` (no `actor_identity`-bound profile),
+`llm_connector_unsupported` (non-`openaijson`, reasoning or quickstart-managed),
+`load_order_identity_ambiguous` (a second identity row for the same plugin-local
+reference) or `tts_profile_unsupported` (the profile's own TTS connector is absent
+or not portable; there is no server-wide or other-provider fallback). Once
+admitted, failure, empty, oversized (more than 12 lines, a line over 1000
+characters, or 16 KiB total) or incomplete provider output ends the turn with a
+terminal error; nothing is truncated. The route emits no actions; audio/STT,
+rechat, diary and social paths are unchanged.
+
+The character key is playthrough + lower-cased origin plugin + plugin-local
+placed reference ID (6 hex digits, or 3 for `0xFE` light plugins), hashed as
+`chr:<40 hex>`. It never uses a base NPC ID or name. Wire identities stay exact
+(`0x` + 8 hex digits). Existing storage remains keyed by runtime full form ID; this
+key does not repair continuity after a load-order change.
+
+`speech_receipt` reports one terminal outcome for one emitted line:
+`dialogue_request_id`, `line_id` (`<request>:dialogue:<n>`), the exact speaker
+`character` and `outcome` (`audio_completed`, `text_presented`, `interrupted`,
+`failed`). It is bound to the line's turn, generation and context sequence. The
+server reads text and speaker from its own utterance record. Exact repeats replay
+the stored state; a different outcome conflicts. Wrong request, line, character,
+turn, generation, context or a retired session is rejected. Only spoken and
+presented lines enter conversation history; generated, interrupted and failed
+lines are never heard. The client sends `audio_completed` only after native audio
+finishes. The reading timer is not renderer evidence, so the client never sends
+`text_presented` in this slice. Receipts are not retried.
+
 ## Player caps payment contract foundation (2026-09-08)
 
 The flat client advertises this contract and requires its own acknowledgement
