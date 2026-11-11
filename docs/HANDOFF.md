@@ -100,6 +100,93 @@ a new writer epoch and runtime session; the C1 explicit ACK and revision rules a
 No protocol, schema or endpoint changes. The main-menu revert and an early autosave are not
 verified in game. See ALPHA-ACCEPTANCE.md.
 
+## Speech receipt checkpoint contract
+
+Whether a heard line is visible after a later load depends on four separate events:
+
+1. **Receipt commit (server).** An `audio_completed` receipt for an emitted line, from its exact
+   speaker, stores the line's state and inserts its heard history row in one transaction under
+   the session lock. Repeating the stored state is idempotent and adds no row. Any other outcome
+   for that line is `receipt_conflict`, and an owner mismatch writes nothing.
+2. **Snapshot capture (server).** When a context commits, the server stores an immutable snapshot.
+   Its cutoff is the highest history row of that runtime session, generation and playthrough at
+   commit time. The cutoff is fixed before the server returns any ACK.
+3. **Exact accepted context ACK (client).** The client moves its saved checkpoint only on a
+   complete context response with exactly one `context_accepted` status, apart from framing lines
+   and any negotiated social offers. The publication must also be uncancelled, the session must
+   not be terminal, and the writer must still be current. A bare or wrong completion, an error, a
+   transport failure or a revoked writer keeps the older checkpoint.
+4. **Disk save (game).** A save writes the latest exact ACK held at that moment into its SCTX
+   record. After loading that save, the new session sends it as `loaded_context`, and the server
+   exposes the earlier session's history only up to that snapshot's cutoff. Rows outside the cutoff
+   stay in the database but are not visible from that save.
+
+A row is covered only by the cutoff of the last acknowledged snapshot. When the receipt, the ACK
+or the save happened does not decide it.
+
+**What makes a publication due.** The client keeps a history frontier that a later exact ACK must
+cover. A speech receipt raises it only when the receipt sent was `audio_completed` and the reply is
+an exact `speech_receipt_accepted` that stored `spoken`. The session must also be uncancelled and
+not terminal, in the same generation, with its writer current. Other sources raise the frontier
+too. On flat, an accepted dialogue line raises it when it arrives, before presentation. That is not
+a heard signal. In either lane, a delivered Wait action result raises it. A raised frontier makes a
+world publication due. A publication clears it only if it was raised before the publication started
+and the publication received an exact ACK in the current generation. Due is not a schedule: the
+next publication comes from the ordinary observation gate, and nothing guarantees one before a save.
+
+**A receipt racing a context.** The server serializes the two. If the receipt commits first, the
+context's cutoff covers its row. Another publication still stays due, because the receipt was
+noted after that publication started. If the context commits first, its cutoff excludes the row,
+even though its ACK may reach the client after the receipt reply. The publication stays due, and
+only a later exact ACK whose cutoff covers the row makes it reachable. A save holding the first ACK
+shows the line only in the first case.
+
+**Unknown outcomes and no recovery.** A receipt or context that fails in transport may still have
+been committed. Examples are a timeout, an unavailable server or a reply that never arrives. The
+client treats such a request as unproven:
+
+- A receipt raises no frontier. A committed heard row is in no save until a later exact ACK,
+  raised for some other reason, has a cutoff that covers it.
+- A context leaves the older checkpoint. The server may hold the lost snapshot, but no save names
+  it. The next publication uses a new sequence (the server refuses a reused one as `stale_context`).
+
+Nothing queries the server for committed receipts or snapshots, and receipts are never retried.
+A lost context is not resent. Later publications are new requests from the ordinary observation
+gate.
+
+**Same-world replacement.** A replacement session in the same world keeps the UUID and the latest
+exact ACK under a new writer epoch and runtime session. Its contexts carry that ACK, so it sees the
+earlier writer's history only up to that ACK's cutoff. Heard rows outside that cutoff stay in the
+database. Neither the replacement nor any save it writes can reach them. Saves already on disk
+never change: each keeps its own anchor, and an existing binding keeps the parent it was created with.
+
+The writer epoch gates context publication, the ACK and initialization. A revoked writer publishes
+nothing, moves no checkpoint and fails only its own init. It does not gate receipts. An earlier
+session that is still live may send a receipt, and the server may commit it with its heard row.
+Such a receipt is governed by cancellation, the receipt outbox, the terminal state and the
+generation check. Once its writer is revoked it raises no frontier.
+
+**Stop and Hard Halt.** These are separate controls, checked per lane.
+
+- *Flat Chatbox Stop* exists only in the flat chatbox UI. VR has no chatbox and no such control.
+  It is dialogue-only. It cancels the control wait and flat Wait packages, then ends voice capture,
+  the owned Wait, social tasks and the current turn. Both lanes take the same dialogue-only path,
+  without the chatbox steps, when presentation validation rejects a line. The connection, runtime
+  session, writer and checkpoint stay, so later exact ACKs still cover heard rows.
+- *Hard Halt* is the `StopTalking` binding, wired separately in the flat and VR input paths. It
+  makes the session terminal, cancels transport and discards pending network work, so queued
+  receipts and publications are never sent. The server halt is best effort: one request on a short
+  deadline, and SYNTH reports when it was not acknowledged or could not be queued. A request sent
+  before the halt may still have been committed and has an unknown outcome. No result after the
+  halt raises a frontier or moves the ACK. Once the halt completes, the session retires, and the
+  next session in the same world is a replacement under the rules above.
+
+Native scratch evidence uses a fake in-memory ledger, not the server, and recreates the store from
+co-save bytes instead of killing a process. It passed the C3 contract with 15 receipts and 15
+contexts. A disposable server HTTP probe for the same contract passed (2 tests, 1430 assertions,
+exit 0). It models a lost reply by discarding a received response, not by losing the network.
+Neither replaces the flat and VR game checks in ALPHA-ACCEPTANCE.md.
+
 ## Current handoff priorities
 
 Rangroo's handoff scope is bios, world knowledge, diaries, actions, and basic
