@@ -8,15 +8,38 @@ permissions:
   contents: read
 
 jobs:
-  alpha-base:
-    name: PR targets alpha
+  branch-policy:
+    name: PR branch policy
     runs-on: ubuntu-24.04
     steps:
-      - name: Check pull request base
+      - name: Check pull request head and base
         env:
-          PR_BASE: ${{ github.base_ref }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          BASE_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          if [ "$PR_BASE" != "alpha" ]; then
-            echo '::error::Every SYNTH pull request must target alpha. Edit the PR base branch.'
+          # Topic PRs (same repository or fork) target unstable. Only same-repository
+          # unstable -> dev and dev -> synth are promotions. Every other PR from a
+          # maintained branch, including legacy alpha, is a reverse or skipped promotion.
+          case "$PR_HEAD" in
+            unstable|dev|synth|alpha) maintained_head=1 ;;
+            *) maintained_head=0 ;;
+          esac
+
+          if [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" = "$BASE_REPO" ] && [ "$maintained_head" = 1 ]; then
+            case "$PR_HEAD:$PR_BASE" in
+              unstable:dev|dev:synth)
+                echo "Promotion $PR_HEAD -> $PR_BASE allowed."
+                exit 0
+                ;;
+            esac
+            echo "::error::$PR_HEAD -> $PR_BASE is not an allowed promotion. Promotions are only unstable -> dev and dev -> synth from $BASE_REPO."
             exit 1
           fi
+
+          if [ "$PR_BASE" != "unstable" ]; then
+            echo '::error::Topic pull requests must target unstable. Edit the PR base branch. Promotions to dev and synth come only from same-repository unstable and dev.'
+            exit 1
+          fi
+          echo "Topic PR ${HEAD_REPO:-<deleted fork>}:$PR_HEAD -> unstable allowed."

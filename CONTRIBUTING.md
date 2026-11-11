@@ -5,13 +5,16 @@ for the current state.
 
 ## Branches
 
-Start every feature branch from the latest `origin/alpha`. Open every PR as a **draft targeting
-`alpha`**. Do not target `unstable`, `dev`, `synth`, or an old feature branch. SYNTH uses an
-alpha-first workflow, unlike the other Dwemer mods. `synth` is the GitHub default branch.
+Start every feature branch from the latest `origin/unstable`. Open every topic PR, from this
+repository or a fork, as a **draft targeting `unstable`**. Do not target `dev`, `synth`,
+`alpha`, or an old feature branch. `synth` is the GitHub default branch.
 
-`unstable` and `dev` are reserved testing lanes; `synth` is the main/release lane. Maintainers
-control promotions explicitly. For dependent work, merge prerequisites into `alpha` before
-opening the next focused PR. All PRs still target `alpha`.
+`unstable` is the integration lane, `dev` is the tested-development lane and `synth` is the
+main/release lane. `alpha` is a legacy lane. Maintainers promote only from this repository,
+`unstable` -> `dev` and `dev` -> `synth`; the PR branch-policy check rejects reverse, skipped
+and fork promotions, including any PR from this repository's `alpha`. A fork PR is a topic PR
+whatever its head branch is named and may target `unstable`. See [BRANCHES.md](BRANCHES.md). For
+dependent work, merge prerequisites into `unstable` before opening the next focused PR.
 
 Explain the concrete behavior change, list actual checks and remaining limits, and link paired
 client/server changes. A build does not prove flat or VR gameplay behavior.

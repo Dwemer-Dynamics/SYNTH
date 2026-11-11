@@ -1,6 +1,6 @@
-<!-- Every PR targets alpha and opens as a draft; see CONTRIBUTING.md. -->
+<!-- Topic PRs target unstable and open as drafts. Promotions are only unstable -> dev and dev -> synth; see CONTRIBUTING.md. -->
 
-- [ ] Base branch is `alpha`.
+- [ ] Base branch is `unstable` (or this is a same-repository `unstable` -> `dev` / `dev` -> `synth` promotion).
 
 ## Summary
 

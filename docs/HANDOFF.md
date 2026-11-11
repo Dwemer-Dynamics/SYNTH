@@ -255,8 +255,9 @@ audits under `docs/` are kept as feature evidence, and some carry a historical b
 | Default endpoint | `http://127.0.0.1:8087/Synthserver/` (`config/SYNTH.ini` `[Server] BaseUrl`) |
 
 The public repositories are `Dwemer-Dynamics/SYNTH` and `Dwemer-Dynamics/Synthserver`.
-Start all work from `alpha` and target every PR at `alpha`. `synth` is the main/release branch;
-`dev` and `unstable` are reserved lanes. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+Start all work from `unstable` and target every topic PR at `unstable`. Promotions are only
+same-repository `unstable` -> `dev` and `dev` -> `synth`; `synth` is the main/release branch and
+`alpha` is a legacy lane. See [BRANCHES.md](../BRANCHES.md) and [CONTRIBUTING.md](../CONTRIBUTING.md).
 The public client source comes from private cleanup `618e924`; the paired server comes from
 `c12fb1b`. Older hashes and branch names below identify historical development checkpoints.
 

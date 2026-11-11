@@ -49,8 +49,9 @@ owns PHP, Apache, PostgreSQL, prompts, connectors, memory, TTS/STT services, and
 
 - Start from `docs/HANDOFF.md`. It records the current baseline, runtimes, deferred work and the
   retired ledgers. Track open in-game items in `docs/ALPHA-ACCEPTANCE.md`.
-- Start all work from `origin/alpha` and target every draft PR at `alpha`. Do not use
-  the other Dwemer mods' unstable-first workflow. Follow `CONTRIBUTING.md`.
+- Start all work from `origin/unstable` and target every draft topic PR at `unstable`.
+  Promotions are only same-repository `unstable` -> `dev` and `dev` -> `synth`; `alpha` is a
+  legacy lane and never a PR source or target. Follow `BRANCHES.md` and `CONTRIBUTING.md`.
 - Do not rebuild a chronological progress ledger. Update the relevant feature doc, the handoff
   and the acceptance checklist. Keep workstation paths, deployment receipts and private backup
   locations out of tracked files.
