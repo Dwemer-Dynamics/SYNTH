@@ -843,18 +843,26 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory")', actions)
         self.assertIn("route_line_(continuation, continuation_snapshot, cancellation)", actions)
         self.assertLess(session.index("    ContextPublication context_;"), session.index("    ActionExecution actions_;"))
-        self.assertIn("pending_rechat_ = PendingRechat{*actor, snapshot,", session)
+        rechat = read("src/client/rechat_continuation.hpp")
+        for forbidden in ("PluginSession", "RE::", "REL::", "IFalloutRuntime"):
+            self.assertNotIn(forbidden, rechat)
+        for moved in ("rechat_mutex_", "pending_rechat_", "rechat_capture_->", "rechat_capture_.", "prefetched_rechat_", "PendingRechat", "queue_rechat("):
+            self.assertNotIn(moved, session)
+        self.assertLess(session.index("    ActionExecution actions_;"), session.index("    RechatContinuation rechat_;"))
+        self.assertIn("pending_ = PendingRechat{actor, snapshot,", rechat)
+        self.assertIn("rechat_.observe_speaker(line, *actor, snapshot, cancellation, caption, response_binding(line, cancellation));", session)
         self.assertIn("response_binding(line, cancellation)", session)
         self.assertIn("{line.generation, line.context_sequence, cancellation, line.turn_id, {},", session)
         self.assertIn("invalidate_response(cancellation)", session)
-        self.assertIn("{line.request_id, line.line_id}", session)
-        self.assertIn("client_.uses_rechat_parent_contract() ? std::optional{rechat.parent}", session)
+        self.assertIn("{line.request_id, line.line_id}", rechat)
+        self.assertIn("client_.uses_rechat_parent_contract() ? std::optional{rechat.parent}", rechat)
         self.assertIn("deadline, begin_player_turn(actor_key(target)))", text_turn)
         self.assertIn("deadline, voice->turn))", voice)
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
-        # Includes deferred prefetch delivery and the separately owned social-task progress response.
-        self.assertEqual(session.count("requests_.track_response("), 5)
+        # Rechat owns deferred prefetch delivery and the child RPC; social owns its progress response.
+        self.assertEqual(session.count("requests_.track_response("), 3)
+        self.assertEqual(rechat.count("requests_.track_response("), 2)
         self.assertEqual(social.count("requests_.track_response("), 1)
         self.assertEqual(context.count("requests_.track_response("), 1)
         self.assertEqual(requests.count("track_activity(responses_,"), 3)
@@ -862,13 +870,17 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertNotIn("std::atomic_size_t& responses()", requests)
         self.assertNotIn("requests_.responses().", session)
         self.assertNotIn("active_responses_", session)
-        self.assertIn('playing->caption == pending_rechat_->caption && pending_rechat_->response_complete', session)
-        self.assertIn('if (actions_.while_idle([&] {', session)
-        self.assertIn('if (!rechat_capture_ && pending_rechat_ && playing &&', session)
-        self.assertIn('prefetch->append(line);', session)
-        self.assertIn('if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);', session)
-        capture_target = session.split('rechat_capture_target() {', 1)[1].split('void submit_rechat_capture(', 1)[0]
-        self.assertIn('if (runtime_paused() || player_voice_active()) return {};', capture_target)
+        promote = rechat.split('bool promote_playing_parent() {', 1)[1].split('bool pump_delivered_parent(', 1)[0]
+        self.assertIn('playing->caption == pending_->caption && pending_->response_complete', promote)
+        self.assertIn('return actions_.while_idle([&] {', promote)
+        self.assertIn('if (!capture_ && pending_ && playing &&', promote)
+        self.assertIn('if (rechat_.pump_prefetched()) return;', session)
+        self.assertIn('if (rechat_.promote_playing_parent()) return;', session)
+        self.assertIn('return actions_.try_while_idle([&] {', rechat)
+        self.assertIn('prefetch->append(line);', rechat)
+        self.assertIn('if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);', rechat)
+        capture_target = rechat.split('capture_target() {', 1)[1].split('void submit_capture(', 1)[0]
+        self.assertIn('if (runtime_paused() || dialogue_.voice_active()) return {};', capture_target)
         self.assertIn('bool player_voice_active() const { return dialogue_.voice_active(); }', session)
         voice_priority = dialogue.split('bool voice_active() const {', 1)[1].split('}', 1)[0]
         self.assertIn('ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_)', voice_priority)
@@ -879,14 +891,15 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         passive_voice = dialogue.split('OpenMicrophonePump pump_open_microphone(', 1)[1].split('[[nodiscard]]', 1)[0]
         self.assertIn('open_mic_passive_recording_ = true;', passive_voice)
         self.assertNotIn('is_cancelled() || runtime_paused()', capture_target)
-        self.assertIn('diagnostics::ConversationStage::prefetch_received', session)
-        deferred = session.split('else if (auto lines = deferred.prefetch->take(now))', 1)[1].split('if (runtime_paused_', 1)[0]
-        self.assertIn('rechat_capture_ = std::move(deferred)', deferred)
-        self.assertNotIn('handle_line(', deferred)
-        release = session.split('if (rechat->prefetched_lines) {', 1)[1].split('rechat->snapshot=std::move(snapshot)', 1)[0]
-        self.assertIn('selected_target(*snapshot,false,&retained).has_value()', release)
+        self.assertIn('diagnostics::ConversationStage::prefetch_received', rechat)
+        deferred = rechat.split('else if (auto lines = deferred.prefetch->take(now))', 1)[1].split('return true;', 1)[0]
+        self.assertIn('capture_ = std::move(deferred)', deferred)
+        self.assertNotIn('route_line_(', deferred)
+        release = rechat.split('if (rechat->prefetched_lines) {', 1)[1].split('rechat->snapshot=std::move(snapshot)', 1)[0]
+        self.assertIn('retained_target_(*snapshot,retained)', release)
+        self.assertIn('return selected_target(snapshot, false, &retained).has_value();', session)
         self.assertLess(release.index('snapshot->captured_at()>std::chrono::seconds{2}'), release.index('prefetch->release('))
-        self.assertLess(release.index('prefetch->release('), release.index('handle_line('))
+        self.assertLess(release.index('prefetch->release('), release.index('route_line_('))
         self.assertIn('!available(action->actor)', release)
         self.assertIn('!available(*action->target)', release)
         self.assertIn('prefetch->cancel(); return;', release)

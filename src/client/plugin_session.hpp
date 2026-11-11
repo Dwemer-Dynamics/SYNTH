@@ -5,7 +5,6 @@
 #include "audio/dialogue_audio.hpp"
 #include "audio/native_playback.hpp"
 #include "client/synth_client.hpp"
-#include "client/rechat_prefetch.hpp"
 #include "client/speech_receipts.hpp"
 #include "client/ambient_exchange.hpp"
 #include "client/automatic_activation.hpp"
@@ -17,6 +16,7 @@
 #include "client/context_publication.hpp"
 #include "client/action_execution.hpp"
 #include "client/social_task_execution.hpp"
+#include "client/rechat_continuation.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_delivery.hpp"
 #include "client/winhttp_transport.hpp"
@@ -142,7 +142,17 @@ public:
                     [this](const protocol_native::Identity& actor, runtime::IFalloutRuntime& runtime) {
                         return social_.release_for_action(actor, runtime);
                     },
-                    [this](std::string message) { push_notification(std::move(message)); }}} {}
+                    [this](std::string message) { push_notification(std::move(message)); }}},
+          rechat_{{configuration_, client_, network_, requests_, speech_, context_, social_, actions_, dialogue_,
+                   conversation_holds_, *trace_, terminal_, runtime_paused_,
+                   [this](const protocol_native::Line& line, const Snapshot& snapshot, const core::CancellationToken& cancellation,
+                          bool allow_followup, const std::shared_ptr<RechatPrefetch>& prefetch) {
+                       handle_line(line, snapshot, cancellation, allow_followup, prefetch);
+                   },
+                   [this](const core::RuntimeSnapshot& snapshot, const integration::PromptTarget& retained) {
+                       return selected_target(snapshot, false, &retained).has_value();
+                   },
+                   [this](std::string message) { push_notification(std::move(message)); }}} {}
 
     PluginSession(const PluginSession&) = delete;
     PluginSession& operator=(const PluginSession&) = delete;
@@ -532,13 +542,7 @@ public:
         (void)network_.discard_pending();
         (void)speech_.discard_pending_jobs();
         actions_.clear();
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            pending_rechat_.reset();
-            rechat_capture_.reset();
-            if (prefetched_rechat_) prefetched_rechat_->prefetch->cancel();
-            prefetched_rechat_.reset();
-        }
+        rechat_.clear();
         dialogue_.clear_cooldowns();
         const auto submitted = network_.try_submit(
             "network", tasks::TaskClass::current_turn,
@@ -798,10 +802,7 @@ public:
             return false;
         }
         if (!ambient_mode_ready()) return false;
-        if (!actions_.while_idle([&] {
-            std::scoped_lock lock{rechat_mutex_};
-            return !pending_rechat_ && !rechat_capture_ && !prefetched_rechat_;
-        })) return false;
+        if (!rechat_.idle()) return false;
         const auto hearing = snapshot->world() && snapshot->world()->interior
             ? configuration_.activation.interior_hearing_distance : configuration_.activation.exterior_hearing_distance;
         const auto pair = select_ambient_pair(*snapshot, now, cancellation_.token().generation(), hearing,
@@ -880,43 +881,10 @@ public:
         const bool holding = !external_ready() || !speech_.captions_idle();
         runtime.update_conversation_holds(conversation_holds_.frame(holding,runtime.generation()));
         speech_.pump(generation, runtime);
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            if (prefetched_rechat_) {
-                auto& deferred = *prefetched_rechat_;
-                const auto now = tasks::TaskLanes::Clock::now();
-                if (deferred.prefetch->invalid(now)) prefetched_rechat_.reset();
-                else if (runtime_paused() || player_voice_active()) return;
-                else if (auto lines = deferred.prefetch->take(now)) {
-                    deferred.prefetched_lines = std::move(*lines);
-                    rechat_capture_ = std::move(deferred);
-                    prefetched_rechat_.reset();
-                }
-                return;
-            }
-        }
+        if (rechat_.pump_prefetched()) return;
         if (runtime_paused_.load(std::memory_order_acquire) || player_voice_active()) return;
         // Only the completed response's final currently playing line may authorize one speculative child.
-        if (client_.rechat_scene_ready() && requests_.responses() == 0 &&
-            actions_.active() == 0 && !speech_.jobs_active() &&
-            speech_.captions_idle()) {
-            const auto playing = speech_.playback_frame();
-            // Lock order is action queue, then rechat; no action may be queued while the parent is promoted.
-            if (actions_.while_idle([&] {
-                std::scoped_lock lock{rechat_mutex_};
-                if (!rechat_capture_ && pending_rechat_ && playing &&
-                    playing->caption == pending_rechat_->caption && pending_rechat_->response_complete &&
-                    !pending_rechat_->binding.cancellation.is_cancelled() &&
-                    pending_rechat_->caption->delivery->load(std::memory_order_acquire) == presentation::DialogueDelivery::playing) {
-                    pending_rechat_->prefetch = std::make_shared<RechatPrefetch>(pending_rechat_->caption,
-                        tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{request_timeout_ms() * 2ULL});
-                    rechat_capture_ = std::move(pending_rechat_);
-                    pending_rechat_.reset();
-                    return true;
-                }
-                return false;
-            })) return;
-        }
+        if (rechat_.promote_playing_parent()) return;
         if (!speech_.playback_idle() || speech_.jobs_active() ||
             requests_.responses() != 0 ||
             actions_.active() != 0 ||
@@ -926,27 +894,7 @@ public:
         // A queued action outranks rechat and diary work even while it waits for its social release.
         if (actions_.pump(runtime) != ActionExecution::Pump::idle) return;
         if (!speech_.captions_idle()) return;
-        std::optional<PendingRechat> rechat;
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            if (pending_rechat_ && (pending_rechat_->binding.cancellation.is_cancelled() ||
-                !pending_rechat_->snapshot || pending_rechat_->snapshot->generation().value() != generation ||
-                pending_rechat_->caption->delivery->load(std::memory_order_acquire) == presentation::DialogueDelivery::discarded)) {
-                pending_rechat_.reset();
-                rechat_capture_.reset();
-            }
-            if (pending_rechat_ && pending_rechat_->response_complete && pending_rechat_->caption->delivered()) {
-                rechat = std::move(pending_rechat_);
-                pending_rechat_.reset();
-                rechat_capture_.reset();
-            }
-        }
-        if (rechat) {
-            if (client_.rechat_scene_ready()) {
-                std::scoped_lock lock{rechat_mutex_};
-                rechat_capture_=std::move(rechat);
-            } else if (!client_.uses_rechat_scene_contract()) queue_rechat(std::move(*rechat));
-        } else {
+        if (!rechat_.pump_delivered_parent(generation)) {
             pump_diary_status();
             pump_automatic_diary();
         }
@@ -975,95 +923,10 @@ public:
     }
 
     // The host captures outside this object: a game-thread capture can retire the whole session.
-    [[nodiscard]] std::optional<integration::PromptTarget> rechat_capture_target() {
-        std::scoped_lock lock{rechat_mutex_};
-        if (rechat_capture_ && rechat_capture_->binding.cancellation.is_cancelled()) {
-            if (rechat_capture_->prefetch) rechat_capture_->prefetch->cancel();
-            rechat_capture_.reset();
-        }
-        if (runtime_paused() || player_voice_active()) return {};
-        return rechat_capture_ ? std::optional{rechat_capture_->target} : std::nullopt;
-    }
+    [[nodiscard]] std::optional<integration::PromptTarget> rechat_capture_target() { return rechat_.capture_target(); }
 
     void submit_rechat_capture(Snapshot snapshot, const integration::PromptTarget& target) {
-        std::optional<PendingRechat> rechat;
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            rechat=std::move(rechat_capture_);
-            rechat_capture_.reset();
-        }
-        if (rechat && runtime_paused() && !rechat->binding.cancellation.is_cancelled() &&
-            !terminal_.load(std::memory_order_acquire)) {
-            std::scoped_lock lock{rechat_mutex_};
-            rechat_capture_=std::move(rechat);
-            return;
-        }
-        if (!rechat || !snapshot || target.session.is_cancelled() ||
-            rechat->binding.cancellation.is_cancelled() || runtime_paused() ||
-            terminal_.load(std::memory_order_acquire)) {
-            if (rechat && rechat->prefetch) rechat->prefetch->cancel();
-            return;
-        }
-        const auto now=core::SnapshotClock::now();
-        const auto& previous=*rechat->snapshot;
-        if (snapshot->generation()!=previous.generation() || snapshot->variant()!=previous.variant() ||
-            now<snapshot->captured_at() || snapshot->captured_at()<previous.captured_at() ||
-            now-snapshot->captured_at()>std::chrono::seconds{2} ||
-            !snapshot->world() || !previous.world() ||
-            !presentation::same_presentation_scene(*previous.world(),*snapshot->world()) ||
-            actor_key(identity(snapshot->player()))!=actor_key(identity(previous.player())) ||
-            target.form_id!=rechat->target.form_id || !selected_target(*snapshot,false,&rechat->target)) {
-            trace_->record(diagnostics::ConversationStage::continuation_scene_rejected,rechat->binding.generation,
-                rechat->binding.sequence,rechat->parent.request_id,rechat->parent.line_id);
-            if (rechat->prefetch) rechat->prefetch->cancel();
-            return;
-        }
-        if (rechat->prefetched_lines) {
-            // Revalidate every copied speaker/action actor against the release capture, without retargeting.
-            const auto available = [&](const protocol_native::Identity& actor) {
-                const auto key = actor_key(actor);
-                if (key == actor_key(identity(previous.player()))) return true;
-                const auto found = std::ranges::find_if(previous.actors(), [&](const auto& candidate) {
-                    return actor_key(identity(candidate)) == key;
-                });
-                if (found == previous.actors().end()) return false;
-                const integration::PromptTarget retained{rechat->binding.cancellation,found->form_id(),found->base_form_id(),
-                    found->origin_plugin(),found->base_origin_plugin(),found->playthrough_id(),found->name(),true};
-                return selected_target(*snapshot,false,&retained).has_value();
-            };
-            for (const auto& line : *rechat->prefetched_lines) {
-                if (const auto* speech = std::get_if<protocol_native::Dialogue>(&line.payload)) {
-                    if (const auto* actor = std::get_if<protocol_native::Identity>(&speech->speaker); actor && !available(*actor)) {
-                        rechat->prefetch->cancel();
-                        return;
-                    }
-                }
-                if (const auto* action = std::get_if<protocol_native::Action>(&line.payload)) {
-                    if (!available(action->actor) || (action->target && !available(*action->target))) {
-                        rechat->prefetch->cancel();
-                        return;
-                    }
-                }
-            }
-            if (rechat->prefetch->invalid(now)) return;
-            const auto token = rechat->prefetch->token();
-            const auto accepted = network_.try_submit("network", tasks::TaskClass::current_turn,
-                now + std::chrono::milliseconds{request_timeout_ms()}, token,
-                requests_.track_response(
-                    [this, snapshot = std::move(snapshot), lines = std::move(*rechat->prefetched_lines), prefetch = rechat->prefetch](const core::CancellationToken& cancellation) {
-                        if (core::SnapshotClock::now()-snapshot->captured_at()>std::chrono::seconds{2}) { prefetch->cancel(); return; }
-                        if (!prefetch->release(core::SnapshotClock::now())) return;
-                        for (const auto& line : lines) {
-                            if (cancellation.is_cancelled()) return;
-                            handle_line(line, snapshot, cancellation, true, prefetch);
-                        }
-                    }));
-            if (accepted != tasks::SubmitResult::accepted) rechat->prefetch->cancel();
-            return;
-        }
-        rechat->snapshot=std::move(snapshot);
-        rechat->fresh_scene=true;
-        queue_rechat(std::move(*rechat));
+        rechat_.submit_capture(std::move(snapshot), target);
     }
 
     [[nodiscard]] bool begin_voice_capture(const Snapshot& snapshot) {
@@ -1140,10 +1003,7 @@ public:
             requests_.responses()==0 && !speech_.jobs_active() &&
             speech_.playback_idle();
         if (!idle) return false;
-        return actions_.try_while_idle([&] {
-            std::unique_lock rechat{rechat_mutex_,std::try_to_lock};
-            return rechat.owns_lock() && !pending_rechat_ && !rechat_capture_ && !prefetched_rechat_;
-        });
+        return rechat_.try_idle();
     }
 
     // Queue admission does not grant execution: only exact-owner Ask may pass a busy pipeline later.
@@ -1578,21 +1438,6 @@ public:
     }
 
 private:
-    // Atomically retain the emitted actor and parent with their copied world/cancellation owner.
-    struct PendingRechat final {
-        protocol_native::Identity actor;
-        Snapshot snapshot;
-        ContextBinding binding;
-        protocol_native::RechatParent parent;
-        presentation::DialogueCaptions::Caption caption;
-        bool response_complete{};
-        integration::PromptTarget target;
-        bool fresh_scene{};
-        unsigned scene_retries{};
-        std::shared_ptr<RechatPrefetch> prefetch;
-        std::optional<std::vector<protocol_native::Line>> prefetched_lines;
-    };
-
     [[nodiscard]] core::CancellationToken current_turn_token() { return dialogue_.current_turn(); }
 
     // Per-call views of session state passed to the dialogue owner; never retained by it.
@@ -1613,13 +1458,7 @@ private:
         dialogue_.cancel_interrupted_turn();
         speech_.interrupt_playback();
         actions_.clear();
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            pending_rechat_.reset();
-            rechat_capture_.reset();
-            if (prefetched_rechat_) prefetched_rechat_->prefetch->cancel();
-            prefetched_rechat_.reset();
-        }
+        rechat_.clear();
         return turn;
     }
 
@@ -1847,18 +1686,12 @@ private:
         }
         if (const auto* status = std::get_if<protocol_native::Status>(&line.payload);
             status && status->code == "combat_identification_complete") {
-            std::scoped_lock lock{rechat_mutex_};
-            if (pending_rechat_ && pending_rechat_->parent.request_id==line.request_id &&
-                pending_rechat_->binding.sequence==line.context_sequence) {
-                pending_rechat_.reset();
-            }
+            rechat_.drop_combat_parent(line);
             return;
         }
         if (const auto* end = std::get_if<protocol_native::End>(&line.payload); end && allow_followup) {
             if(end->status=="complete")social_.complete_request(line.request_id);
-            std::scoped_lock lock{rechat_mutex_};
-            if (pending_rechat_ && pending_rechat_->parent.request_id == line.request_id)
-                pending_rechat_->response_complete = end->status == "complete";
+            rechat_.complete_parent(line.request_id, end->status == "complete");
             return;
         }
         if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload)) {
@@ -1873,31 +1706,8 @@ private:
             const bool social_reply=social_.track(line,caption);
             speech_.deliver(line, *dialogue, snapshot, cancellation, caption, prefetch);
             if (!allow_followup||social_reply) return;
-            if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue->speaker)) {
-                if (actor_key(*actor) == actor_key(identity(snapshot->player()))) return;
-                // A later ineligible NPC line must not leave an earlier line as the continuation parent.
-                {
-                    std::scoped_lock lock{rechat_mutex_};
-                    pending_rechat_.reset();
-                    rechat_capture_.reset();
-                }
-                const auto current_actor = std::ranges::find_if(
-                    snapshot->actors(), [&](const core::ActorSnapshot& candidate) {
-                        return actor_key(identity(candidate)) == actor_key(*actor);
-                    });
-                if (current_actor != snapshot->actors().end() &&
-                    targeting::dialogue_actor_available(*current_actor) &&
-                    !consume_rechat_suppression(*actor) &&
-                    !conversation_on_cooldown(*actor, core::SnapshotClock::now())) {
-                    std::scoped_lock lock{rechat_mutex_};
-                    pending_rechat_ = PendingRechat{*actor, snapshot,
-                        response_binding(line, cancellation),
-                        {line.request_id, line.line_id}, caption};
-                    pending_rechat_->target={cancellation,current_actor->form_id(),current_actor->base_form_id(),
-                        current_actor->origin_plugin(),current_actor->base_origin_plugin(),current_actor->playthrough_id(),
-                        current_actor->name(),true};
-                }
-            }
+            if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue->speaker))
+                rechat_.observe_speaker(line, *actor, snapshot, cancellation, caption, response_binding(line, cancellation));
             return;
         }
         const auto* action = std::get_if<protocol_native::Action>(&line.payload);
@@ -1916,109 +1726,6 @@ private:
         return {line.generation, line.context_sequence, cancellation, line.turn_id, {}, [this, cancellation] {
             invalidate_response(cancellation);
         }};
-    }
-
-    // Retry only before a child RPC exists. Pause holds ownership; stale captures get two fresh attempts.
-    void defer_rechat_capture(PendingRechat rechat) {
-        std::scoped_lock lock{rechat_mutex_};
-        if (rechat.binding.cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-            rechat_capture_ || (!runtime_paused() && ++rechat.scene_retries > 2)) {
-            if (rechat.prefetch) rechat.prefetch->cancel();
-            trace_->record(diagnostics::ConversationStage::continuation_scene_rejected,rechat.binding.generation,
-                rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
-            return;
-        }
-        prefetched_rechat_.reset();
-        rechat_capture_=std::move(rechat);
-    }
-
-    void queue_rechat(PendingRechat rechat) {
-        const auto social_execution=social_.execution_for_request(rechat.parent.request_id);
-        const auto prefetch = rechat.prefetch;
-        if (rechat.prefetch) {
-            rechat.binding.cancellation = rechat.prefetch->token();
-            std::scoped_lock lock{rechat_mutex_};
-            prefetched_rechat_ = rechat;
-        }
-        const auto binding = rechat.binding;
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, binding.cancellation,
-            requests_.track_response(
-            [this, rechat = std::move(rechat),social_execution](
-                const core::CancellationToken& cancellation) mutable {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-
-                try {
-                    if (rechat.fresh_scene) {
-                        if (!client_.rechat_scene_ready()) {
-                            if (rechat.prefetch) rechat.prefetch->cancel();
-                            return;
-                        }
-                        if (runtime_paused() || core::SnapshotClock::now()-rechat.snapshot->captured_at()>std::chrono::seconds{2}) {
-                            defer_rechat_capture(std::move(rechat));
-                            return;
-                        }
-                        const auto publication=publish_snapshot(rechat.snapshot,rechat.actor,cancellation);
-                        if (publication.status==RequestStatus::complete && !cancellation.is_cancelled() &&
-                            (runtime_paused() || core::SnapshotClock::now()-rechat.snapshot->captured_at()>std::chrono::seconds{2}) &&
-                            !terminal_.load(std::memory_order_acquire)) {
-                            // No child request exists yet. Recapture on resume, without spending a second round.
-                            defer_rechat_capture(std::move(rechat));
-                            return;
-                        }
-                        if (publication.status!=RequestStatus::complete || cancellation.is_cancelled() ||
-                            runtime_paused() || core::SnapshotClock::now()-rechat.snapshot->captured_at()>std::chrono::seconds{2}) {
-                            if (rechat.prefetch) rechat.prefetch->cancel();
-                            return;
-                        }
-                        rechat.parent.scene_context_sequence=publication.context_binding.sequence;
-                    }
-                    trace_->record(diagnostics::ConversationStage::continuation_dispatch,rechat.binding.generation,
-                        rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
-                    const auto outcome = client_.trigger(
-                        "rechat", rechat.actor, [this, snapshot = rechat.snapshot, cancellation, prefetch = rechat.prefetch, parent_request=rechat.parent.request_id,social_execution](const protocol_native::Line& line) {
-                            social_.child_request(parent_request,line.request_id);
-                            if (prefetch) {
-                                trace_->record(diagnostics::ConversationStage::prefetch_received,line.generation,line.context_sequence,line.request_id,line.line_id);
-                                prefetch->append(line);
-                                if (prefetch->claim_media(line)) speech_.prepare_rechat_media(line, prefetch);
-                            }
-                            else handle_line(line, snapshot, cancellation);
-                            if (const auto* status = std::get_if<protocol_native::Status>(&line.payload);
-                                status && status->code == "rechat_complete") {
-                                auto stage = diagnostics::ConversationStage::continuation_complete;
-                                if (status->detail == "no_candidate") stage = diagnostics::ConversationStage::continuation_no_candidate;
-                                else if (status->detail == "private") stage = diagnostics::ConversationStage::continuation_private;
-                                else if (status->detail == "budget_exhausted") stage = diagnostics::ConversationStage::continuation_budget_exhausted;
-                                else if (status->detail == "ineligible") stage = diagnostics::ConversationStage::continuation_ineligible;
-                                trace_->record(stage,line.generation,line.context_sequence,line.request_id,line.line_id);
-                                if(!social_execution.empty()&&(status->detail=="no_candidate"||status->detail=="private"||
-                                    status->detail=="budget_exhausted"||status->detail=="ineligible"))social_.fail_execution(social_execution);
-                            }
-                        }, std::nullopt, std::nullopt, rechat.binding, std::nullopt, std::nullopt, std::nullopt,
-                        client_.uses_rechat_parent_contract() ? std::optional{rechat.parent} : std::nullopt);
-                    if (rechat.prefetch) rechat.prefetch->finish(outcome.status == RequestStatus::complete);
-                    if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
-                        if(!social_execution.empty())social_.fail_execution(social_execution);
-                        conversation_holds_.suspend(cancellation);
-                        trace_->record(diagnostics::ConversationStage::continuation_failed,rechat.binding.generation,
-                            rechat.binding.sequence,rechat.parent.request_id,rechat.parent.line_id);
-                        push_notification("SYNTH rechat stopped: " + outcome.detail);
-                    }
-                } catch (const std::exception& error) {
-                    if(!social_execution.empty())social_.fail_execution(social_execution);
-                    conversation_holds_.suspend(cancellation);
-                    push_notification(std::string{"SYNTH rechat stopped: "} + error.what());
-                    if (rechat.prefetch) rechat.prefetch->cancel();
-                }
-            }));
-        if (accepted != tasks::SubmitResult::accepted) {
-            trace_->record(diagnostics::ConversationStage::continuation_queue_full,binding.generation,binding.sequence);
-            push_notification("SYNTH rechat stopped because the network queue is full");
-            if (prefetch) prefetch->cancel();
-        }
     }
 
     [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
@@ -2079,11 +1786,6 @@ private:
         return dialogue_.on_cooldown(actor_key(actor), now);
     }
 
-    [[nodiscard]] bool consume_rechat_suppression(
-        const protocol_native::Identity& actor) {
-        return dialogue_.consume_rechat_suppression(actor_key(actor));
-    }
-
     void clear_rechat_suppression(const protocol_native::Identity& actor) {
         dialogue_.clear_rechat_suppression(actor_key(actor));
     }
@@ -2098,17 +1800,7 @@ private:
             if (last_automatic_actor_ == key) last_automatic_actor_.clear();
             automatic_activation_cadence_.forget(key);
         }
-        {
-            std::scoped_lock lock{rechat_mutex_};
-            if (pending_rechat_ && actor_key(pending_rechat_->actor) == key) {
-                pending_rechat_.reset();
-            }
-            if (rechat_capture_ && actor_key(rechat_capture_->actor)==key) rechat_capture_.reset();
-            if (prefetched_rechat_ && actor_key(prefetched_rechat_->actor)==key) {
-                prefetched_rechat_->prefetch->cancel();
-                prefetched_rechat_.reset();
-            }
-        }
+        rechat_.forget(key);
     }
 
     void push_notification(std::string message) {
@@ -2309,11 +2001,7 @@ private:
     std::string last_automatic_actor_;
     AutomaticActivationCadence automatic_activation_cadence_;
     std::mutex active_quest_actors_mutex_;
-    std::mutex rechat_mutex_;
     std::shared_ptr<diagnostics::ConversationTrace> trace_{std::make_shared<diagnostics::ConversationTrace>()};
-    std::optional<PendingRechat> pending_rechat_;
-    std::optional<PendingRechat> rechat_capture_;
-    std::optional<PendingRechat> prefetched_rechat_;
     std::mutex notification_mutex_;
     std::deque<std::string> notifications_;
     // Borrows configuration, client, control lane and trace declared above; ~PluginSession joins the
@@ -2338,10 +2026,16 @@ private:
     // session; ~PluginSession joins the network lane first. Native visits run only in its game-thread
     // pump and in the action queue's release hook, never from a worker.
     SocialTaskExecution social_;
-    // Declared last: borrows configuration, client, network lane, dispatcher, dialogue, context and
-    // the terminal flag. Its network tasks capture it and its callbacks capture this session;
-    // ~PluginSession joins the network lane first. Dispatcher tasks never capture it.
+    // Borrows configuration, client, network lane, dispatcher, dialogue, context and the terminal
+    // flag. Its network tasks capture it and its callbacks capture this session; ~PluginSession joins
+    // the network lane first. Dispatcher tasks never capture it.
     ActionExecution actions_;
+    // Declared last: borrows configuration, client, network lane, response accounting, speech,
+    // context, social tasks, the action queue (for the action-then-rechat gates), dialogue, holds,
+    // trace and the terminal/pause flags. Its network tasks capture it and its callbacks capture this
+    // session; ~PluginSession joins the network lane first. Speculative media jobs on the speech lane
+    // capture only the copied line and shared prefetch.
+    RechatContinuation rechat_;
 };
 
 }  // namespace synth::client
