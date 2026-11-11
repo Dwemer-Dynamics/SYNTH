@@ -944,8 +944,24 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         capture_target = rechat.split('capture_target() {', 1)[1].split('void submit_capture(', 1)[0]
         self.assertIn('if (runtime_paused() || dialogue_.voice_active()) return {};', capture_target)
         self.assertIn('bool player_voice_active() const { return dialogue_.voice_active(); }', session)
-        voice_priority = dialogue.split('bool voice_active() const {', 1)[1].split('}', 1)[0]
-        self.assertIn('ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_)', voice_priority)
+        voice_priority = dialogue.split('bool voice_active() const noexcept {', 1)[1].split('}', 1)[0]
+        self.assertIn('return voice_active_.load(std::memory_order_acquire);', voice_priority)
+        self.assertNotIn('open_mic_', voice_priority)
+        publication = dialogue.split('void publish_voice_activity() noexcept {', 1)[1].split('}', 1)[0]
+        self.assertIn('ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_,', publication)
+        self.assertIn('std::memory_order_release', publication)
+        self.assertIn('std::atomic_bool voice_active_{};', dialogue)
+        # Teardown publishes known inactivity without sampling game-thread flags; speech is published
+        # before the turn and notification callbacks.
+        teardown = dialogue.split('void cancel_microphone() noexcept {', 1)[1].split('}', 1)[0]
+        self.assertIn('publish_voice_inactive();', teardown)
+        self.assertNotIn('publish_voice_activity', teardown)
+        detected = dialogue.split('if (!open_mic_voice_detected_) {', 1)[1].split('return {MicrophoneEvent::speech_started', 1)[0]
+        self.assertLess(detected.index('publish_voice_activity();'), detected.index('begin_turn()'))
+        self.assertLess(detected.index('publish_voice_activity();'), detected.index('notify_('))
+        stop = dialogue.split('end_voice_capture(const Snapshot&', 1)[1].split('const auto retained', 1)[0]
+        self.assertIn('catch (...)', stop)
+        self.assertIn('publish_voice_inactive();', stop)
         ambient_voice = read('src/client/ambient_exchange.hpp').split('bool ambient_player_voice_active(', 1)[1].split('bool ambient_actor_class_supported(', 1)[0]
         self.assertIn('return recording && (!passive_open_mic || voice_detected);', ambient_voice)
         manual_voice = dialogue.split('bool begin_voice_capture(', 1)[1].split('void cancel_voice_capture()', 1)[0]

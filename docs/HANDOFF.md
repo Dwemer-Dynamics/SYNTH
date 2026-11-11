@@ -184,7 +184,17 @@ worker reserved for cancellation. The session destructor joins network, speech a
 before any owner is destroyed. Native unit tests, build gates and fake-server checks do not compile
 or exercise a live `PluginSession`; they give no flat or VR gameplay, audio or provider acceptance.
 Menu, clipboard, hotkey, notification and native presentation behavior is unchanged by this
-composition. A known open-microphone flag read by the activation worker is outside this map.
+composition. `PlayerDialogue` publishes voice activity (recording and the open-microphone
+passive/speech flags) as one atomic value, so the flat automatic-activation recheck on a network
+worker reads a coherent value without touching microphone state. The game thread classifies it
+when capture starts, when open-microphone speech is detected (before the turn and notification
+callbacks) and at silence end; every stop, cancel, passive timeout and teardown (including
+`~PluginSession` on the retirement worker) publishes known inactivity without reading game-thread
+flags, also when building the stopped recording throws. The exact prior checkpoint (client
+`3ee97b2`, server `3e637c6`) had both x64 builds and packages audited. This candidate, paired
+with server #10 at `3e637c6` (server #11 is documentation-only), has local x64 flat and VR builds,
+both package and manifest audits passed, and each packaged DLL matches the built DLL exactly. It
+was not deployed; flat and VR gameplay, a real microphone and providers remain unchecked.
 
 ## Build and test
 

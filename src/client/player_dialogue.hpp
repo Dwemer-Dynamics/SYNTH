@@ -13,6 +13,7 @@
 #include "tasks/task_lanes.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -244,13 +245,18 @@ public:
         return lock.owns_lock() && external_owner_.allows_ask(actor, pipeline_idle);
     }
 
-    // Microphone state. Recording and target binding are game-thread only.
+    // Microphone state. Recording, the open-microphone flags and target binding are game-thread only;
+    // every transition publishes voice activity as one value, so worker reads never sample them apart.
     [[nodiscard]] bool recording() const noexcept { return microphone_.recording(); }
-    void cancel_microphone() noexcept { microphone_.cancel(); }
-
-    [[nodiscard]] bool voice_active() const {
-        return ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_, open_mic_voice_detected_);
+    // Inactive teardown: hard_halt on the game thread, or ~PluginSession on the retirement worker.
+    // Capture has definitively stopped, so this publishes false without reading game-thread flags.
+    void cancel_microphone() noexcept {
+        microphone_.cancel();
+        publish_voice_inactive();
     }
+
+    // Any thread: the last published recording && (!passive || voice detected).
+    [[nodiscard]] bool voice_active() const noexcept { return voice_active_.load(std::memory_order_acquire); }
 
     [[nodiscard]] std::uint32_t voice_target_form_id() const noexcept {
         return voice_target_ ? voice_target_->form_id : 0;
@@ -265,6 +271,7 @@ public:
         const auto started = microphone_.start();
         if (started) {
             open_mic_passive_recording_ = false;
+            publish_voice_activity();
             voice_turn_ = begin_turn();
             bind_voice_target(snapshot, controls);
             std::forward<Started>(on_started)();
@@ -278,6 +285,7 @@ public:
         microphone_.cancel();
         open_mic_passive_recording_ = false;
         open_mic_voice_detected_ = false;
+        publish_voice_inactive();
         voice_target_.reset();
         if (!voice_turn_.is_cancelled()) {
             std::scoped_lock lock{conversation_mutex_};
@@ -297,8 +305,15 @@ public:
     // Empty and target-less recordings are reported here; the session submits an admitted turn.
     template <class Suspended>
     [[nodiscard]] std::optional<VoiceTurn> end_voice_capture(const Snapshot& snapshot, Suspended&& suspended) {
-        auto wave = microphone_.stop();
+        std::optional<std::vector<std::byte>> wave;
+        try {
+            wave = microphone_.stop();
+        } catch (...) {
+            publish_voice_inactive(); // stop() ends recording before its wave allocation can throw.
+            throw;
+        }
         open_mic_passive_recording_ = false;
+        publish_voice_inactive();
         const auto retained = std::exchange(voice_target_, std::nullopt);
         if (!voice_turn_.is_cancelled()) {
             std::scoped_lock lock{conversation_mutex_};
@@ -331,16 +346,19 @@ public:
                 open_mic_passive_recording_ = true;
                 open_mic_started_at_ = now;
                 open_mic_voice_detected_ = false;
+                publish_voice_activity();
                 voice_target_.reset();
             }
             return {};
         }
         if (microphone_.recent_peak() >= configuration_.audio.open_mic_sensitivity) {
             if (!open_mic_voice_detected_) {
+                // Publish before the callbacks: the network worker may recheck activation during them.
+                open_mic_voice_detected_ = true;
+                publish_voice_activity();
                 voice_turn_ = begin_turn();
                 voice_target_.reset();
                 notify_("SYNTH open microphone detected speech");
-                open_mic_voice_detected_ = true;
                 open_mic_last_voice_at_ = now;
                 return {MicrophoneEvent::speech_started, true};
             }
@@ -352,12 +370,14 @@ public:
             const auto silence = std::chrono::duration<double>{now - open_mic_last_voice_at_}.count();
             if (silence >= configuration_.audio.open_mic_end_delay_seconds) {
                 open_mic_voice_detected_ = false;
+                publish_voice_activity();
                 return {MicrophoneEvent::speech_finished, false};
             }
         } else if (open_mic_started_at_.time_since_epoch().count() != 0 &&
                    now - open_mic_started_at_ >= std::chrono::seconds{29}) {
             microphone_.cancel();
             open_mic_passive_recording_ = false;
+            publish_voice_inactive();
             open_mic_started_at_ = {};
         }
         return {};
@@ -540,6 +560,15 @@ public:
     }
 
 private:
+    // Game-thread classification after capture starts or open-microphone speech flags change.
+    void publish_voice_activity() noexcept {
+        voice_active_.store(ambient_player_voice_active(microphone_.recording(), open_mic_passive_recording_,
+            open_mic_voice_detected_), std::memory_order_release);
+    }
+
+    // Capture has definitively stopped; safe from teardown without reading game-thread state.
+    void publish_voice_inactive() noexcept { voice_active_.store(false, std::memory_order_release); }
+
     // Player conversation only: commands retain their existing pointed/explicit selection semantics.
     [[nodiscard]] std::optional<context::TargetContext> conversation_target(
         const core::RuntimeSnapshot& snapshot, const protocol_native::ControlSelection& controls,
@@ -606,6 +635,7 @@ private:
     core::SnapshotClock::time_point open_mic_last_voice_at_{};
     bool open_mic_voice_detected_{};
     bool open_mic_passive_recording_{};
+    std::atomic_bool voice_active_{};
 };
 
 }  // namespace synth::client
