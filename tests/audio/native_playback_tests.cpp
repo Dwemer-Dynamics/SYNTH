@@ -57,6 +57,44 @@ std::size_t position(std::string_view event) {
     return static_cast<std::size_t>(it-fake_xaudio::events.begin());
 }
 bool close(float left, float right) { return std::abs(left-right)<0.0001F; }
+// Correlated native v2 replies: init grants native turns; every other event pops one scripted status list.
+struct ScriptedTransport final : client::IHttpTransport {
+    std::vector<std::string> types;
+    std::deque<std::vector<protocol_native::Status>> statuses;
+    std::deque<std::string> ends;
+    bool empty_body{};
+    client::HttpResult send(const client::HttpRequest& request, const client::Cancelled&) override {
+        const auto event=json::parse(request.body);
+        types.push_back(protocol_native::text(event,"type"));
+        if(empty_body && types.back()!="init") return {client::TransportFailure::none,{200,"application/json","{}"}};
+        const auto line=[&](std::string type,json::Value payload) {
+            return json::write(json::Value{protocol_native::object({
+                {"schema","synth.response.line.v2"},{"protocol_version",std::uint64_t{2}},{"type",type},{"line_id",type},
+                {"request_id",protocol_native::text(event,"request_id")},{"turn_id",protocol_native::text(event,"turn_id")},
+                {"generation",protocol_native::integer(event,"generation")},{"game","fo4"},
+                {"runtime_variant",protocol_native::text(event,"runtime_variant")},{"payload",std::move(payload)},
+                {"context_sequence",protocol_native::integer(event,"context_sequence")}})})+"\n";
+        };
+        auto body=line("response_start",json::Value{protocol_native::object({{"server_version","test"}})});
+        std::string end{"complete"};
+        if(types.back()=="init") body+=line("status",json::Value{protocol_native::object({{"code","init_accepted"},{"native_turn",true}})});
+        else {
+            CHECK(!statuses.empty() && !ends.empty());
+            for(std::size_t index=0;const auto& status:statuses.front()) {
+                auto payload=protocol_native::object({{"code",status.code}});
+                if(!status.detail.empty()) payload.emplace_back("detail",status.detail);
+                auto encoded=line("status",json::Value{std::move(payload)});
+                const auto id=encoded.find("\"line_id\":\"status\"");
+                if(id!=std::string::npos) encoded.replace(id,18,"\"line_id\":\"status-"+std::to_string(index++)+"\"");
+                body+=encoded;
+            }
+            statuses.pop_front(); end=std::move(ends.front()); ends.pop_front();
+        }
+        body+=line("response_end",json::Value{protocol_native::object({{"status",end}})});
+        return {client::TransportFailure::none,{200,"application/x-ndjson",std::move(body)}};
+    }
+    void cancel_all() noexcept override {}
+};
 audio::SpatialPlaybackSettings spatial_settings() { return {0.8F,1.0,100.0,200.0,1.0,1.0,false}; }
 audio::NativeClip spatial_clip(const core::CancellationToken& token, unsigned channels = 1) {
     auto value = clip(token); value.bytes = wave(channels); value.spatial = spatial_settings(); return value;
@@ -430,5 +468,85 @@ int main() try {
         // Production order: the borrowed network lane joins before the speech owner is destroyed.
         network.shutdown(tasks::ShutdownMode::cancel_pending);
     }
-    std::cout<<"native playback tests passed: deferred spatial start/resume, sample preservation, text timeout/failure fallback, destination-major channel mixing and lifecycle fences\n";
+    {
+        // Production terminal hook -> outbox -> receipt drain -> SynthClient ACK parsing. Only the exact
+        // accepted spoken ACK of a completed-audio receipt reaches the heard hook; tracing follows the ACK.
+        runtime::FakeFalloutRuntime fallout{core::RuntimeVariant::flat};
+        const auto current=fallout.capture_snapshot(core::SnapshotClock::now())->generation();
+        ScriptedTransport wire;
+        client::SynthClient synth{wire,client::SessionOptions{.runtime_session_id="session:flat:receipts",
+            .runtime_variant="flat",.client_version="test",.runtime_version="1.10.163",
+            .capabilities={"dialogue.native_turn","dialogue.turn_ownership"},.protocol_version=2}};
+        CHECK(synth.initialize(current.value(),false).status==client::RequestStatus::complete && synth.native_turn_ready());
+        tasks::TaskLanes network{{tasks::LaneConfig{"network",4,1,3}},0}; // Drained inline by run_until_idle.
+        std::atomic_bool terminal{};
+        core::CancellationSource session{current};
+        auto trace=std::make_shared<diagnostics::ConversationTrace>();
+        std::vector<std::uint64_t> heard;
+        client::SpeechDelivery speech{config::Config{},{synth,network,session.token(),terminal,trace,[](std::string){},
+            [&](std::uint64_t value,const core::CancellationToken& token) { if(!token.is_cancelled()) heard.push_back(value); }}};
+        unsigned ordinal{};
+        const auto finish=[&](bool cancelled,unsigned callbacks=1) {
+            protocol_native::Dialogue dialogue{protocol_native::Identity{"0x0001A4D7","Fallout4.esm","save-001","Preston"},"Line"};
+            dialogue.native_turn=true;
+            const protocol_native::Line line{"request:dialogue:"+std::to_string(++ordinal),"request","turn:receipts","flat",
+                current.value(),dialogue,2,1};
+            core::CancellationSource owner{session.token()};
+            if(cancelled) owner.cancel();
+            const presentation::DialogueCaption caption{.generation=current.value(),.cancellation=owner.token(),
+                .on_terminal=speech.receipt_hook(line,dialogue)};
+            CHECK(caption.on_terminal);
+            for(unsigned i=0;i<callbacks;++i) caption.mark_delivery(presentation::DialogueDelivery::spoken);
+        };
+        const auto drain=[&](std::uint64_t generation) {
+            speech.pump(generation,fallout); (void)network.run_until_idle();
+            std::vector<diagnostics::ConversationStage> stages;
+            while(const auto record=trace->take()) stages.push_back(record->stage);
+            return stages;
+        };
+        const auto script=[&](std::vector<protocol_native::Status> statuses,std::string end="complete") {
+            wire.statuses.push_back(std::move(statuses)); wire.ends.push_back(std::move(end));
+        };
+        using Stage=diagnostics::ConversationStage;
+        const auto receipts=[&] { return std::ranges::count(wire.types,"speech_receipt"); };
+
+        // Context ACK parsing (and receipt owners): legacy bare completion stays complete but is not an explicit acceptance.
+        const auto player=protocol_native::Identity{"0x00000014","Fallout4.esm","save-001","Sole Survivor"};
+        const auto publish=[&] { return synth.publish_context(0,"save-001",player,std::nullopt,{},{},std::nullopt,{},{},{}); };
+        script({{"context_accepted",""}}); CHECK(synth.context_accepted(publish()));
+        script({}); auto bare=publish(); CHECK(bare.status==client::RequestStatus::complete && !synth.context_accepted(bare));
+        script({{"speech_receipt_accepted","spoken"}}); CHECK(!synth.context_accepted(publish()));
+        script({{"context_accepted",""},{"context_accepted",""}}); CHECK(!synth.context_accepted(publish()));
+        script({{"context_accepted",""}},"error"); CHECK(!synth.context_accepted(publish()));
+        CHECK(wire.statuses.empty() && std::ranges::count(wire.types,"context")==5);
+
+        script({{"speech_receipt_accepted","spoken"}});
+        finish(false,3); // Repeated terminal callbacks schedule exactly one receipt.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==1 && heard==std::vector{current.value()});
+        script({{"receipt_conflict",""}},"error"); finish(false);
+        CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && receipts()==2 && heard.size()==1);
+        script({}); finish(false); // Complete transport, no receipt status.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && receipts()==3 && heard.size()==1);
+        script({{"speech_receipt_accepted","spoken"},{"speech_receipt_accepted","spoken"}}); finish(false);
+        CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && receipts()==4 && heard.size()==1);
+        script({{"speech_receipt_accepted","interrupted"}}); finish(true); // Accepted, but not heard.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==5 && heard.size()==1);
+        wire.empty_body=true; finish(false); // Bare HTTP 200.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && receipts()==6 && heard.size()==1);
+        wire.empty_body=false;
+        script({{"speech_receipt_accepted","spoken"}}); script({{"speech_receipt_accepted","spoken"}});
+        finish(false); finish(false); // One drain, two accepted heard receipts.
+        CHECK(drain(current.value())==std::vector(2,Stage::receipt_accepted) && receipts()==8 && heard.size()==3);
+        script({}); // The old trace treated this transport-complete, status-less reply as accepted.
+        const auto unacknowledged=synth.send_speech_receipt({"request","request:dialogue:1",protocol_native::Identity{"0x0001A4D7",
+            "Fallout4.esm","save-001","Preston"},protocol_native::SpeechReceiptOutcome::audio_completed},{current.value(),1,{},"turn:receipts"});
+        CHECK(unacknowledged.status==client::RequestStatus::complete && !client::SpeechDelivery::accepted_receipt_state(unacknowledged));
+        finish(false);
+        CHECK(drain(current.value()+1).empty() && receipts()==9); // A replaced generation drops its receipt unsent.
+        session.cancel(); finish(false);
+        CHECK(drain(current.value()).empty() && receipts()==9 && heard.size()==3); // Retired session sends nothing.
+
+        network.shutdown(tasks::ShutdownMode::cancel_pending);
+    }
+    std::cout<<"native playback tests passed: deferred spatial start/resume, sample preservation, text timeout/failure fallback, destination-major channel mixing, heard receipt ACKs and lifecycle fences\n";
 } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

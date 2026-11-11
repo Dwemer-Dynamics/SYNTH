@@ -46,6 +46,8 @@ public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
     using Notify = std::function<void(std::string)>;
     using TerminalHook = std::function<void(presentation::DialogueDelivery, bool)>;
+    // Network worker: one server-accepted spoken receipt for this generation, under the drain's token.
+    using HeardReceipt = std::function<void(std::uint64_t, const core::CancellationToken&)>;
 
     struct Dependencies final {
         SynthClient& client;
@@ -55,6 +57,7 @@ public:
         const std::atomic_bool& terminal;
         std::shared_ptr<diagnostics::ConversationTrace> trace;
         Notify notify;
+        HeardReceipt heard_receipt{};
     };
 
     SpeechDelivery(const config::Config& configuration, Dependencies dependencies)
@@ -66,7 +69,8 @@ public:
           session_{std::move(dependencies.session)},
           terminal_{dependencies.terminal},
           trace_{std::move(dependencies.trace)},
-          notify_{std::move(dependencies.notify)} {
+          notify_{std::move(dependencies.notify)},
+          heard_receipt_{std::move(dependencies.heard_receipt)} {
         if (!trace_ || !notify_) throw std::invalid_argument{"speech delivery requires trace and notification sinks"};
     }
 
@@ -213,6 +217,19 @@ public:
         };
     }
 
+    // The server's only receipt acknowledgement: start, one speech_receipt_accepted status carrying the
+    // stored state, then a complete end. It also acknowledges interrupted and failed receipts, so this
+    // is not a heard signal. HTTP success alone, refusals (receipt_conflict, receipt_owner_mismatch,
+    // receipt_invalid) and extra or repeated lines return null.
+    [[nodiscard]] static const std::string* accepted_receipt_state(const RequestOutcome& outcome) {
+        if (outcome.status != RequestStatus::complete || outcome.lines.size() != 3) return nullptr;
+        const auto* status = std::get_if<protocol_native::Status>(&outcome.lines[1].payload);
+        const auto* end = std::get_if<protocol_native::End>(&outcome.lines[2].payload);
+        return std::holds_alternative<protocol_native::Start>(outcome.lines[0].payload) && status && end &&
+            status->code == "speech_receipt_accepted" && !status->detail.empty() && end->status == "complete"
+            ? &status->detail : nullptr;
+    }
+
     // Text-only and failed speech go straight to captions; ready/pending speech joins the ordered lane.
     void deliver(const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
                  const Snapshot& snapshot, const core::CancellationToken& cancellation,
@@ -263,9 +280,15 @@ private:
                     try {
                         const auto outcome = client_.send_speech_receipt(value.receipt,
                             {value.generation, value.context_sequence, {}, value.turn_id});
-                        trace_->record(outcome.status == RequestStatus::complete
+                        const auto* state = accepted_receipt_state(outcome);
+                        trace_->record(state
                             ? diagnostics::ConversationStage::receipt_accepted : diagnostics::ConversationStage::receipt_rejected,
                             value.generation, value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
+                        // Heard history exists only after an accepted completed-audio receipt stored as spoken.
+                        // Each terminal hook pushes once and receipts are never retried, so this fires once per line.
+                        if (heard_receipt_ && !stopped(cancellation) && value.generation == cancellation.generation().value() &&
+                            value.receipt.outcome == protocol_native::SpeechReceiptOutcome::audio_completed &&
+                            state && *state == "spoken") heard_receipt_(value.generation, cancellation);
                     } catch (const std::exception&) {
                         trace_->record(diagnostics::ConversationStage::receipt_rejected, value.generation,
                             value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
@@ -507,6 +530,7 @@ private:
     const std::atomic_bool& terminal_;
     const std::shared_ptr<diagnostics::ConversationTrace> trace_;
     const Notify notify_;
+    const HeardReceipt heard_receipt_;
     // Declared before the lane: activity, captions, playback and the outbox outlive every task copy.
     std::atomic_size_t speech_jobs_{};
     std::shared_ptr<SpeechReceiptOutbox> speech_receipts_{std::make_shared<SpeechReceiptOutbox>()};

@@ -333,6 +333,15 @@ public:
             history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel);
     }
 
+    // The server inserts heard history only when it accepts a spoken receipt, after any earlier save
+    // ACK. It raises the same frontier, which only a later exactly accepted publication clears.
+    void note_heard_receipt(std::uint64_t generation, const core::CancellationToken& cancellation) {
+        if(!save_context_ || cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+            generation!=session_.generation().value() || cancellation.generation()!=session_.generation() ||
+            !save_context_->writer_current(save_binding_.epoch)) return;
+        history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel);
+    }
+
     // The result is newer than its issuing snapshot. Reuse ordinary
     // world observation to acknowledge a frontier after the consequence.
     void note_wait_outcome(const core::CancellationToken& cancellation) {
@@ -572,7 +581,9 @@ public:
                 world_context_failure_reported_.store(false, std::memory_order_release);
             }
         }
-        if (save_context_ && outcome.status == RequestStatus::complete && !cancellation.is_cancelled()
+        // Only an exact context_accepted proves the saved cutoff; a bare or wrong completion keeps the
+        // older ACK and any raised frontier, whatever arrived while the publication was in flight.
+        if (save_context_ && client_.context_accepted(outcome) && !cancellation.is_cancelled()
             && !terminal_.load(std::memory_order_acquire)) {
             outcome.save_checkpoint_acknowledged = save_context_->acknowledge(save_binding_.epoch,
                 {snapshot.player().playthrough_id(), client_.runtime_session_id(),

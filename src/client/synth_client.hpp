@@ -483,20 +483,9 @@ public:
         }
         auto outcome = send_event(request_id, turn_id, generation, std::move(body),
                                   std::move(callback), true, "/main.php", {generation, 0, cancellation});
-        if ((player_event || actor_events) && outcome.status == RequestStatus::complete) {
-            std::size_t accepted{};
-            const bool valid=std::ranges::all_of(outcome.lines,[&](const auto& line) {
-                if(const auto* status=std::get_if<protocol_native::Status>(&line.payload)) {
-                    if(status->code!="context_accepted")return false;
-                    ++accepted;return true;
-                }
-                return std::holds_alternative<protocol_native::Start>(line.payload)||std::holds_alternative<protocol_native::End>(line.payload)||
-                    (social_tasks_ready()&&std::holds_alternative<protocol_native::SocialTaskOffer>(line.payload));
-            });
-            if (!valid || accepted!=1) {
-                outcome.status = RequestStatus::malformed_response;
-                outcome.detail = "native event context acknowledgement is missing";
-            }
+        if ((player_event || actor_events) && outcome.status == RequestStatus::complete && !context_accepted(outcome)) {
+            outcome.status = RequestStatus::malformed_response;
+            outcome.detail = "native event context acknowledgement is missing";
         }
         if (outcome.status == RequestStatus::complete) {
             std::scoped_lock state_lock{state_mutex_};
@@ -506,6 +495,22 @@ public:
             }
         }
         return outcome;
+    }
+
+    // Exact context ACK: a complete response with one context_accepted status, framing lines and, when
+    // negotiated, social offers. Ordinary legacy publications may complete without it.
+    [[nodiscard]] bool context_accepted(const RequestOutcome& outcome) const {
+        if (outcome.status != RequestStatus::complete) return false;
+        std::size_t accepted{};
+        const bool valid=std::ranges::all_of(outcome.lines,[&](const auto& line) {
+            if(const auto* status=std::get_if<protocol_native::Status>(&line.payload)) {
+                if(status->code!="context_accepted")return false;
+                ++accepted;return true;
+            }
+            return std::holds_alternative<protocol_native::Start>(line.payload)||std::holds_alternative<protocol_native::End>(line.payload)||
+                (social_tasks_ready()&&std::holds_alternative<protocol_native::SocialTaskOffer>(line.payload));
+        });
+        return valid && accepted==1;
     }
 
     [[nodiscard]] RequestOutcome send_text(std::string text, LineCallback callback = {},
