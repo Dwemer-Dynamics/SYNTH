@@ -12,6 +12,7 @@
 #include "adapters/flat_picked_reference.hpp"
 #include <RE/Q/QuestFlag.h>
 #endif
+#include "adapters/commonlib_save_context.hpp"
 
 #include <algorithm>
 #include <array>
@@ -147,7 +148,7 @@ private:
     const auto* manager = RE::BGSSaveLoadManager::GetSingleton();
     return player != nullptr && player->GetParentCell() != nullptr && player->Get3D() != nullptr &&
            camera != nullptr && camera->cameraRoot != nullptr && manager != nullptr &&
-           manager->currentPlayerID != 0;
+           manager->currentPlayerID != 0 && save_context_store.identity_ready();
 }
 
 [[nodiscard]] inline std::string bounded_label(const char* value) {
@@ -286,15 +287,15 @@ private:
             core::UnitVector3::from({0.0, 0.0, 1.0})};
 }
 
+// currentPlayerID is engine readiness only; the identity is the UUID resolved by NewGame or PostLoadGame.
 [[nodiscard]] inline std::string playthrough_id() {
     const auto* manager = RE::BGSSaveLoadManager::GetSingleton();
     if (manager == nullptr || manager->currentPlayerID == 0) {
         throw std::runtime_error{"Fallout 4 has not published a stable player/save identity yet"};
     }
-    std::ostringstream value;
-    value << "fo4-player-" << std::hex << std::setw(16) << std::setfill('0')
-          << manager->currentPlayerID;
-    return value.str();
+    auto identity = save_context_store.playthrough_id();
+    if (!identity) throw std::runtime_error{"SYNTH has not resolved this playthrough's identity yet"};
+    return std::move(*identity);
 }
 
 [[nodiscard]] inline std::string origin_plugin(const RE::TESObjectREFR& reference) {

@@ -258,7 +258,8 @@ public:
 
     [[nodiscard]] RequestOutcome initialize(
         std::uint64_t generation, bool hmd_pose_fresh,
-        const std::vector<protocol_native::LoadedPlugin>& loaded_plugins = {}) {
+        const std::vector<protocol_native::LoadedPlugin>& loaded_plugins = {},
+        core::CancellationToken cancellation = {}) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id;
         std::string turn_id;
@@ -300,7 +301,9 @@ public:
             body = protocol_native::encode_init(
                 context(request_id, turn_id), options_.locale, hmd_pose_fresh, loaded_plugins);
         }
-        auto outcome = send_event(request_id, turn_id, generation, std::move(body), {});
+        // A caller's task cancellation is checked before the send and again before the response is accepted.
+        auto outcome = send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php",
+                                  ContextBinding{.cancellation = std::move(cancellation)});
         {
             std::scoped_lock state_lock{state_mutex_};
             initialized_ = outcome.status == RequestStatus::complete;

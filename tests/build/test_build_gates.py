@@ -338,7 +338,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         # per-frame pump cannot turn these markers into per-frame log spam.
         self.assertEqual(entry.count("pump_trace = PumpTrace::armed;"), 1)
         self.assertLess(
-            entry.index("queue_session_initialization(snapshot);"),
+            entry.index("queue_session_initialization(snapshot, lifetime);"),
             entry.index("if (pump_trace == PumpTrace::idle) pump_trace = PumpTrace::armed;"),
         )
         # Later startup phases can arrive after the first successful update.

@@ -182,7 +182,7 @@ if(SYNTH_BUILD_VR)
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/settings_catalog.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/settings_store.hpp")
   target_link_libraries(SYNTHVR PRIVATE synth_core CommonLibF4::CommonLibF4 winhttp xaudio2 winmm
-    shell32 windowscodecs ole32 oleaut32 gdi32)
+    shell32 windowscodecs ole32 oleaut32 gdi32 bcrypt)
   target_compile_definitions(SYNTHVR PRIVATE SYNTH_WITH_F4SEVR=1 WIN32_LEAN_AND_MEAN NOMINMAX
     _WIN32_WINNT=0x0A00 WINVER=0x0A00)
   if(MSVC)

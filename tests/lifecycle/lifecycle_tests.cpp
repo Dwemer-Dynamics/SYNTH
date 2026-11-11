@@ -6,6 +6,9 @@
 #include "core/actor_event_mailbox.hpp"
 #include "core/player_inventory_refresh.hpp"
 #include "core/inventory_change_mailbox.hpp"
+#include <algorithm>
+#include <functional>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -162,9 +165,82 @@ void test_validation() {
     check_throws<std::invalid_argument>([] { (void)ResponseGeneration::from_value(0); });
 }
 
+struct FakeRandom {
+    std::optional<synth::core::PlaythroughUuid> value;
+    int* calls{};
+    std::optional<synth::core::PlaythroughUuid> operator()() const {
+        if (calls) ++*calls;
+        return value;
+    }
+};
+
+synth::core::PlaythroughUuid random_bytes(std::uint8_t fill) {
+    synth::core::PlaythroughUuid bytes{};
+    bytes.fill(fill);
+    return bytes;
+}
+
+std::string uuid_of(std::uint8_t fill) { return synth::core::uuid_text(synth::core::uuid_v4(random_bytes(fill))); }
+
+struct SaveRecord { std::uint32_t type, version, length; synth::core::SavedRecordBytes data; };
+struct SaveSerialization {
+    std::vector<SaveRecord> records;
+    mutable std::size_t next{};
+    bool short_read{};
+    bool write_ok{true};
+    mutable std::optional<synth::core::SavedRecordBytes> written;
+    mutable std::function<void()> during{}; // Runs once inside the callback, after it claimed the load.
+    bool throw_read{};
+    bool GetNextRecordInfo(std::uint32_t& type, std::uint32_t& version, std::uint32_t& length) const {
+        if (during) std::exchange(during, {})();
+        if (next == records.size()) return false;
+        const auto& r = records[next++]; type = r.type; version = r.version; length = r.length;
+        return true;
+    }
+    std::uint32_t ReadRecordData(void* output, std::uint32_t length) const {
+        if (throw_read) throw std::runtime_error{"co-save read"};
+        std::copy_n(records[next - 1].data.begin(), std::min<std::size_t>(length, records[next - 1].data.size()),
+                    static_cast<std::uint8_t*>(output));
+        return short_read ? length - 1 : length;
+    }
+    bool WriteRecord(std::uint32_t type, std::uint32_t version, const void* input, std::uint32_t length) const {
+        CHECK(type == synth::core::saved_context_record_type && version == 2 && length == 292);
+        const auto* bytes = static_cast<const std::uint8_t*>(input);
+        CHECK(synth::core::decode_saved_record({bytes, length}));
+        written.emplace();
+        std::copy_n(bytes, length, written->begin());
+        return write_ok;
+    }
+};
+
+// One complete F4SE load: PreLoadGame, revert, zero or more load callbacks, then PostLoadGame.
+synth::core::ResolvedIdentity load_save(synth::core::SaveContextStore& store, std::vector<std::vector<SaveRecord>> callbacks,
+                                        std::uint8_t fresh = 0x77, bool success = true) {
+    store.begin_load();
+    store.revert();
+    for (auto& records : callbacks) synth::core::read_saved_context(SaveSerialization{std::move(records)}, store);
+    return store.finish_load(success, FakeRandom{random_bytes(fresh)});
+}
+
+SaveRecord saved_record(const synth::core::SaveContextStore& store) {
+    SaveSerialization writer;
+    CHECK(synth::core::write_saved_context(writer, store) && writer.written);
+    return {synth::core::saved_context_record_type, 2, 292, *writer.written};
+}
+
+std::optional<synth::core::SavedContext> saved_anchor(const synth::core::SaveContextStore& store) {
+    const auto bytes = store.for_save();
+    CHECK(bytes);
+    const auto record = synth::core::decode_saved_record(*bytes);
+    CHECK(record);
+    return record->anchor ? synth::core::decode_saved_context(*record->anchor) : std::nullopt;
+}
+
 void test_saved_context_roundtrip_and_stale_writers() {
     using namespace synth::core;
-    const SavedContext original{"player:a", "session:old", 7, 9};
+    const auto a = uuid_of(0x11);
+    CHECK(a == "11111111-1111-4111-9111-111111111111");
+    const SavedContext original{a, "session:old", 7, 9};
     const auto bytes = encode_saved_context(original);
     CHECK(bytes && bytes->size() == 274);
     CHECK(decode_saved_context(*bytes) == original);
@@ -179,44 +255,57 @@ void test_saved_context_roundtrip_and_stale_writers() {
     CHECK(!encode_saved_context({"player", "session", 1, 9'007'199'254'740'992ULL}));
     CHECK(encode_saved_context({std::string(128, 'a'), std::string(128, 'b'), 1, 1}));
 
+    const auto uuid = uuid_v4(random_bytes(0x11));
+    const auto record = encode_saved_record({RuntimeVariant::flat, uuid, bytes});
+    CHECK(record && (*record)[0] == 1 && (*record)[17] == 1);
+    CHECK(decode_saved_record(*record)->anchor == bytes);
+    CHECK(!encode_saved_record({RuntimeVariant::flat, random_bytes(0x11), std::nullopt})); // Not a v4 UUID.
+    CHECK(!encode_saved_record({RuntimeVariant::flat, uuid_v4(random_bytes(0x22)), bytes})); // Foreign anchor.
+    auto tampered = *record;
+    tampered[17] = 0; // Flag says no anchor but checkpoint bytes remain.
+    CHECK(!decode_saved_record(tampered));
+    tampered = *record;
+    tampered[0] = 3;
+    CHECK(!decode_saved_record(tampered));
+
     SaveContextStore store;
-    CHECK(!store.for_save());
-    const auto old = store.bind("player:a");
+    CHECK(!store.for_save() && !store.playthrough_id() && !store.bind(a, store.lifetime()));
+    CHECK(store.start_new_game(FakeRandom{random_bytes(0x11)}).resolution == IdentityResolution::new_game);
+    CHECK(store.playthrough_id() == a);
+    const auto old = *store.bind(a, store.lifetime());
     CHECK(!old.loaded_context);
+    CHECK(!store.bind("player:b", store.lifetime()) && !store.bind(uuid_of(0x22), store.lifetime()) && !store.bind("", store.lifetime()));
+    CHECK(store.writer_current(old.epoch)); // A rejected snapshot cannot disturb the current writer.
     CHECK(store.acknowledge(old.epoch, original));
-    CHECK(!store.acknowledge(old.epoch, {"player:b", "session:old", 7, 10}));
-    CHECK(!store.acknowledge(old.epoch, {"player:a", "session:old", 7, 8}));
-    CHECK(store.for_save() == bytes);
-    const auto load_epoch = store.reset();
-    CHECK(!store.acknowledge(old.epoch, {"player:a", "session:old", 7, 99}));
-    store.restore(load_epoch, bytes);
-    const auto current = store.bind("player:a");
+    CHECK(!store.acknowledge(old.epoch, {uuid_of(0x22), "session:old", 7, 10}));
+    CHECK(!store.acknowledge(old.epoch, {a, "session:old", 7, 8}));
+    CHECK(saved_anchor(store) == original);
+    const auto disk = saved_record(store);
+
+    // Reloading the same UUID still rejects the old writer, its ACKs and its binding.
+    CHECK(load_save(store, {{disk}}).resolution == IdentityResolution::restored);
+    CHECK(!store.acknowledge(old.epoch, {a, "session:old", 7, 99}) && !store.writer_current(old.epoch));
+    const auto current = *store.bind(a, store.lifetime());
     CHECK(current.loaded_context == original);
-    CHECK(store.acknowledge(current.epoch, {"player:a", "session:new", 8, 1}));
+    CHECK(store.acknowledge(current.epoch, {a, "session:new", 8, 1}));
     CHECK(current.loaded_context == original); // Immutable origin, even as the latest ACK advances.
     store.stop_writer(old.epoch);
-    CHECK(store.acknowledge(current.epoch, {"player:a", "session:new", 8, 2}));
+    CHECK(store.acknowledge(current.epoch, {a, "session:new", 8, 2}));
     store.stop_writer(current.epoch);
-    CHECK(!store.acknowledge(current.epoch, {"player:a", "session:new", 8, 3}));
-    CHECK(!store.bind("player:b").loaded_context);
-    CHECK(!store.for_save());
-    store.restore(load_epoch, bytes); // An obsolete load cannot replace a newer writer.
-    CHECK(!store.for_save());
-    const auto another = store.bind("player:a");
-    CHECK(store.acknowledge(another.epoch, original));
-    CHECK(!store.bind("").loaded_context && !store.for_save());
-    CHECK(!store.acknowledge(another.epoch, original));
+    CHECK(!store.acknowledge(current.epoch, {a, "session:new", 8, 3}));
+    CHECK((saved_anchor(store) == SavedContext{a, "session:new", 8, 2}));
 }
 
 void test_saved_context_same_world_replacement() {
     using namespace synth::core;
-    const SavedContext disk{"player:a", "session:disk", 7, 9};
-    const SavedContext acknowledged{"player:a", "session:before-stop", 8, 12};
-    const SavedContext next_acknowledged{"player:a", "session:after-stop", 8, 2};
+    const auto a = uuid_of(0x11);
+    const SavedContext disk{a, "session:disk", 7, 9};
+    const SavedContext acknowledged{a, "session:before-stop", 8, 12};
+    const SavedContext next_acknowledged{a, "session:after-stop", 8, 2};
     SaveContextStore store;
-    const auto load_epoch = store.reset();
-    store.restore(load_epoch, encode_saved_context(disk));
-    const auto original = store.bind("player:a");
+    const auto record = *encode_saved_record({RuntimeVariant::flat, uuid_v4(random_bytes(0x11)), encode_saved_context(disk)});
+    CHECK(load_save(store, {{{saved_context_record_type, 2, 292, record}}}).resolution == IdentityResolution::restored);
+    const auto original = *store.bind(a, store.lifetime());
     CHECK(original.loaded_context == disk);
     CHECK(store.acknowledge(original.epoch, acknowledged));
     CHECK(original.loaded_context == disk); // An active session keeps its copied origin.
@@ -224,106 +313,265 @@ void test_saved_context_same_world_replacement() {
     CHECK(store.writer_current(original.epoch));
     store.stop_writer(original.epoch); // Halt retires the writer without loading a different save.
     CHECK(!store.writer_current(original.epoch)); // A late heard receipt cannot dirty a retired binding.
-    CHECK(store.for_save() == encode_saved_context(acknowledged));
-    CHECK(!store.acknowledge(original.epoch, {"player:a", "session:before-stop", 8, 99}));
-    const auto restarted = store.bind("player:a");
-    CHECK(restarted.loaded_context == acknowledged); // The replacement must inherit the live frontier.
-    CHECK(store.for_save() == encode_saved_context(acknowledged));
-    CHECK(!store.acknowledge(restarted.epoch, {"player:b", "session:after-stop", 8, 1}));
+    CHECK(saved_anchor(store) == acknowledged);
+    CHECK(!store.acknowledge(original.epoch, {a, "session:before-stop", 8, 99}));
+    const auto restarted = *store.bind(a, store.lifetime());
+    CHECK(restarted.loaded_context == acknowledged); // The replacement must inherit the live frontier and UUID.
+    CHECK(store.playthrough_id() == a);
+    CHECK(!store.acknowledge(restarted.epoch, {uuid_of(0x22), "session:after-stop", 8, 1}));
     store.stop_writer(original.epoch); // Late retirement cannot stop the replacement writer.
     CHECK(store.acknowledge(restarted.epoch, next_acknowledged));
     CHECK(restarted.loaded_context == acknowledged);
     CHECK(original.loaded_context == disk);
 
-    const auto replaced = store.bind("player:a"); // Settings replacement also transfers the frontier.
+    const auto replaced = *store.bind(a, store.lifetime()); // Settings replacement also transfers the frontier.
     CHECK(replaced.loaded_context == next_acknowledged);
     CHECK(store.writer_current(replaced.epoch) && !store.writer_current(restarted.epoch)); // Stale same-world writer.
-    CHECK(!store.acknowledge(restarted.epoch, {"player:a", "session:after-stop", 8, 99}));
-    CHECK(store.for_save() == encode_saved_context(next_acknowledged));
+    CHECK(!store.acknowledge(restarted.epoch, {a, "session:after-stop", 8, 99}));
+    CHECK(saved_anchor(store) == next_acknowledged);
 }
 
 void test_saved_context_disk_load_replaces_live_frontier() {
     using namespace synth::core;
-    const SavedContext earlier_disk{"player:a", "session:earlier-save", 3, 4};
-    const SavedContext later_live{"player:a", "session:later-live", 7, 20};
-    const SavedContext after_reload{"player:a", "session:after-reload", 8, 1};
+    const auto a = uuid_of(0x11);
+    const SavedContext earlier_disk{a, "session:earlier-save", 3, 4};
+    const SavedContext later_live{a, "session:later-live", 7, 20};
+    const SavedContext after_reload{a, "session:after-reload", 8, 1};
     SaveContextStore store;
-    const auto later_writer = store.bind("player:a");
-    CHECK(store.acknowledge(later_writer.epoch, later_live));
+    (void)store.start_new_game(FakeRandom{random_bytes(0x11)});
+    const auto offline = saved_record(store); // Persisted before any session, network or ACK.
+    CHECK(!saved_anchor(store));
+    const auto first = *store.bind(a, store.lifetime());
+    CHECK(store.acknowledge(first.epoch, earlier_disk));
+    const auto earlier = saved_record(store);
+    CHECK(store.acknowledge(first.epoch, later_live));
 
-    const auto disk_epoch = store.reset(); // An actual load must discard the later live frontier.
-    CHECK(!store.for_save());
-    CHECK(!store.writer_current(later_writer.epoch) && !store.writer_current(disk_epoch)); // Loading binds no writer.
-    store.restore(disk_epoch, encode_saved_context(earlier_disk));
-    const auto reloaded = store.bind("player:a");
+    // An actual load discards the later live frontier and binds no writer until PostLoadGame.
+    store.begin_load();
+    CHECK(!store.for_save() && !store.playthrough_id() && !store.writer_current(first.epoch) && !store.bind(a, store.lifetime()));
+    store.revert();
+    read_saved_context(SaveSerialization{{earlier}}, store);
+    CHECK(!store.playthrough_id()); // Staged only.
+    CHECK(store.finish_load(true, FakeRandom{}).resolution == IdentityResolution::restored);
+    const auto reloaded = *store.bind(a, store.lifetime());
     CHECK(reloaded.loaded_context == earlier_disk);
-    CHECK(store.for_save() == encode_saved_context(earlier_disk));
-    CHECK(!store.acknowledge(later_writer.epoch, {"player:a", "session:later-live", 7, 99}));
+    CHECK(!store.acknowledge(first.epoch, {a, "session:later-live", 7, 99}));
     CHECK(store.acknowledge(reloaded.epoch, after_reload));
-    store.restore(disk_epoch, encode_saved_context(later_live)); // Delayed restore cannot replace its newer writer.
-    CHECK(store.for_save() == encode_saved_context(after_reload));
     CHECK(reloaded.loaded_context == earlier_disk);
 
-    (void)store.reset(); // A save without a context record must not inherit memory from another save.
-    const auto blank_save = store.bind("player:a");
-    CHECK(!blank_save.loaded_context && !store.for_save());
+    // The offline save restores the same UUID without any checkpoint.
+    CHECK(load_save(store, {{offline}}).resolution == IdentityResolution::restored);
+    const auto blank = *store.bind(a, store.lifetime());
+    CHECK(!blank.loaded_context && !saved_anchor(store));
     CHECK(!store.acknowledge(reloaded.epoch, after_reload));
-    CHECK(store.acknowledge(blank_save.epoch, after_reload));
-    CHECK(!store.bind("player:b").loaded_context && !store.for_save());
-    CHECK(!store.bind("player:a").loaded_context && !store.for_save());
+    CHECK(store.acknowledge(blank.epoch, after_reload));
 }
 
-void test_bounded_saved_context_records() {
+void test_saved_context_identity_resolution() {
     using namespace synth::core;
-    struct Record { std::uint32_t type, version, length; SavedContextBytes data; };
-    struct Serialization {
-        std::vector<Record> records;
-        mutable std::size_t next{};
-        bool short_read{};
-        bool write_ok{true};
-        bool GetNextRecordInfo(std::uint32_t& type, std::uint32_t& version, std::uint32_t& length) const {
-            if (next == records.size()) return false;
-            const auto& r = records[next++]; type = r.type; version = r.version; length = r.length;
-            return true;
-        }
-        std::uint32_t ReadRecordData(void* output, std::uint32_t length) const {
-            std::copy_n(records[next - 1].data.begin(), length, static_cast<std::uint8_t*>(output));
-            return short_read ? length - 1 : length;
-        }
-        bool WriteRecord(std::uint32_t type, std::uint32_t version, const void* input, std::uint32_t length) const {
-            CHECK(type == saved_context_record_type && version == 1 && length == 274);
-            CHECK(decode_saved_context({static_cast<const std::uint8_t*>(input), length}));
-            return write_ok;
-        }
-    };
-    const auto bytes = *encode_saved_context({"player:a", "session:saved", 2, 3});
-    const Record valid{saved_context_record_type, 1, 274, bytes};
+    const auto a = uuid_of(0x11);
     SaveContextStore store;
-    Serialization reader{{{1234, 900, 500000, {}}, valid}};
-    read_saved_context(reader, store); // Unknown records are skipped by the interface, not allocated.
-    CHECK(store.for_save() == bytes);
-    CHECK(write_saved_context(reader, store));
-    reader.write_ok = false;
-    CHECK(!write_saved_context(reader, store));
-    for (auto bad : {Record{saved_context_record_type, 2, 274, bytes},
-                     Record{saved_context_record_type, 1, 1000000, bytes},
-                     Record{saved_context_record_type, 1, 1, bytes}}) {
-        reader = {{bad}};
-        read_saved_context(reader, store);
-        CHECK(!store.for_save());
+    int calls{};
+    // NewGame identities are unique. F4SE publishes NewGame only after the original NewGame_Internal returns, so
+    // a Revert inside the original precedes publication and cannot touch the new identity; every later revert
+    // revokes it at once, bound or not, online or offline. The exact engine order remains in-game acceptance.
+    CHECK(store.revert());
+    CHECK(store.start_new_game(FakeRandom{random_bytes(0x11), &calls}).resolution == IdentityResolution::new_game);
+    CHECK(store.playthrough_id() == a);
+    const auto stamped = saved_record(store); // An early autosave persists the identity before any session or ACK.
+    CHECK(store.start_new_game(FakeRandom{random_bytes(0x22), &calls}).resolution == IdentityResolution::new_game);
+    CHECK(store.playthrough_id() == uuid_of(0x22) && calls == 2);
+    const auto never_bound = store.lifetime();
+    CHECK(never_bound != 0 && store.revert()); // Never bound and offline: revoked immediately.
+    CHECK(!store.playthrough_id() && !store.for_save() && store.lifetime() == 0 && !store.bind(uuid_of(0x22), never_bound));
+    // A revert while NewGame draws its UUID supersedes that UUID.
+    CHECK(store.start_new_game([&store] {
+        CHECK(store.revert());
+        return std::optional{random_bytes(0x23)};
+    }).resolution == IdentityResolution::stale);
+    CHECK(!store.playthrough_id() && !store.identity_ready());
+    // A stale draw has no lifecycle consequence: the later NewGame that resolved during it keeps its world.
+    ResolvedIdentity nested{};
+    const auto outer = store.start_new_game([&store, &nested] {
+        nested = store.start_new_game([] { return std::optional{random_bytes(0x24)}; });
+        return std::optional{random_bytes(0x25)};
+    });
+    const auto nested_lifetime = store.lifetime();
+    CHECK(outer.resolution == IdentityResolution::stale && new_game_lifecycle(outer) == NewGameLifecycle::none);
+    CHECK(new_game_lifecycle(nested) == NewGameLifecycle::ready && store.playthrough_id() == uuid_of(0x24));
+    CHECK(nested_lifetime != 0 && store.bind(uuid_of(0x24), nested_lifetime));
+    CHECK(new_game_lifecycle({IdentityResolution::random_failed}) == NewGameLifecycle::teardown);
+    // The lifetime (VR's capture epoch) changes the moment a Revert, PreLoadGame or NewGame begins, before
+    // any resolution or deferred lifecycle teardown.
+    std::uint64_t during_draw{1};
+    CHECK(store.start_new_game([&store, &during_draw] {
+        during_draw = store.lifetime();
+        return std::optional{random_bytes(0x26)};
+    }).resolution == IdentityResolution::new_game);
+    CHECK(during_draw == 0 && store.lifetime() != nested_lifetime && store.lifetime() != 0);
+    store.begin_load();
+    CHECK(store.lifetime() == 0);
+    store.revert();
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x27)}).resolution == IdentityResolution::separated);
+    const auto separated_lifetime = store.lifetime();
+    CHECK(store.revert() && store.lifetime() == 0 && separated_lifetime != 0);
+
+    // A valid record restores without calling the random generator.
+    CHECK(load_save(store, {{stamped}}).resolution == IdentityResolution::restored && store.playthrough_id() == a);
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x33), &calls}).resolution == IdentityResolution::stale);
+    CHECK(calls == 2 && store.playthrough_id() == a);
+
+    // Anything else gets a fresh isolated UUID with no anchor; the unstamped save stays unstamped until saved.
+    auto legacy = stamped;
+    legacy.version = 1;
+    auto wrong_lane = stamped;
+    wrong_lane.data[0] = 2;
+    auto corrupt = stamped;
+    corrupt.data[7] ^= 0xFF;
+    const SaveRecord unknown{1234, 1, 0, {}};
+    const std::vector<std::pair<std::vector<std::vector<SaveRecord>>, LoadedIdentity>> separated{
+        {{}, LoadedIdentity::missing},
+        {{{unknown}}, LoadedIdentity::missing},
+        {{{legacy}}, LoadedIdentity::legacy},
+        {{{wrong_lane}}, LoadedIdentity::wrong_lane},
+        {{{corrupt}}, LoadedIdentity::malformed},
+        {{{{saved_context_record_type, 3, 292, stamped.data}}}, LoadedIdentity::unsupported},
+        {{{{saved_context_record_type, 2, 1'000'000, stamped.data}}}, LoadedIdentity::malformed},
+        {{{stamped, stamped}}, LoadedIdentity::duplicate},
+        {{{stamped}, {stamped}}, LoadedIdentity::duplicate}, // Duplicate plugin blocks call the callback twice.
+        {{std::vector<SaveRecord>(65, unknown)}, LoadedIdentity::malformed},
+    };
+    std::uint8_t fill = 0x40;
+    for (const auto& [callbacks, cause] : separated) {
+        const auto resolved = load_save(store, callbacks, ++fill);
+        CHECK(resolved.resolution == IdentityResolution::separated && resolved.cause == cause);
+        CHECK(store.playthrough_id() == uuid_of(fill) && !saved_anchor(store));
+        CHECK(store.bind(uuid_of(fill), store.lifetime()) && !store.bind(a, store.lifetime()));
     }
-    reader = {{valid, valid}};
-    read_saved_context(reader, store);
-    CHECK(!store.for_save());
-    reader = {{valid}, 0, true};
-    read_saved_context(reader, store);
-    CHECK(!store.for_save());
-    reader = {std::vector<Record>(65, {1234, 1, 0, {}})};
-    read_saved_context(reader, store);
-    CHECK(!store.for_save() && reader.next == 64);
-    reader = {};
-    read_saved_context(reader, store);
-    CHECK(!store.for_save());
+    SaveSerialization short_read{{stamped}, 0, true};
+    store.begin_load();
+    read_saved_context(short_read, store);
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x60)}).cause == LoadedIdentity::malformed);
+
+    // A revert after the record was staged contradicts it.
+    store.begin_load();
+    read_saved_context(SaveSerialization{{stamped}}, store);
+    store.revert();
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x61)}).cause == LoadedIdentity::contradicted);
+    CHECK(store.playthrough_id() == uuid_of(0x61));
+
+    // A failed load, a callback outside a load and a superseded resolution activate nothing.
+    CHECK(load_save(store, {{stamped}}, 0x62, false).resolution == IdentityResolution::load_failed);
+    CHECK(!store.playthrough_id() && !store.for_save());
+    read_saved_context(SaveSerialization{{stamped}}, store);
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x63)}).resolution == IdentityResolution::stale);
+    CHECK(!store.playthrough_id());
+    store.begin_load();
+    const auto superseded = store.finish_load(true, [&store] {
+        store.begin_load(); // Another load starts while the fresh UUID is being drawn.
+        return std::optional{random_bytes(0x64)};
+    });
+    CHECK(superseded.resolution == IdentityResolution::stale && !store.playthrough_id());
+
+    // Random failure fails closed, including a throwing generator, and leaves the load closed.
+    CHECK(store.finish_load(true, FakeRandom{}).resolution == IdentityResolution::random_failed);
+    CHECK(!store.playthrough_id() && !store.for_save() && !store.bind(a, store.lifetime()));
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x65)}).resolution == IdentityResolution::stale);
+    CHECK(store.start_new_game([]() -> std::optional<PlaythroughUuid> { throw std::runtime_error{"rng"}; })
+              .resolution == IdentityResolution::random_failed);
+    CHECK(!store.playthrough_id());
+    CHECK(load_save(store, {{stamped}}).resolution == IdentityResolution::restored); // Recovery is a later load.
+
+    // The VR lane accepts only its own records.
+    SaveContextStore vr{RuntimeVariant::vr};
+    CHECK(load_save(vr, {{stamped}}).cause == LoadedIdentity::wrong_lane);
+    CHECK(load_save(vr, {{saved_record(vr)}}).resolution == IdentityResolution::restored);
+    CHECK(decode_saved_record(*vr.for_save())->lane == RuntimeVariant::vr);
+    SaveSerialization failing;
+    failing.write_ok = false;
+    CHECK(!write_saved_context(failing, vr));
+}
+
+// Each load callback stages only into the transaction it entered, and each PostLoadGame resolves at most once.
+void test_saved_context_load_transactions() {
+    using namespace synth::core;
+    const auto a = uuid_of(0x11);
+    SaveContextStore store;
+    (void)store.start_new_game(FakeRandom{random_bytes(0x11)});
+    const auto stamped = saved_record(store);
+    const auto first_lifetime = store.lifetime();
+
+    // Same UUID, new lifetime: a snapshot stamped before the reload cannot bind.
+    CHECK(load_save(store, {{stamped}}).resolution == IdentityResolution::restored && store.playthrough_id() == a);
+    CHECK(store.lifetime() != first_lifetime && !store.bind(a, first_lifetime) && !store.bind(a, 0));
+    CHECK(store.bind(a, store.lifetime()));
+
+    // Load A's reader is still running when load B opens: it cannot stage A's record into B.
+    store.begin_load();
+    SaveSerialization reader_a{{stamped}};
+    reader_a.during = [&store] { store.begin_load(); };
+    read_saved_context(reader_a, store);
+    auto resolved = store.finish_load(true, FakeRandom{random_bytes(0x31)});
+    CHECK(resolved.resolution == IdentityResolution::separated && resolved.cause == LoadedIdentity::missing);
+    CHECK(store.playthrough_id() == uuid_of(0x31));
+    {
+        store.begin_load();
+        auto late = store.enter_load(); // A claim on load C...
+        store.begin_load();             // ...outlives it into load D.
+        late.stage(LoadedIdentity::restored, decode_saved_record(stamped.data));
+        CHECK(store.finish_load(true, FakeRandom{random_bytes(0x32)}).cause == LoadedIdentity::missing);
+    }
+
+    // PostLoadGame while a callback is still reading never restores from it; its late staging is ignored.
+    store.begin_load();
+    SaveSerialization premature{{stamped}};
+    premature.during = [&] { resolved = store.finish_load(true, FakeRandom{random_bytes(0x33)}); };
+    read_saved_context(premature, store);
+    CHECK(resolved.resolution == IdentityResolution::separated && resolved.cause == LoadedIdentity::incomplete);
+    CHECK(store.playthrough_id() == uuid_of(0x33));
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x34)}).resolution == IdentityResolution::stale);
+    CHECK(store.playthrough_id() == uuid_of(0x33));
+
+    // A duplicate PostLoadGame while the fresh UUID is drawn resolves nothing; the first completes once.
+    int calls{};
+    store.begin_load();
+    std::optional<ResolvedIdentity> duplicate;
+    resolved = store.finish_load(true, [&] {
+        ++calls;
+        duplicate = store.finish_load(true, FakeRandom{random_bytes(0x35), &calls});
+        return std::optional{random_bytes(0x36)};
+    });
+    CHECK(duplicate && duplicate->resolution == IdentityResolution::stale && calls == 1);
+    CHECK(resolved.resolution == IdentityResolution::separated && store.playthrough_id() == uuid_of(0x36));
+    // A revert while a load's fresh UUID is drawn supersedes it and reports a revoked world.
+    store.begin_load();
+    resolved = store.finish_load(true, [&store] {
+        CHECK(store.revert());
+        return std::optional{random_bytes(0x37)};
+    });
+    CHECK(resolved.resolution == IdentityResolution::stale && !store.playthrough_id());
+
+    // A revert inside the load keeps the load but contradicts a record whose callback already began.
+    store.begin_load();
+    SaveSerialization contradicted{{stamped}};
+    contradicted.during = [&store] { CHECK(!store.revert()); };
+    read_saved_context(contradicted, store);
+    CHECK(!store.playthrough_id());
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x38)}).cause == LoadedIdentity::contradicted);
+    CHECK(store.playthrough_id() == uuid_of(0x38));
+
+    // A throwing reader stages a malformed outcome through its claim, so the load is not left incomplete.
+    store.begin_load();
+    SaveSerialization throwing{{stamped}};
+    throwing.throw_read = true;
+    check_throws<std::runtime_error>([&] { read_saved_context(throwing, store); });
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x39)}).cause == LoadedIdentity::malformed);
+    // A missing interface claims and abandons the load the same way; outside a load nothing is claimed.
+    store.begin_load();
+    (void)store.enter_load();
+    CHECK(store.finish_load(true, FakeRandom{random_bytes(0x3A)}).cause == LoadedIdentity::malformed);
+    CHECK(!store.enter_load().open());
+    CHECK(load_save(store, {{stamped}}).resolution == IdentityResolution::restored); // The record itself is intact.
 }
 
 // Reserve before forwarding, complete afterward: nested callbacks must not reorder or cross a load.
@@ -635,7 +883,8 @@ int main() {
         test_saved_context_roundtrip_and_stale_writers();
         test_saved_context_same_world_replacement();
         test_saved_context_disk_load_replaces_live_frontier();
-        test_bounded_saved_context_records();
+        test_saved_context_identity_resolution();
+    test_saved_context_load_transactions();
         std::cout << "lifecycle tests passed (" << assertions << " assertions)\n";
         return 0;
     } catch (const std::exception& error) {
