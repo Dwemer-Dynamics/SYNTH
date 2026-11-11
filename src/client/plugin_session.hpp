@@ -15,6 +15,7 @@
 #include "client/speech_facing_binding.hpp"
 #include "client/conversation_holds.hpp"
 #include "client/player_dialogue.hpp"
+#include "client/dialogue_requests.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/actor_event_delivery.hpp"
@@ -106,6 +107,15 @@ public:
           player_events_{generation, variant},
           dialogue_{configuration_, client_, control_, cancellation_.token(), trace_,
                     [this](std::string message) { push_notification(std::move(message)); }},
+          requests_{{client_, network_, terminal_, conversation_holds_,
+                     [this](const Snapshot& snapshot, const std::optional<protocol_native::Identity>& target,
+                            core::CancellationToken cancellation, const protocol_native::ControlSelection& controls) {
+                         return publish_snapshot(snapshot, target, std::move(cancellation), nullptr, {}, {}, {}, controls);
+                     },
+                     [this](const protocol_native::Line& line, const Snapshot& snapshot,
+                            const core::CancellationToken& cancellation) { handle_line(line, snapshot, cancellation); },
+                     [this](const RequestOutcome& outcome) { return notify_social_input(outcome); },
+                     [this](std::string message) { push_notification(std::move(message)); }}},
           speech_{configuration_, {client_, network_, cancellation_.token(), terminal_, trace_,
                                    [this](std::string message) { push_notification(std::move(message)); }}},
           voice_samples_{configuration_.server.base_url, configuration_.server.connect_timeout_ms,
@@ -268,7 +278,7 @@ public:
     [[nodiscard]] bool context_observation_ready() const {
         return !(!client_.ready() || terminal_.load(std::memory_order_acquire) ||
             runtime_paused_.load(std::memory_order_acquire) || player_voice_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 ||
             speech_.jobs_active() || !speech_.playback_idle() ||
             world_context_tasks_.load(std::memory_order_acquire) != 0);
@@ -315,7 +325,7 @@ public:
     void pump_quest_events() {
         if (!quest_events_enabled_ || !quest_event_ready_.load(std::memory_order_acquire) || !quest_events_.pending() ||
             terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            dialogue_.recording() || active_responses_.load(std::memory_order_acquire) != 0 ||
+            dialogue_.recording() || requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 || speech_.jobs_active() ||
             !speech_.playback_idle() || quest_event_tasks_.load(std::memory_order_acquire) != 0) return;
         const auto now = tasks::TaskLanes::Clock::now();
@@ -376,7 +386,7 @@ public:
     void pump_actor_events() {
         if (!actor_events_enabled_ || !client_.actor_events_ready() || !actor_events_.pending() ||
             terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            dialogue_.recording() || active_responses_.load(std::memory_order_acquire)!=0 ||
+            dialogue_.recording() || requests_.responses()!=0 ||
             active_actions_.load(std::memory_order_acquire)!=0 || speech_.jobs_active() ||
             !speech_.playback_idle() || actor_event_tasks_.load(std::memory_order_acquire)!=0) return;
         const auto now=tasks::TaskLanes::Clock::now();
@@ -454,7 +464,7 @@ public:
         const auto* pending = player_events_.front();
         if (!pending || !snapshot || !client_.player_events_ready() || terminal_.load(std::memory_order_acquire) ||
             runtime_paused() || dialogue_.recording() || !speech_.playback_idle() ||
-            active_responses_.load(std::memory_order_acquire) != 0 || active_actions_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 || active_actions_.load(std::memory_order_acquire) != 0 ||
             speech_.jobs_active() || player_event_tasks_.load(std::memory_order_acquire) != 0) return false;
         const auto& observed = pending->after;
         if (snapshot->generation() != observed.generation || snapshot->variant() != observed.variant ||
@@ -502,7 +512,7 @@ public:
         // Ambient activation must not fill the request queue while a reply or
         // speech is outstanding. Keep current-turn admission available to input.
         if (!manual && ((flat_automatic?player_voice_active():dialogue_.recording()) || active_actions_.load(std::memory_order_acquire) != 0 ||
-                        active_responses_.load(std::memory_order_acquire) != 0 ||
+                        requests_.responses() != 0 ||
                         speech_.jobs_active() || !speech_.playback_idle())) {
             return false;
         }
@@ -528,7 +538,7 @@ public:
         const auto accepted = network_.try_submit(
             "network", manual ? tasks::TaskClass::current_turn : tasks::TaskClass::background,
             deadline, manual ? begin_player_turn(actor_key(actor)) : current_turn_token(),
-            tasks::TaskLanes::track_activity(active_responses_,
+            requests_.track_response(
             [this, snapshot = std::move(snapshot), actor, manual,flat_automatic](const core::CancellationToken& cancellation) {
                 if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
                 if(flat_automatic&&!automatic_activation_current(snapshot))return;
@@ -799,7 +809,7 @@ public:
         if (!snapshot || !client_.quest_reactions_ready() || snapshot->variant() != core::RuntimeVariant::flat ||
             dialogue_.recording() || runtime_paused_.load(std::memory_order_acquire) ||
             terminal_.load(std::memory_order_acquire) || !client_.ready() || !speech_.playback_idle() ||
-            speech_.jobs_active() || active_responses_.load(std::memory_order_acquire) != 0 ||
+            speech_.jobs_active() || requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) return false;
         const auto journal = context::quest_observation(*snapshot);
         std::uint64_t previous_sequence{};
@@ -823,7 +833,7 @@ public:
             snapshot->player().in_combat() ||
             dialogue_.recording() || runtime_paused() || terminal_.load(std::memory_order_acquire) ||
             !client_.ready() || !speech_.playback_idle() || speech_.jobs_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 || active_actions_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 || active_actions_.load(std::memory_order_acquire) != 0 ||
             player_event_tasks_.load(std::memory_order_acquire) != 0) return false;
         const auto& observed = event->after;
         if (snapshot->generation() != observed.generation || snapshot->player().form_id() != observed.form_id ||
@@ -889,7 +899,7 @@ public:
             runtime_paused_.load(std::memory_order_acquire) || !configuration_.activation.enabled ||
             terminal_.load(std::memory_order_acquire) || !client_.ready() || !client_.ambient_npc_ready() ||
             !speech_.playback_idle() || !speech_.captions_idle() || speech_.jobs_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) {
             return false;
         }
@@ -920,7 +930,7 @@ public:
             !configuration_.behavior.combat_barks_enabled ||
             terminal_.load(std::memory_order_acquire) || !client_.ready() || !speech_.playback_idle() ||
             speech_.jobs_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) {
             return false;
         }
@@ -949,7 +959,7 @@ public:
             world_context_tasks_.load(std::memory_order_acquire) != 0 ||
             player_event_tasks_.load(std::memory_order_acquire) != 0 ||
             speech_.jobs_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0) {
             return false;
         }
@@ -996,7 +1006,7 @@ public:
         }
         if (runtime_paused_.load(std::memory_order_acquire) || player_voice_active()) return;
         // Only the completed response's final currently playing line may authorize one speculative child.
-        if (client_.rechat_scene_ready() && active_responses_.load(std::memory_order_acquire) == 0 &&
+        if (client_.rechat_scene_ready() && requests_.responses() == 0 &&
             active_actions_.load(std::memory_order_acquire) == 0 && !speech_.jobs_active() &&
             speech_.captions_idle()) {
             const auto playing = speech_.playback_frame();
@@ -1013,7 +1023,7 @@ public:
             }
         }
         if (!speech_.playback_idle() || speech_.jobs_active() ||
-            active_responses_.load(std::memory_order_acquire) != 0 ||
+            requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 ||
             terminal_.load(std::memory_order_acquire)) {
             return;
@@ -1159,7 +1169,7 @@ public:
             const auto token = rechat->prefetch->token();
             const auto accepted = network_.try_submit("network", tasks::TaskClass::current_turn,
                 now + std::chrono::milliseconds{request_timeout_ms()}, token,
-                tasks::TaskLanes::track_activity(active_responses_,
+                requests_.track_response(
                     [this, snapshot = std::move(snapshot), lines = std::move(*rechat->prefetched_lines), prefetch = rechat->prefetch](const core::CancellationToken& cancellation) {
                         if (core::SnapshotClock::now()-snapshot->captured_at()>std::chrono::seconds{2}) { prefetch->cancel(); return; }
                         if (!prefetch->release(core::SnapshotClock::now())) return;
@@ -1203,55 +1213,8 @@ public:
         if (voice->target && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, voice->turn,
-            tasks::TaskLanes::track_activity(active_responses_,
-            [this, wave = std::move(voice->wave), snapshot = std::move(snapshot), target, controls](
-                const core::CancellationToken& cancellation) mutable {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-
-                try {
-                    hold_conversation_actor(target,cancellation,controls.mode);
-                    const auto sha256 = media_fetch::sha256_hex(wave);
-                    protocol_native::Media media{"media/" + sha256, "audio/wav", sha256,
-                                                 static_cast<std::uint64_t>(wave.size())};
-                    std::string body(reinterpret_cast<const char*>(wave.data()), wave.size());
-                    const auto upload = client_.upload_media(media, std::move(body), [this, cancellation] {
-                        return cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire);
-                    });
-                    if (!upload.delivered() || upload.response.status < 200 ||
-                        upload.response.status >= 300) {
-                        if (cancellation.is_cancelled()) return;
-                        push_notification("SYNTH microphone upload failed");
-                        return;
-                    }
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto context_outcome = publish_snapshot(snapshot,
-                        controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG" ? std::nullopt : std::optional{target},
-                        cancellation, nullptr, {}, {}, {}, controls);
-                    if (context_outcome.status != RequestStatus::complete) {
-                        if (context_outcome.status != RequestStatus::cancelled)
-                            push_notification("SYNTH voice context failed: " + context_outcome.detail);
-                        return;
-                    }
-                    const auto outcome = client_.send_audio(
-                        media, [this, snapshot, cancellation](const protocol_native::Line& line) {
-                            handle_line(line, snapshot, cancellation);
-                        }, context_outcome.context_binding, controls);
-                    const bool social_rejected=notify_social_input(outcome);
-                    if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
-                        conversation_holds_.suspend(cancellation);
-                        if(!social_rejected)push_notification("SYNTH voice request failed: " + outcome.detail);
-                    }
-                } catch (const std::exception& error) {
-                    push_notification(std::string{"SYNTH voice request: "} + error.what());
-                }
-            }));
-        if (accepted != tasks::SubmitResult::accepted) {
-            push_notification("SYNTH network queue is full; voice input discarded");
+        if (!requests_.submit_voice(std::move(snapshot), std::move(voice->wave), target, controls, deadline, voice->turn))
             return false;
-        }
         dialogue_.own_external_work(actor_key(target));
         mark_activity();
         return true;
@@ -1294,7 +1257,7 @@ public:
     [[nodiscard]] bool external_ready() {
         const auto idle=client_.ready() && !terminal_.load(std::memory_order_acquire) && !runtime_paused() &&
             !dialogue_.recording() && active_actions_.load(std::memory_order_acquire)==0 &&
-            active_responses_.load(std::memory_order_acquire)==0 && !speech_.jobs_active() &&
+            requests_.responses()==0 && !speech_.jobs_active() &&
             speech_.playback_idle();
         if (!idle) return false;
         std::unique_lock actions{action_mutex_,std::try_to_lock};
@@ -1386,13 +1349,6 @@ private:
         if(!social_tasks_.active_task())clear_social_execution_locked();
         return true;
     }
-    void hold_conversation_actor(const protocol_native::Identity& actor,core::CancellationToken cancellation,std::string_view mode) {
-        std::uint32_t form{};
-        if (actor.form_id.size()!=10 || !actor.form_id.starts_with("0x")) return;
-        const auto parsed=std::from_chars(actor.form_id.data()+2,actor.form_id.data()+actor.form_id.size(),form,16);
-        if (parsed.ec==std::errc{} && parsed.ptr==actor.form_id.data()+actor.form_id.size())
-            conversation_holds_.add({form,actor.origin_plugin,actor.playthrough_id},cancellation,core::SnapshotClock::now(),conversation_approach_mode(mode));
-    }
     // Both typed input and external Ask retain the same exact actor through context publication and response delivery.
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
                                           std::optional<protocol_native::ControlSelection> retained_controls = {},
@@ -1401,41 +1357,8 @@ private:
         if (controls.mode != "NARRATOR" && controls.mode != "INJECTION_LOG" && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, begin_player_turn(actor_key(target)),
-            tasks::TaskLanes::track_activity(active_responses_,
-            [this, snapshot = std::move(snapshot), text = std::move(text), target, controls, intent](
-                const core::CancellationToken& cancellation) mutable {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-
-                try {
-                    hold_conversation_actor(target,cancellation,controls.mode);
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto context_outcome = publish_snapshot(snapshot,
-                        controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG" ? std::nullopt : std::optional{target},
-                        cancellation, nullptr, {}, {}, {}, controls);
-                    if (context_outcome.status != RequestStatus::complete) {
-                        if (context_outcome.status != RequestStatus::cancelled)
-                            push_notification("SYNTH text context failed: " + context_outcome.detail);
-                        return;
-                    }
-                    const auto outcome = client_.send_text(
-                        std::move(text), [this, snapshot, cancellation](const protocol_native::Line& line) {
-                            handle_line(line, snapshot, cancellation);
-                        }, context_outcome.context_binding, controls, intent);
-                    const bool social_rejected=notify_social_input(outcome);
-                    if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
-                        if(!social_rejected)push_notification("SYNTH text request failed: " + outcome.detail);
-                    }
-                } catch (const std::exception& error) {
-                    push_notification(std::string{"SYNTH text request: "} + error.what());
-                }
-            }));
-        if (accepted != tasks::SubmitResult::accepted) {
-            push_notification("SYNTH network queue is full; text input discarded");
-            return false;
-        }
+        if (!requests_.submit_text(std::move(snapshot), std::move(text), target, controls, intent,
+                                   deadline, begin_player_turn(actor_key(target)))) return false;
         claim_external_work(actor_key(target));
         mark_activity();
         return true;
@@ -1557,7 +1480,7 @@ public:
         const auto accepted = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, turn,
             tasks::TaskLanes::track_activity(visual_tasks_,
-            tasks::TaskLanes::track_activity(active_responses_,
+            requests_.track_response(
             [this, snapshot = std::move(snapshot), interaction_mode = std::move(interaction_mode),
              pixels = pixels, world = std::move(world), deadline,
              subject, nearby = std::move(nearby),
@@ -1702,7 +1625,7 @@ public:
     // Native adapters capture only when a finished diary needs a new save frontier, never on the worker.
     [[nodiscard]] bool diary_checkpoint_needed() {
         if (terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            diary_tasks_.load(std::memory_order_acquire) != 0 || active_responses_.load(std::memory_order_acquire) != 0 ||
+            diary_tasks_.load(std::memory_order_acquire) != 0 || requests_.responses() != 0 ||
             active_actions_.load(std::memory_order_acquire) != 0 || speech_.jobs_active() ||
             dialogue_.recording() || !speech_.playback_idle()) return false;
         std::scoped_lock lock{diary_mutex_};
@@ -1827,7 +1750,7 @@ private:
     [[nodiscard]] bool social_player_busy(bool owns_rpc=false) {
         return runtime_paused()||composing_.load(std::memory_order_acquire)||dialogue_.recording()||
             active_actions_.load(std::memory_order_acquire)!=0||speech_.jobs_active()||
-            active_responses_.load(std::memory_order_acquire)>(owns_rpc ? social_progress_tasks_.load(std::memory_order_acquire) : 0)||
+            requests_.responses()>(owns_rpc ? social_progress_tasks_.load(std::memory_order_acquire) : 0)||
             !speech_.playback_idle()||!speech_.captions_idle();
     }
     void queue_social_checkpoint(Snapshot snapshot) {
@@ -1908,7 +1831,7 @@ private:
         const bool cleanup_report=command.kind==runtime::SocialTaskCommandKind::failed||command.kind==runtime::SocialTaskCommandKind::cancelled;
         const auto accepted=network_.try_submit("network",tasks::TaskClass::background,
             cleanup_report ? rpc_deadline : std::min(command.deadline,rpc_deadline),owner,
-            tasks::TaskLanes::track_activity(social_progress_tasks_,tasks::TaskLanes::track_activity(active_responses_,
+            tasks::TaskLanes::track_activity(social_progress_tasks_,requests_.track_response(
             [this,snapshot=std::move(snapshot),command,serial](const core::CancellationToken& cancellation) {
                 if(cancellation.is_cancelled()||terminal_.load(std::memory_order_acquire)||social_player_busy(true))return;
                 {
@@ -2116,7 +2039,7 @@ private:
         if (deadline <= now) return false;
         const auto accepted = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, current_turn_token(),
-            tasks::TaskLanes::track_activity(active_responses_,
+            requests_.track_response(
             [this, kind = std::move(kind), actor = std::move(actor),
              snapshot = std::move(snapshot), failure_label = std::move(failure_label), external_text = std::move(external_text), previous_sequence,
              player_event_serial, event_deadline](
@@ -2226,7 +2149,7 @@ private:
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
         const auto result = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, cancellation_.token(),
-            tasks::TaskLanes::track_activity(active_responses_,
+            requests_.track_response(
             [this, snapshot = std::move(snapshot), initialize_first, target](const core::CancellationToken& cancellation) {
                 if (cancellation.is_cancelled()) {
                     return;
@@ -2774,7 +2697,7 @@ private:
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
         const auto accepted = network_.try_submit(
             "network", tasks::TaskClass::current_turn, deadline, binding.cancellation,
-            tasks::TaskLanes::track_activity(active_responses_,
+            requests_.track_response(
             [this, rechat = std::move(rechat),social_execution](
                 const core::CancellationToken& cancellation) mutable {
                 if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
@@ -3576,7 +3499,6 @@ private:
     std::atomic_bool halting_{};
     std::atomic_size_t halt_requests_{};
     ConversationHolds conversation_holds_;
-    std::atomic_size_t active_responses_{};
     std::atomic_size_t visual_tasks_{};
     std::atomic_size_t active_actions_{};
     std::atomic_size_t diary_tasks_{};
@@ -3633,6 +3555,10 @@ private:
     // Borrows configuration, client, control lane and trace declared above; ~PluginSession joins the
     // control lane, whose cancel tasks capture this owner, before members are destroyed.
     PlayerDialogue dialogue_;
+    // Borrows client, network lane, terminal flag and holds declared above; its callbacks capture this
+    // session. ~PluginSession joins the network lane before members are destroyed, so every queued,
+    // running, rejected or expired request task (and its response-count guard) is gone first.
+    DialogueRequests requests_;
     // Declared after every borrowed dependency, so it is destroyed before them. ~PluginSession joins
     // network, then speech jobs, then control, then halts playback; the member destructor repeats
     // join/halt as idempotent no-ops. If a later member's constructor throws, that fallback alone
