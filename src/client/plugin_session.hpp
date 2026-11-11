@@ -20,15 +20,14 @@
 #include "client/rechat_continuation.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/observed_event_delivery.hpp"
+#include "client/diary_requests.hpp"
+#include "client/visual_capture.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/snapshot.hpp"
 #include "core/save_context.hpp"
-#include "core/automatic_diary_queue.hpp"
 #include "integration/external_requests.hpp"
 #include "integration/prompt_target.hpp"
-#include "media_fetch/media_fetch.hpp"
-#include "media_capture/window_capture.hpp"
 #include "runtime/game_thread_dispatcher.hpp"
 #include "targeting/targeting.hpp"
 #include "tasks/task_lanes.hpp"
@@ -92,8 +91,6 @@ public:
                   }},
           cancellation_{generation},
           network_({tasks::LaneConfig{"network", configuration_.limits.max_pending_requests, 1, 3}}, 2),
-          automatic_diary_enabled_{variant == core::RuntimeVariant::flat && rest_events_available},
-          automatic_diaries_{generation},
           quest_events_{generation},
           dialogue_{configuration_, client_, control_, cancellation_.token(), trace_,
                     [this](std::string message) { push_notification(std::move(message)); }},
@@ -165,7 +162,15 @@ public:
                               const core::CancellationToken& cancellation, bool allow_followup, bool combat_bark) {
                            handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark);
                        },
-                       [this](std::string message) { push_notification(std::move(message)); }}} {}
+                       [this](std::string message) { push_notification(std::move(message)); }}},
+          diary_{{configuration_, client_, network_, context_, terminal_, runtime_paused_, halting_, cancellation_.token(),
+                  variant == core::RuntimeVariant::flat && rest_events_available,
+                  [this](std::string message) { push_notification(std::move(message)); }}},
+          vision_{{configuration_, client_, network_, requests_, context_, dialogue_, observations_,
+                   terminal_, runtime_paused_, halting_, cancellation_.token(),
+                   [this](const protocol_native::Line& line, const Snapshot& snapshot,
+                          const core::CancellationToken& cancellation) { handle_line(line, snapshot, cancellation); },
+                   [this](std::string message) { push_notification(std::move(message)); }}} {}
 
     PluginSession(const PluginSession&) = delete;
     PluginSession& operator=(const PluginSession&) = delete;
@@ -195,7 +200,7 @@ public:
         cancellation_.cancel();
         social_.reset();
         observations_.stop();
-        { std::scoped_lock lock{diary_mutex_}; automatic_diaries_.clear(); }
+        diary_.stop();
         voice_samples_.request_stop();
     }
 
@@ -639,8 +644,8 @@ public:
         if (actions_.pump(runtime) != ActionExecution::Pump::idle) return;
         if (!speech_.captions_idle()) return;
         if (!rechat_.pump_delivered_parent(generation)) {
-            pump_diary_status();
-            pump_automatic_diary();
+            diary_.pump_status();
+            diary_.pump_automatic();
         }
     }
 
@@ -880,142 +885,15 @@ public:
                                       : "SYNTH could not open the control panel");
     }
 
-    // Bind subject/context and freeze pixels on the pump; encode/hash/upload only on the worker.
+    // VisualCapture owns admission, the copied payload, pixel freeze and its worker; the pointed
+    // subject and the "describe" turn replacement stay here and run during this call only.
     [[nodiscard]] bool submit_visual_capture(Snapshot snapshot, std::string interaction_mode) {
-        if (!snapshot || snapshot->generation() != cancellation_.token().generation() || !client_.ready() ||
-            terminal_.load(std::memory_order_acquire) ||
-            runtime_paused_.load(std::memory_order_acquire) || halting()) {
-            return false;
-        }
-        // Admission is game-thread-only; a worker only releases this lifetime counter.
-        if (visual_tasks_.load(std::memory_order_acquire) != 0) {
-            push_notification("SYNTH PipVision capture is still processing");
-            return false;
-        }
-        std::optional<protocol_native::Identity> subject;
-        if (interaction_mode == "npc_portrait") {
-            if (auto target = pointed_subject(*snapshot)) subject = identity(*target);
-            if (!subject) {
-                push_notification("SYNTH PipVision: target an NPC first");
-                return false;
-            }
-        } else if (interaction_mode == "describe") {
-            if (auto target = nearest_visual_subject(*snapshot)) subject = identity(*target);
-            if (!subject) {
-                push_notification("SYNTH PipVision: no nearby NPC can describe the scene");
-                return false;
-            }
-        } else if (interaction_mode != "store_only") {
-            return false;
-        }
-
-        if (subject && !enrich_selected_actor(snapshot, *subject)) return false;
-        std::vector<protocol_native::Identity> nearby;
-        const auto hearing_distance = snapshot->world() && snapshot->world()->interior
-            ? configuration_.activation.interior_hearing_distance
-            : configuration_.activation.exterior_hearing_distance;
-        nearby.reserve(std::min<std::size_t>(snapshot->actors().size(), 16));
-        for (const auto& actor : snapshot->actors()) {
-            if (nearby.size() == 16) break;
-            if (((subject && actor_key(identity(actor)) == actor_key(*subject)) ||
-                 targeting::distance(snapshot->player_pose().position(), actor.position()) <= hearing_distance) &&
-                targeting::dialogue_actor_available(actor)) {
-                nearby.push_back(identity(actor));
-            }
-        }
-        std::optional<protocol_native::WorldState> world;
-        if (snapshot->world()) {
-            world = protocol_native::WorldState{
-                snapshot->world()->location, snapshot->world()->cell, snapshot->world()->worldspace,
-                snapshot->world()->weather, snapshot->world()->interior,
-                snapshot->world()->game_time_ticks};
-        }
-        // Share one immutable buffer through std::function copies, not many 128 MB pixel copies.
-        const auto pixels = std::make_shared<const media_capture::CapturedPixels>(
-            media_capture::capture_game_window_pixels());
-        const auto perspective = snapshot->variant() == core::RuntimeVariant::vr ? "hmd" : "first_person";
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto turn = interaction_mode == "describe" ? begin_player_turn(subject ? actor_key(*subject) : std::string{}) : current_turn_token();
-        const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, turn,
-            tasks::TaskLanes::track_activity(visual_tasks_,
-            requests_.track_response(
-            [this, snapshot = std::move(snapshot), interaction_mode = std::move(interaction_mode),
-             pixels = pixels, world = std::move(world), deadline,
-             subject, nearby = std::move(nearby),
-             perspective = std::string{perspective}](const core::CancellationToken& cancellation) mutable {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-
-                try {
-                    const auto image = media_capture::encode_jpeg(*pixels);
-                    pixels.reset();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                        tasks::TaskLanes::Clock::now() >= deadline) return;
-                    const auto sha256 = media_fetch::sha256_hex(image.bytes);
-                    protocol_native::Media media{"media/" + sha256, image.content_type, sha256,
-                                                 static_cast<std::uint64_t>(image.bytes.size())};
-                    std::string body(reinterpret_cast<const char*>(image.bytes.data()), image.bytes.size());
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-                        tasks::TaskLanes::Clock::now() >= deadline) return;
-                    const auto upload = client_.upload_media(media, std::move(body), [this, &cancellation] {
-                        return cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire);
-                    });
-                    if (!upload.delivered() || upload.response.status < 200 || upload.response.status >= 300) {
-                        push_notification("SYNTH PipVision image upload failed");
-                        return;
-                    }
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto context_outcome = publish_snapshot(snapshot, subject, cancellation);
-                    if (context_outcome.status != RequestStatus::complete) {
-                        push_notification("SYNTH PipVision capture context failed: " + context_outcome.detail);
-                        return;
-                    }
-                    const auto outcome = client_.send_visual_capture(
-                        interaction_mode, perspective, media, world, subject, nearby,
-                        [this, &cancellation] {
-                            return cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire);
-                        }, context_outcome.context_binding);
-                    if (outcome.status != RequestStatus::complete) {
-                        push_notification("SYNTH PipVision failed: " + outcome.detail);
-                        return;
-                    }
-                    if (interaction_mode == "describe" && subject) {
-                        const auto reaction = client_.trigger(
-                            "external_reaction", *subject,
-                            [this, snapshot, cancellation](const protocol_native::Line& line) {
-                                handle_line(line, snapshot, cancellation);
-                            }, std::nullopt,
-                            "Describe the bound PipVision capture naturally from your own point of view.",
-                            context_outcome.context_binding, outcome.capture_id);
-                        if (reaction.status != RequestStatus::complete) {
-                            push_notification("SYNTH PipVision description dialogue failed");
-                            return;
-                        }
-                        // The original snapshot predates the accepted visual result. Advance the
-                        // co-save frontier after completion without inventing a new game observation.
-                        const auto checkpoint = publish_snapshot(snapshot, subject, cancellation);
-                        if (checkpoint.status != RequestStatus::complete) {
-                            push_notification("SYNTH PipVision described; save checkpoint is not acknowledged");
-                            return;
-                        }
-                    }
-                    push_notification(interaction_mode == "npc_portrait"
-                                          ? "SYNTH PipVision NPC portrait updated"
-                                          : interaction_mode == "describe"
-                                                ? "SYNTH PipVision scene described"
-                                                : "SYNTH PipVision scene captured");
-                } catch (const std::exception& error) {
-                    push_notification(std::string{"SYNTH PipVision: "} + error.what());
-                }
-            })));
-        if (accepted != tasks::SubmitResult::accepted) {
-            push_notification("SYNTH PipVision queue is full");
-            return false;
-        }
-        claim_external_work(subject ? std::optional{actor_key(*subject)} : std::nullopt);
-        return true;
+        return vision_.submit(std::move(snapshot), std::move(interaction_mode),
+            [this](const core::RuntimeSnapshot& current) -> std::optional<protocol_native::Identity> {
+                if (auto target = pointed_subject(current)) return identity(*target);
+                return std::nullopt;
+            },
+            [this](std::string actor) { return begin_player_turn(std::move(actor)); });
     }
 
     // Copy the pointed actor and snapshot on the game thread; admission runs only on the network lane.
@@ -1023,109 +901,36 @@ public:
         return request_diary(std::move(snapshot), protocol_native::DiaryRole::npc, retained);
     }
 
-    [[nodiscard]] bool automatic_diary_ready() const {
-        return automatic_diary_enabled_ && client_.ready() && !terminal_.load(std::memory_order_acquire) && !halting();
-    }
+    [[nodiscard]] bool automatic_diary_ready() const { return diary_.automatic_ready(); }
 
-    // The safe pump supplies one real copied frame, not a fabricated event-start snapshot or a later retarget.
+    // DiaryRequests owns the rest queue, pending diary and every diary RPC; the session keeps selection.
     [[nodiscard]] std::size_t queue_automatic_diaries(Snapshot snapshot, const core::RestEventBatch& starts) {
-        if (!automatic_diary_ready() || !snapshot || starts.size > starts.events.size()) return 0;
-        const auto now = core::SnapshotClock::now();
-        std::scoped_lock lock{diary_mutex_};
-        if (terminal_.load(std::memory_order_acquire) || cancellation_.token().is_cancelled()) return 0;
-        if (automatic_diaries_.expire(now) != 0) push_notification("SYNTH expired queued automatic diaries before admission");
-        std::size_t accepted{};
-        for (std::size_t i = 0; i < starts.size; ++i)
-            if (automatic_diaries_.push(snapshot, starts.events[i], now)) ++accepted;
-        if (accepted != starts.size) push_notification("SYNTH automatic diary queue rejected stale or excess rest events");
-        return accepted;
+        return diary_.queue_automatic(std::move(snapshot), starts);
     }
 
-    // Player-owned roles use the copied player, never a fabricated NPC or a game-thread provider call.
     [[nodiscard]] bool request_diary(Snapshot snapshot, protocol_native::DiaryRole role,
                                    const integration::PromptTarget* retained = nullptr) {
-        if (!snapshot || !client_.ready() || terminal_.load(std::memory_order_acquire) ||
-            runtime_paused_.load(std::memory_order_acquire)) return false;
-        {
-            std::scoped_lock lock{diary_mutex_};
-            if (pending_diary_ || diary_tasks_.load(std::memory_order_acquire) != 0) {
-                push_notification("SYNTH is still tracking the previous diary request");
-                return false;
-            }
-        }
-        const auto selected = retained ? selected_target(*snapshot, false, retained) : pointed_subject(*snapshot);
-        const auto player_owned = role != protocol_native::DiaryRole::npc;
-        if (!player_owned && !selected) { push_notification("SYNTH diary needs a pointed NPC"); return false; }
-        const auto actor = player_owned ? identity(snapshot->player()) : identity(*selected);
-        const auto deadline = tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background, deadline, cancellation_.token(),
-            tasks::TaskLanes::track_activity(diary_tasks_,
-            [this, actor, role, player_owned, snapshot = std::move(snapshot)](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    const auto published = publish_snapshot(snapshot, player_owned ? std::nullopt : std::optional{actor}, cancellation);
-                    if (published.status != RequestStatus::complete) { push_notification("SYNTH diary context was not acknowledged"); return; }
-                    auto admission = client_.request_diary(actor, published.context_binding, role);
-                    const auto& outcome = admission.outcome();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    if (outcome.status != RequestStatus::complete) push_notification("SYNTH diary request failed; check logs");
-                    else if (outcome.detail == "diary_queued") {
-                        std::scoped_lock lock{diary_mutex_};
-                        const auto now = tasks::TaskLanes::Clock::now();
-                        pending_diary_ = PendingDiary{std::move(admission), now + std::chrono::minutes{30}, now + std::chrono::seconds{5}};
-                        push_notification("SYNTH diary queued for background generation");
-                    } else push_notification("SYNTH diary disabled: check the selected role's diary setting and connector");
-                } catch (const std::exception&) { push_notification("SYNTH diary request failed; check logs"); }
-            }));
-        if (accepted != tasks::SubmitResult::accepted) push_notification("SYNTH diary queue is full");
-        return accepted == tasks::SubmitResult::accepted;
+        return diary_.request(std::move(snapshot), role,
+            [this, retained](const core::RuntimeSnapshot& current) -> std::optional<protocol_native::Identity> {
+                const auto selected = retained ? selected_target(current, false, retained) : pointed_subject(current);
+                return selected ? std::optional{identity(*selected)} : std::nullopt;
+            });
     }
 
     // Native adapters capture only when a finished diary needs a new save frontier, never on the worker.
     [[nodiscard]] bool diary_checkpoint_needed() {
         if (terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire) ||
-            diary_tasks_.load(std::memory_order_acquire) != 0 || requests_.responses() != 0 ||
+            requests_.responses() != 0 ||
             actions_.active() != 0 || speech_.jobs_active() ||
             dialogue_.recording() || !speech_.playback_idle()) return false;
-        std::scoped_lock lock{diary_mutex_};
-        return pending_diary_ && pending_diary_->ready && tasks::TaskLanes::Clock::now() >= pending_diary_->next_poll;
+        return diary_.checkpoint_due();
     }
 
     [[nodiscard]] bool checkpoint_diary(Snapshot snapshot) {
         if (!snapshot || snapshot->generation() != cancellation_.token().generation() || !diary_checkpoint_needed()) return false;
         const auto selected = selected_target(*snapshot, false);
         const auto target = selected ? std::optional{identity(*selected)} : std::nullopt;
-        {
-            std::scoped_lock lock{diary_mutex_};
-            pending_diary_->next_poll = tasks::TaskLanes::Clock::now() + std::chrono::seconds{5};
-        }
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
-            tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{request_timeout_ms()}, cancellation_.token(),
-            tasks::TaskLanes::track_activity(diary_tasks_,
-            [this, snapshot = std::move(snapshot), target](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                bool saved{};
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    saved = publish_snapshot(snapshot, target, cancellation).save_checkpoint_acknowledged;
-                } catch (const std::exception&) {}
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                std::scoped_lock lock{diary_mutex_};
-                if (!pending_diary_) return;
-                if (saved) {
-                    const auto partial = pending_diary_->partial;
-                    pending_diary_.reset();
-                    push_notification(partial ? "SYNTH diary batch partly completed; successful entries included in your next save" :
-                        "SYNTH diary complete; included in your next save");
-                } else if (++pending_diary_->checkpoint_failures >= 3) {
-                    const auto partial = pending_diary_->partial;
-                    pending_diary_.reset();
-                    push_notification(partial ? "SYNTH diary batch partly generated, but its save checkpoint was not acknowledged" :
-                        "SYNTH diary generated, but its save checkpoint was not acknowledged");
-                }
-            }));
-        return accepted == tasks::SubmitResult::accepted;
+        return diary_.checkpoint(std::move(snapshot), target);
     }
 
     [[nodiscard]] bool refresh_dynamic_profiles(Snapshot snapshot, std::string_view scope = "automatic", std::uint32_t target_form_id = 0) {
@@ -1313,18 +1118,6 @@ private:
         return std::move(selected.target);
     }
 
-    [[nodiscard]] std::optional<context::TargetContext> nearest_visual_subject(
-        const core::RuntimeSnapshot& snapshot) {
-        const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
-        const auto eligible = [](const core::ActorSnapshot& actor) {
-            return targeting::dialogue_actor_available(actor);
-        };
-        return targeting::select_nearest(
-                   snapshot, playthrough, snapshot.player_pose().position(),
-                   configuration_.activation.automatic_hearing_distance, eligible)
-            .target;
-    }
-
     void handle_line(const protocol_native::Line& line, const Snapshot& snapshot,
                      const core::CancellationToken& cancellation, bool allow_followup = true,
                      const std::shared_ptr<RechatPrefetch>& prefetch = {}, bool combat_bark = false) {
@@ -1461,108 +1254,6 @@ private:
         notifications_.push_back(std::move(message));
     }
 
-    // Admit one copied rest batch behind existing diary work; saturation retains it only until its bounded expiry.
-    void pump_automatic_diary() {
-        if (!automatic_diary_ready() || diary_tasks_.load(std::memory_order_acquire) != 0) return;
-        std::scoped_lock lock{diary_mutex_};
-        const auto now = tasks::TaskLanes::Clock::now();
-        if (automatic_diaries_.expire(now) != 0) push_notification("SYNTH expired queued automatic diaries before admission");
-        if (pending_diary_ || !automatic_diaries_.front() || now < next_automatic_diary_attempt_) return;
-        next_automatic_diary_attempt_ = now + std::chrono::seconds{5};
-        const auto item = *automatic_diaries_.front();
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
-            item.expires, cancellation_.token(), tasks::TaskLanes::track_activity(diary_tasks_,
-            [this, item](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                if (tasks::TaskLanes::Clock::now() >= item.expires) {
-                    push_notification("SYNTH automatic diary expired before context publication"); return;
-                }
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    if (tasks::TaskLanes::Clock::now() >= item.expires || cancellation.is_cancelled()) return;
-                    std::vector<protocol_native::Identity> audience;
-                    const auto published = publish_snapshot(item.snapshot, std::nullopt, cancellation, &audience);
-                    if (published.status != RequestStatus::complete) {
-                        push_notification("SYNTH automatic diary context was not acknowledged"); return;
-                    }
-                    if (tasks::TaskLanes::Clock::now() >= item.expires || cancellation.is_cancelled()) {
-                        push_notification("SYNTH automatic diary expired or was cancelled before admission"); return;
-                    }
-                    auto admission = client_.request_diary(protocol_native::DiaryRequest{
-                        std::move(audience), true, true, item.reason == core::RestStart::sleep ?
-                            protocol_native::DiaryReason::sleep : protocol_native::DiaryReason::wait}, published.context_binding);
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto& outcome = admission.outcome();
-                    if (outcome.status != RequestStatus::complete) {
-                        push_notification("SYNTH automatic diary admission failed; check server logs");
-                    } else if (outcome.detail == "diary_queued") {
-                        std::scoped_lock diary_lock{diary_mutex_};
-                        if (terminal_.load(std::memory_order_acquire) || cancellation.is_cancelled()) return;
-                        const auto admitted_at = tasks::TaskLanes::Clock::now();
-                        pending_diary_ = PendingDiary{std::move(admission), admitted_at + std::chrono::minutes{30},
-                            admitted_at + std::chrono::seconds{5}};
-                        push_notification("SYNTH automatic diary batch queued for background generation");
-                    }
-                    // Disabled/cooldown roles are normal automatic policy, not a dialogue failure.
-                } catch (const std::exception&) { push_notification("SYNTH automatic diary request failed; check server logs"); }
-            }));
-        if (accepted == tasks::SubmitResult::accepted) automatic_diaries_.pop();
-    }
-
-    // One short background RPC per interval; the saved receipt retains every selected role and original context.
-    void pump_diary_status() {
-        if (diary_tasks_.load(std::memory_order_acquire) != 0) return;
-        std::optional<PendingDiary> pending;
-        {
-            std::scoped_lock lock{diary_mutex_};
-            if (!pending_diary_) return;
-            const auto now = tasks::TaskLanes::Clock::now();
-            if (now >= pending_diary_->deadline) {
-                pending_diary_.reset();
-                push_notification("SYNTH diary completion tracking timed out; completion is not confirmed");
-                return;
-            }
-            if (pending_diary_->ready || now < pending_diary_->next_poll) return;
-            pending_diary_->next_poll = now + std::chrono::seconds{5};
-            pending = pending_diary_;
-        }
-        (void)network_.try_submit("network", tasks::TaskClass::background,
-            tasks::TaskLanes::Clock::now() + std::chrono::seconds{3}, cancellation_.token(),
-            tasks::TaskLanes::track_activity(diary_tasks_,
-            [this, pending = std::move(*pending)](const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                RequestOutcome outcome;
-                try { outcome = client_.fetch_diary_status(pending.admission); }
-                catch (const std::exception&) { outcome.status = RequestStatus::malformed_response; }
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                std::scoped_lock lock{diary_mutex_};
-                if (!pending_diary_) return;
-                if (outcome.status == RequestStatus::complete) {
-                    if (outcome.detail == "diary_queued" || outcome.detail == "diary_running") return;
-                    if (outcome.detail == "diary_ready" || outcome.detail == "diary_partial") {
-                        pending_diary_->ready = true;
-                        pending_diary_->partial = outcome.detail == "diary_partial";
-                        return;
-                    }
-                    pending_diary_.reset();
-                    push_notification("SYNTH diary did not complete; the server reported a terminal diary state");
-                } else if (outcome.status != RequestStatus::transport_failure &&
-                    !(outcome.status == RequestStatus::http_failure && outcome.detail.starts_with("HTTP 503"))) {
-                    pending_diary_.reset();
-                    push_notification("SYNTH diary completion could not be verified; check server logs");
-                }
-            }));
-    }
-
-    struct PendingDiary final {
-        DiaryAdmission admission;
-        tasks::TaskLanes::Deadline deadline;
-        tasks::TaskLanes::Deadline next_poll;
-        bool ready{};
-        bool partial{};
-        unsigned checkpoint_failures{};
-    };
-
     // Game-thread runtime capture before worker admission; see ObservedEventDelivery::enrich_selected_actor.
     [[nodiscard]] bool enrich_selected_actor(Snapshot& snapshot, const protocol_native::Identity& selected) {
         return observations_.enrich_selected_actor(snapshot, selected);
@@ -1583,16 +1274,9 @@ private:
     std::atomic_bool halting_{};
     std::atomic_size_t halt_requests_{};
     ConversationHolds conversation_holds_;
-    std::atomic_size_t visual_tasks_{};
-    std::atomic_size_t diary_tasks_{};
-    std::mutex diary_mutex_;
-    std::optional<PendingDiary> pending_diary_;
-    const bool automatic_diary_enabled_;
-    core::AutomaticDiaryQueue automatic_diaries_;
     // The single quest event buffer. Declared before both borrowers: context_ acknowledges journal
     // witnesses on its workers, and observations_ owns its scheduling, delivery and stop.
     QuestEventDelivery quest_events_;
-    tasks::TaskLanes::Deadline next_automatic_diary_attempt_{};
     std::shared_ptr<diagnostics::ConversationTrace> trace_{std::make_shared<diagnostics::ConversationTrace>()};
     std::mutex notification_mutex_;
     std::deque<std::string> notifications_;
@@ -1633,11 +1317,20 @@ private:
     // response, action and speech state on the game thread. Its network tasks capture it, and
     // ~PluginSession joins the network lane first, so no task outlives it.
     ObservedEventDelivery observations_;
-    // Declared last: borrows configuration, client, network lane, response accounting, context,
-    // dialogue, observed events (selected-actor enrichment) and the terminal/pause/composing flags.
+    // Borrows configuration, client, network lane, response accounting, context, dialogue, observed
+    // events (selected-actor enrichment) and the terminal/pause/composing flags.
     // Its ambient-mode and line callbacks capture this session. Its network tasks capture it, and
     // ~PluginSession joins the network lane first, so no task outlives it.
     ActivationTriggers activation_;
+    // Borrows configuration, client, network lane, context and the terminal/pause/halting flags; owns
+    // the diary task counter, pending diary and automatic rest queue. Its network tasks capture it,
+    // and ~PluginSession joins the network lane first, so no task or counter guard outlives it.
+    DiaryRequests diary_;
+    // Declared last: borrows configuration, client, network lane, response accounting, context,
+    // dialogue, observed events and the terminal/pause/halting flags; owns the visual task counter.
+    // Its line callback captures this session. Its network task captures it, and ~PluginSession
+    // joins the network lane first, so no task or counter guard outlives it.
+    VisualCapture vision_;
 };
 
 }  // namespace synth::client
