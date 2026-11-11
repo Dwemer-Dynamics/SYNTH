@@ -2,24 +2,26 @@
 
 SYNTH is the Fallout 4 and Fallout 4 VR client for AI-driven NPC conversation. It consists of
 two native 64-bit plugins, F4SE `SYNTH.dll` and F4SEVR `SYNTHVR.dll`, built from one
-engine-free shared core. Both talk to [Synthserver](https://github.com/Dwemer-Dynamics/SynthServer/tree/alpha).
+engine-free shared core. Both talk to [Synthserver](https://github.com/Dwemer-Dynamics/SynthServer/tree/unstable).
 
 ## Development branches
 
-**Start all work from `alpha` and target every pull request at `alpha`.** This is the SYNTH
-exception to the other Dwemer mods' unstable-first workflow. `synth` is the default branch;
-`unstable` and `dev` are reserved testing lanes, and `synth` is the main/release branch.
-Promotions require maintainer approval; branch names do not imply gameplay acceptance.
+**Start all work from `unstable` and open every topic pull request as a draft targeting
+`unstable`**, whether from this repository or a fork. `synth` is the default and main/release
+branch, `dev` is the tested-development lane and `alpha` is a legacy lane. Maintainers promote
+only `unstable` -> `dev` and `dev` -> `synth` from this repository; branch names do not imply
+gameplay acceptance. See [BRANCHES.md](BRANCHES.md).
 
 ```powershell
-git clone --branch alpha https://github.com/Dwemer-Dynamics/SYNTH.git
+git clone --branch unstable https://github.com/Dwemer-Dynamics/SYNTH.git
 cd SYNTH
 git switch -c feature/my-change
 ```
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/HANDOFF.md](docs/HANDOFF.md).
-GitHub may preselect the default `synth` branch for a new PR: change its base to `alpha`.
-The repository's PR branch-policy check rejects any other base.
+GitHub may preselect the default `synth` branch for a new PR: change its base to `unstable`.
+The repository's PR branch-policy check rejects any other topic base and every reverse,
+skipped or fork promotion.
 
 ## Status
 
