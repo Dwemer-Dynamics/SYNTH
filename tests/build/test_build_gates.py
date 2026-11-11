@@ -765,10 +765,28 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("return player_events_.consume_reaction(serial);", observations)
         for forbidden in (".get()", "begin_context_turn", "publish_snapshot", "RE::", "REL::"):
             self.assertNotIn(forbidden, reaction)
-        worker = session.split("bool queue_context_trigger(", 1)[1].split("static std::string make_runtime_session_id", 1)[0]
+        self.assertIn("activation_.select_observation_reactor(*snapshot, now)", reaction)
+        self.assertIn('activation_.queue_context_trigger("player_reaction"', reaction)
+        # Activation and trigger RPC state has one owner; the session keeps admission and line routing.
+        triggers = read("src/client/activation_triggers.hpp")
+        worker = triggers.split("bool queue_context_trigger(", 1)[1].split("private:", 1)[0]
         self.assertIn("snapshot->captured_at() > std::chrono::seconds{2}", worker)
         self.assertIn('kind=="player_reaction"', worker)
-        self.assertIn('handle_line(line, snapshot, cancellation, !one_shot, {}, combat_bark)', worker)
+        self.assertIn("line_(line, snapshot, cancellation, !one_shot, combat_bark)", worker)
+        self.assertLess(worker.index("observations_.enrich_selected_actor(snapshot, actor)"), worker.index("network_.try_submit("))
+        self.assertIn("handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark)", session)
+        for moved in ("activation_mutex_", "last_automatic_actor_", "automatic_activation_cadence_", "active_quest_actors_",
+                      "activity_mutex_", "last_activity_at_", "last_combat_bark_at_", "bool queue_context_trigger(",
+                      "select_observation_reactor(const", "client_.activate("):
+            self.assertNotIn(moved, session)
+        for forbidden in ("PluginSession", "RE::", "REL::", "IFalloutRuntime", "speech_.", "actions_.", "rechat_."):
+            self.assertNotIn(forbidden, triggers)
+        self.assertLess(session.index("    ObservedEventDelivery observations_;"), session.index("    ActivationTriggers activation_;"))
+        activation = triggers.split("bool submit_activation(", 1)[1].split("void forget(", 1)[0]
+        self.assertLess(activation.index("automatic_activation_cadence_.due("), activation.index("observations_.enrich_selected_actor("))
+        self.assertLess(activation.index("observations_.enrich_selected_actor("), activation.index("network_.try_submit("))
+        self.assertIn("if (active_quest_actors_.size() == 128) active_quest_actors_.erase(active_quest_actors_.begin());", activation)
+        self.assertLess(activation.index("network_.try_submit("), activation.index("automatic_activation_cadence_.admitted("))
         entry = read("src/flat/plugin_entry.cpp")
         self.assertLess(entry.index("const auto player_history ="), entry.index("const auto player_reaction ="))
         self.assertLess(entry.index("const auto player_reaction ="), entry.index("const auto quest_reaction ="))
@@ -897,7 +915,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
         # Rechat owns deferred prefetch delivery and the child RPC; social owns its progress response.
-        self.assertEqual(session.count("requests_.track_response("), 3)
+        self.assertEqual(session.count("requests_.track_response("), 1)
+        self.assertEqual(read("src/client/activation_triggers.hpp").count("requests_.track_response("), 2)
         self.assertEqual(rechat.count("requests_.track_response("), 2)
         self.assertEqual(social.count("requests_.track_response("), 1)
         self.assertEqual(context.count("requests_.track_response("), 1)
