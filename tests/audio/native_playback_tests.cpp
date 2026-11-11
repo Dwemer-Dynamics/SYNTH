@@ -1,5 +1,8 @@
 // Compile with fake_windows before the SDK include path. No device, DLL, game or provider is used.
 #include "audio/native_playback.hpp"
+#include "client/fake_http.hpp"
+#include "client/speech_delivery.hpp"
+#include "runtime/fake_fallout_runtime.hpp"
 #include <iostream>
 #include <stdexcept>
 
@@ -395,6 +398,37 @@ int main() try {
         fake_xaudio::voice->advance(4); CHECK(fake_xaudio::voice->samples_played==consumed);
         CHECK(!playback.active_spatial_request(generation.value()));
         CHECK(!playback.pump(generation.value(),owner) && playback.idle());
+    }
+    {
+        // Session speech owner: captions follow turn cancellation; terminal voiced work stays silent and offline.
+        runtime::FakeFalloutRuntime fallout{core::RuntimeVariant::flat};
+        const auto snapshot=fallout.capture_snapshot(core::SnapshotClock::now());
+        const auto current=snapshot->generation();
+        client::FakeHttpServer server; client::FakeHttpTransport transport{server};
+        client::SynthClient synth{transport,client::SessionOptions{.runtime_session_id="session:flat:speech",
+            .runtime_variant="flat",.client_version="test",.runtime_version="1.10.163",.protocol_version=2}};
+        tasks::TaskLanes network{{tasks::LaneConfig{"network",4,1,3}},1};
+        std::atomic_bool terminal{};
+        core::CancellationSource session{current}, turn{session.token()};
+        std::atomic_size_t notices{};
+        client::SpeechDelivery speech{config::Config{},{synth,network,session.token(),terminal,
+            std::make_shared<diagnostics::ConversationTrace>(),[&](std::string){++notices;}}};
+        const auto deliver=[&](std::string id,bool voiced) {
+            protocol_native::Dialogue dialogue{protocol_native::Narrator{"narrator","Narrator"},"Line "+id};
+            if(voiced) dialogue.speech=protocol_native::Speech{"utterance:"+id,"0123456789abcdef0123456789abcdef","pending",5000};
+            const protocol_native::Line line{"request:dialogue:"+id,"request","turn","flat",current.value(),dialogue,2,1};
+            speech.deliver(line,dialogue,snapshot,turn.token(),std::make_shared<const presentation::DialogueCaption>(
+                presentation::DialogueCaption{.generation=current.value(),.speaker="Narrator",.text=dialogue.text,.cancellation=turn.token()}));
+        };
+        deliver("1",false);
+        CHECK(!speech.captions_idle());
+        turn.cancel(); (void)speech.subtitle_frame(current.value(),std::nullopt,false,core::SnapshotClock::now());
+        CHECK(speech.captions_idle());
+        terminal.store(true);
+        deliver("2",true);
+        CHECK(!speech.jobs_active() && speech.captions_idle() && notices==0 && server.requests().empty());
+        // Production order: the borrowed network lane joins before the speech owner is destroyed.
+        network.shutdown(tasks::ShutdownMode::cancel_pending);
     }
     std::cout<<"native playback tests passed: deferred spatial start/resume, sample preservation, text timeout/failure fallback, destination-major channel mixing and lifecycle fences\n";
 } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
