@@ -46,6 +46,31 @@ Check flat and VR separately.
 - [ ] Reloading during the first connection (init or context in flight) shows no "SYNTH
   connected" or context notice from the old world, and SYNTH reconnects in the new one.
 
+## Speech receipt checkpoints
+
+Flat and VR each need a fresh run on the C3 build; a pass in one lane does not count for the
+other. The contract is in HANDOFF.md under "Speech receipt checkpoint contract". For every case,
+record the heard history row IDs and the context snapshot rows named by each save's anchor
+(session, generation, sequence and recorded history row). A reloaded line must be recalled
+exactly when the loaded anchor's snapshot covers its heard row.
+
+- [ ] Covered: a completed native `/talk` line, then an exact context ACK whose snapshot cutoff
+  covers its heard row, then a save and reload. The NPC's next prompt recalls the line.
+- [ ] Uncovered: a save whose anchor's cutoff is below the line's heard row (for example, taken
+  after the receipt commits and before any covering ACK), then reloaded. The line is not
+  recalled, and its server row still exists.
+- [ ] Unknown receipt outcome: the server becomes unreachable after a line plays, then returns.
+  SYNTH never resends the receipt. Any committed row stays out of saves until a later exact ACK,
+  raised for another reason, has a cutoff that covers it. Nothing guarantees one before a save.
+- [ ] Same-world Hard Halt before a checkpoint: a heard line, then Hard Halt before any covering
+  ACK, then reconnection, whether or not the server acknowledged the halt. The new session does
+  not recall the line, and its row remains. Repeat with a covering ACK before the halt: the line
+  is recalled.
+- [ ] Flat only (VR has no chatbox): chatbox Stop mid-conversation keeps the connection. A later
+  heard line is recalled after a covering ACK, a save and a reload.
+- [ ] An older save loaded after all of the above recalls exactly what it did before. Loading
+  while a receipt is in flight leaves no late receipt effect in the new world.
+
 ## Generic gift inventory exchange
 
 - [x] Install the reviewed coordinated gift-menu DLL/PEX/backend update; installed hashes and server health verified.

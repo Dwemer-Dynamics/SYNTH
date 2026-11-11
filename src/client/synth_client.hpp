@@ -538,7 +538,9 @@ public:
         return send_event(request_id, turn_id, generation, std::move(body), std::move(callback), true, "/main.php", binding, true);
     }
 
-    // Worker-only, fail-closed delivery receipt. It is never retried: a lost transport leaves the line unheard.
+    // Worker-only, fail-closed delivery receipt, sent once and never retried or recovered. A transport failure leaves
+    // the outcome unknown, because the server may already have committed it with its heard row. Callers raise the
+    // save checkpoint frontier only for an exact speech_receipt_accepted reply that stored "spoken".
     [[nodiscard]] RequestOutcome send_speech_receipt(const protocol_native::SpeechReceipt& receipt, ContextBinding binding) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id, turn_id, body;
