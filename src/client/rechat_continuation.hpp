@@ -51,10 +51,10 @@ namespace synth::client {
 // held across HTTP, a runtime call, publication, notification or line routing. No engine object is
 // touched here; the host captures the fresh scene outside the session and passes a copied snapshot.
 //
-// The session keeps line routing, the response binding and its rollback, retained-target selection
-// and turn replacement; this object reaches them only through the route_line, retained_target and
-// notify callbacks, and the session calls the hooks below from its pump, line handler, capture
-// entry points, turn replacement, halt and conversation ending.
+// The session keeps line routing, the response binding and its rollback and turn replacement; this
+// object reaches them only through the route_line and notify callbacks. Retained actors revalidate
+// through PlayerDialogue's exact selected-target policy. The session calls the hooks below from its
+// pump, line handler, capture entry points, turn replacement, halt and conversation ending.
 //
 // Lifetimes: every borrowed owner, lane, flag and the trace outlive this object; it is declared after
 // all of them. Network tasks queued here capture this object, copied snapshots, lines, bindings and
@@ -69,8 +69,6 @@ public:
     // Routes a child line to the session line handler with allow_followup and its released prefetch.
     using RouteLine = std::function<void(const protocol_native::Line&, const Snapshot&, const core::CancellationToken&,
                                          bool, const std::shared_ptr<RechatPrefetch>&)>;
-    // True only if the retained actor is still a selectable dialogue target in this snapshot.
-    using RetainedTarget = std::function<bool(const core::RuntimeSnapshot&, const integration::PromptTarget&)>;
 
     struct Dependencies final {
         const config::Config& configuration;
@@ -87,7 +85,6 @@ public:
         const std::atomic_bool& terminal;
         const std::atomic_bool& paused;
         RouteLine route_line;
-        RetainedTarget retained_target;
         Notify notify;
     };
 
@@ -106,10 +103,9 @@ public:
           terminal_{dependencies.terminal},
           paused_{dependencies.paused},
           route_line_{std::move(dependencies.route_line)},
-          retained_target_{std::move(dependencies.retained_target)},
           notify_{std::move(dependencies.notify)} {
-        if (!route_line_ || !retained_target_ || !notify_)
-            throw std::invalid_argument{"rechat continuation requires line, target and notification sinks"};
+        if (!route_line_ || !notify_)
+            throw std::invalid_argument{"rechat continuation requires line and notification sinks"};
     }
 
     RechatContinuation(const RechatContinuation&) = delete;
@@ -300,7 +296,7 @@ public:
             !snapshot->world() || !previous.world() ||
             !presentation::same_presentation_scene(*previous.world(),*snapshot->world()) ||
             actor_key(identity(snapshot->player()))!=actor_key(identity(previous.player())) ||
-            target.form_id!=rechat->target.form_id || !retained_target_(*snapshot,rechat->target)) {
+            target.form_id!=rechat->target.form_id || !retained_target(*snapshot,rechat->target)) {
             trace_.record(diagnostics::ConversationStage::continuation_scene_rejected,rechat->binding.generation,
                 rechat->binding.sequence,rechat->parent.request_id,rechat->parent.line_id);
             if (rechat->prefetch) rechat->prefetch->cancel();
@@ -317,7 +313,7 @@ public:
                 if (found == previous.actors().end()) return false;
                 const integration::PromptTarget retained{rechat->binding.cancellation,found->form_id(),found->base_form_id(),
                     found->origin_plugin(),found->base_origin_plugin(),found->playthrough_id(),found->name(),true};
-                return retained_target_(*snapshot,retained);
+                return retained_target(*snapshot,retained);
             };
             for (const auto& line : *rechat->prefetched_lines) {
                 if (const auto* speech = std::get_if<protocol_native::Dialogue>(&line.payload)) {
@@ -378,6 +374,11 @@ private:
 
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {
         return PlayerDialogue::identity(actor);
+    }
+
+    // True only if the retained actor is still a selectable dialogue target in this snapshot.
+    [[nodiscard]] bool retained_target(const core::RuntimeSnapshot& snapshot, const integration::PromptTarget& retained) {
+        return dialogue_.selected_target(snapshot, false, &retained).has_value();
     }
 
     [[nodiscard]] static std::string actor_key(const protocol_native::Identity& actor) {
@@ -501,7 +502,6 @@ private:
     const std::atomic_bool& terminal_;
     const std::atomic_bool& paused_;
     RouteLine route_line_;
-    RetainedTarget retained_target_;
     Notify notify_;
     std::mutex mutex_;
     std::optional<PendingRechat> pending_;

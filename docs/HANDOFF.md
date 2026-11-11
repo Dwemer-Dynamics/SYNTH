@@ -154,6 +154,38 @@ through `SYNTH_custom.ini` alone.
 - `protocol/` holds the versioned JSON schemas and fixtures shared with Synthserver.
 - `tests/` holds native unit suites, build gates and packaging tests.
 
+## Client session ownership
+
+`src/client/plugin_session.hpp` is the composition root. It constructs the owners below in
+dependency order, runs the ordered game-thread pump and the lifecycle paths (turn replacement,
+combat interrupt, local Stop, hard halt, retirement), forwards the stable flat/VR entry API, and
+routes response lines and rejected presentation between owners. Cross-feature admission and
+priority checks stay there. `PluginSessionHost`, the lifecycle coordinator and `SaveContextStore`
+remain the generation, adoption and persisted-binding authorities.
+
+| Owner | Owns |
+|---|---|
+| `SpeechDelivery` | Speech lane and job count, media preparation, playback, captions with scene admission, copied presentation validation, spatial frame, receipt outbox |
+| `PlayerDialogue` | Turn source and reserved cancel, external owner and cooldowns, PTT/open mic, typed admission, the exact selected/pointed/external target policy |
+| `DialogueRequests` | Text/voice request execution and the shared response count |
+| `ContextPublication` | Capabilities, initialization, full/delta publication, save ACK and write epoch, history/inventory frontiers, dynamic profile refresh |
+| `ServerControl` | Confirmed mode/model-slot selection, pending revision/deadline and its ACK RPC, control-menu target capture |
+| `ActionExecution` | Native action queue, replay guard, Wait lifetime, action receipts |
+| `SocialTaskExecution` | Walk/visit and exchange, progress, checkpoint and hydration |
+| `RechatContinuation` | Parent, capture, retry, speculative media and child scheduling |
+| `ObservedEventDelivery` | Quest/actor/player event delivery and the enemy-awareness cache |
+| `ActivationTriggers` | Activation cadence, acknowledged actors, activity clock and trigger requests |
+| `DiaryRequests`, `VisualCapture` | Diary queue/status/checkpoint; PipVision copy, upload and describe |
+
+`wire_identity.hpp` is the single actor-to-wire identity and actor-key conversion. One quest event
+buffer (`QuestEventDelivery`) is shared by observation delivery and context publication. Lanes are
+unchanged: network bounded with two workers, speech 16/4/3 with one worker, control 4/4/4 with one
+worker reserved for cancellation. The session destructor joins network, speech and control work
+before any owner is destroyed. Native unit tests, build gates and fake-server checks do not compile
+or exercise a live `PluginSession`; they give no flat or VR gameplay, audio or provider acceptance.
+Menu, clipboard, hotkey, notification and native presentation behavior is unchanged by this
+composition. A known open-microphone flag read by the activation worker is outside this map.
+
 ## Build and test
 
 The current testing candidate connects explicit text/audio Wait Here and Release

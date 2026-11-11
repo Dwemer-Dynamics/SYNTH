@@ -22,6 +22,7 @@
 #include "client/observed_event_delivery.hpp"
 #include "client/diary_requests.hpp"
 #include "client/visual_capture.hpp"
+#include "client/server_control.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/snapshot.hpp"
@@ -39,7 +40,6 @@
 #include <charconv>
 #include <condition_variable>
 #include <cmath>
-#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <memory>
@@ -57,6 +57,11 @@
 
 namespace synth::client {
 
+// Composition root for one runtime session: constructs the feature owners in dependency order, fans
+// out the ordered game-thread pump and lifecycle (Stop, combat interrupt, turn replacement, hard
+// halt, retirement), forwards the stable flat/VR entry API and routes response lines and rejected
+// presentation between owners. It keeps only cross-feature admission and priority checks plus the
+// shared flags, lanes and notification queue; feature state lives in the owners declared below.
 class PluginSession final {
 public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
@@ -111,7 +116,7 @@ public:
                     ObservedEventDelivery::quest_events_enabled(variant, quest_events_available),
                     terminal_, runtime_paused_, cancellation_.token(), save_context, std::move(save_binding),
                     [this](const core::RuntimeSnapshot& snapshot) {
-                        const auto selected = selected_target(snapshot, false);
+                        const auto selected = dialogue_.selected_target(snapshot, false);
                         return selected ? std::optional{identity(*selected)} : std::nullopt;
                     },
                     [this](const RequestOutcome& outcome, const core::RuntimeSnapshot& snapshot) {
@@ -143,9 +148,6 @@ public:
                           bool allow_followup, const std::shared_ptr<RechatPrefetch>& prefetch) {
                        handle_line(line, snapshot, cancellation, allow_followup, prefetch);
                    },
-                   [this](const core::RuntimeSnapshot& snapshot, const integration::PromptTarget& retained) {
-                       return selected_target(snapshot, false, &retained).has_value();
-                   },
                    [this](std::string message) { push_notification(std::move(message)); }}},
           observations_{{configuration_, client_, network_, context_, quest_events_, terminal_, runtime_paused_, cancellation_.token(),
                          variant, quest_events_available, actor_events_available,
@@ -157,7 +159,7 @@ public:
                          [this](std::string message) { push_notification(std::move(message)); }}},
           activation_{{configuration_, client_, network_, requests_, context_, dialogue_, observations_,
                        terminal_, runtime_paused_, composing_, cancellation_.token(),
-                       [this] { return ambient_mode_ready(); },
+                       [this] { return server_control_.ambient_mode_ready(); },
                        [this](const protocol_native::Line& line, const Snapshot& snapshot,
                               const core::CancellationToken& cancellation, bool allow_followup, bool combat_bark) {
                            handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark);
@@ -293,7 +295,7 @@ public:
                         speech_.jobs_active() || !speech_.playback_idle())) {
             return false;
         }
-        auto target = selected_target(*snapshot, !manual);
+        auto target = dialogue_.selected_target(*snapshot, !manual);
         if (!target) {
             if (!manual) activation_.forget_automatic_target(snapshot->variant());
             if (manual) push_notification("SYNTH could not find an eligible target to activate");
@@ -362,91 +364,16 @@ public:
 
     [[nodiscard]] const config::Config& configuration() const noexcept { return configuration_; }
 
-    struct ControlState final {
-        protocol_native::ControlSelection selection{"STANDARD", 1};
-        std::string status;
-        bool pending{};
-        std::uint64_t revision{};
-        tasks::TaskLanes::Clock::time_point deadline{};
-    };
+    using ControlState = ServerControl::State;
 
-    [[nodiscard]] ControlState control_state() const {
-        std::scoped_lock lock{control_mutex_};
-        if (control_state_.pending && tasks::TaskLanes::Clock::now() >= control_state_.deadline) {
-            control_state_.pending = false;
-            control_state_.status = "Settings request timed out; reopen the menu to refresh";
-            ++control_state_.revision;
-        }
-        return control_state_;
-    }
+    [[nodiscard]] ControlState control_state() const { return server_control_.state(); }
 
-    // Capture menu ownership once; a later selection never performs a fresh nearest-NPC fallback.
     [[nodiscard]] std::optional<integration::PromptTarget> prepare_control_target(const Snapshot& snapshot) {
-        if (!snapshot || terminal_.load(std::memory_order_acquire)) return {};
-        const auto selected = snapshot->picked_actor_form_id();
-        const core::ActorSnapshot* best{};
-        double nearest = configuration_.activation.exterior_distance;
-        for (const auto& actor : snapshot->actors()) {
-            if (!actor.alive() || actor.disabled() || actor.form_id() == 0x14) continue;
-            const auto distance = targeting::distance(snapshot->player_pose().position(), actor.position());
-            if (selected && actor.form_id() == *selected) { best = &actor; break; }
-            if (distance < nearest) { nearest = distance; best = &actor; }
-        }
-        if (!best) return {};
-        return integration::PromptTarget{cancellation_.token(), best->form_id(), best->base_form_id(),
-            best->origin_plugin(), best->base_origin_plugin(), best->playthrough_id(), best->name()};
+        return server_control_.prepare_target(snapshot);
     }
 
-    // A bounded worker RPC owns settings acknowledgements; render/game threads never wait on HTTP.
     [[nodiscard]] bool request_control(std::string setting = "status", std::string value = "") {
-        if (!client_.ready() || terminal_.load(std::memory_order_acquire)) return false;
-        std::uint64_t revision{};
-        {
-            std::scoped_lock lock{control_mutex_};
-            if (control_state_.pending) return false;
-            control_state_.pending = true;
-            control_state_.status = "Waiting for server confirmation...";
-            ++control_state_.revision;
-            revision = control_state_.revision;
-            control_state_.deadline = tasks::TaskLanes::Clock::now() + std::chrono::seconds{15};
-        }
-        const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
-            tasks::TaskLanes::Clock::now() + std::chrono::seconds{15}, cancellation_.token(),
-            [this, setting = std::move(setting), value = std::move(value), revision](const core::CancellationToken& cancellation) {
-                ControlState updated = control_state();
-                if (!updated.pending || updated.revision != revision) return;
-                updated.status = "Server settings unavailable; selection unchanged";
-                try {
-                    const auto outcome = client_.control(setting, value);
-                    if (outcome.status == RequestStatus::complete) {
-                        for (const auto& line : outcome.lines) {
-                            const auto* status = std::get_if<protocol_native::Status>(&line.payload);
-                            if (!status || status->code != "control_state") continue;
-                            const auto split = status->detail.find('|');
-                            if (split == std::string::npos || split + 2 != status->detail.size()) continue;
-                            const auto mode = status->detail.substr(0, split);
-                            const auto slot = status->detail.back();
-                            if (!protocol_native::valid_control_mode(mode) || slot < '1' || slot > '4') continue;
-                            updated.selection = {mode, static_cast<std::uint64_t>(slot - '0')};
-                            updated.status = "Server settings confirmed";
-                        }
-                    }
-                } catch (const std::exception&) {}
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                std::scoped_lock lock{control_mutex_};
-                if (control_state_.revision != revision) return;
-                updated.pending = false;
-                updated.revision = control_state_.revision + 1;
-                control_state_ = std::move(updated);
-            });
-        if (accepted != tasks::SubmitResult::accepted) {
-            std::scoped_lock lock{control_mutex_};
-            control_state_.pending = false;
-            control_state_.status = "Settings queue is busy; try again";
-            ++control_state_.revision;
-            return false;
-        }
-        return true;
+        return server_control_.request(std::move(setting), std::move(value));
     }
 
     [[nodiscard]] std::optional<audio::PlaybackFrame> playback_frame() const noexcept {
@@ -535,11 +462,6 @@ public:
 private:
     [[nodiscard]] bool player_voice_active() const { return dialogue_.voice_active(); }
 
-    [[nodiscard]] bool ambient_mode_ready() const {
-        const auto controls = control_state();
-        return !controls.pending && controls.selection.mode == "STANDARD";
-    }
-
 public:
     [[nodiscard]] bool maybe_trigger_bored(Snapshot snapshot, core::SnapshotClock::time_point now) {
         if (!snapshot || player_voice_active() || composing_.load(std::memory_order_acquire) ||
@@ -550,7 +472,7 @@ public:
             actions_.active() != 0) {
             return false;
         }
-        if (!ambient_mode_ready()) return false;
+        if (!server_control_.ambient_mode_ready()) return false;
         if (!rechat_.idle()) return false;
         const auto hearing = snapshot->world() && snapshot->world()->interior
             ? configuration_.activation.interior_hearing_distance : configuration_.activation.exterior_hearing_distance;
@@ -651,24 +573,18 @@ public:
 
     // Return copied presentation ownership; native capture must occur outside the session receiver.
     [[nodiscard]] presentation::DialogueCaptions::Caption presentation_capture_candidate(core::SnapshotClock::time_point now) {
-        if (terminal_.load(std::memory_order_acquire) || runtime_paused() || composing_.load(std::memory_order_acquire)) return {};
-        return speech_.validation_candidate(now);
+        return speech_.presentation_capture_candidate(now, runtime_paused() || composing_.load(std::memory_order_acquire));
     }
 
+    // SpeechDelivery validates the copied scene; a rejected combat bark loses only its response, any
+    // other rejection stops the dialogue.
     void submit_presentation_capture(const presentation::DialogueCaptions::Caption& caption, const Snapshot& snapshot) {
-        if (!caption || !caption->admission || caption->cancellation.is_cancelled() ||
-            terminal_.load(std::memory_order_acquire) || caption->generation != cancellation_.token().generation().value()) return;
-        const auto& admission = *caption->admission;
-        const auto now = core::SnapshotClock::now();
-        if (const auto reason = admission.rejection_reason(snapshot.get(),now)) {
-            trace_->record(*reason,caption->generation,caption->context_sequence,caption->request_id,caption->line_id);
-            caption->admission->rejected.store(true,std::memory_order_release);
-            caption->mark_delivery(presentation::DialogueDelivery::discarded);
-            if (admission.combat_speaker_form_id != 0) invalidate_response(caption->cancellation);
-            else stop_dialogue();
-            return;
+        switch (speech_.validate_presentation(caption, snapshot)) {
+        case SpeechDelivery::PresentationCheck::rejected_combat: invalidate_response(caption->cancellation); break;
+        case SpeechDelivery::PresentationCheck::rejected: stop_dialogue(); break;
+        case SpeechDelivery::PresentationCheck::ignored:
+        case SpeechDelivery::PresentationCheck::accepted: break;
         }
-        caption->admission->accept(snapshot->captured_at());
     }
 
     // The host captures outside this object: a game-thread capture can retire the whole session.
@@ -767,12 +683,8 @@ public:
         if (!snapshot || !external_admission_ready() || snapshot->generation()!=cancellation_.token().generation()) return false;
         const auto idle = external_ready();
         if (!idle && request.kind != SYNTH_EXTERNAL_ASK) return false;
-        const auto now=core::SnapshotClock::now();
-        const auto* selected=integration::external_actor(*snapshot,request.actor_form_id,now,
-            configuration_.activation.automatic_hearing_distance);
-        if (!selected || conversation_on_cooldown(identity(*selected),now) ||
-            (!configuration_.activation.include_hostile && selected->hostile_to_player()) ||
-            (selected->in_combat() && !configuration_.behavior.enable_combat_dialogue)) return false;
+        const auto* selected=dialogue_.external_actor(*snapshot,request.actor_form_id,core::SnapshotClock::now());
+        if (!selected) return false;
         const auto target=identity(*selected);
         if (request.kind==SYNTH_EXTERNAL_ASK) {
             if (!dialogue_.try_allows_ask(actor_key(target),idle)) return false;
@@ -789,11 +701,8 @@ public:
     // Freeze only the prompt's intended identity; submission must capture a new scene, not reuse this snapshot.
     [[nodiscard]] std::optional<integration::PromptTarget> prepare_external_prompt(Snapshot snapshot, std::uint32_t form_id) {
         if (!snapshot || !external_admission_ready() || snapshot->generation()!=cancellation_.token().generation()) return {};
-        const auto now=core::SnapshotClock::now();
-        const auto* actor=integration::external_actor(*snapshot,form_id,now,configuration_.activation.automatic_hearing_distance);
-        if (!actor || conversation_on_cooldown(identity(*actor),now) ||
-            (!configuration_.activation.include_hostile && actor->hostile_to_player()) ||
-            (actor->in_combat() && !configuration_.behavior.enable_combat_dialogue)) return {};
+        const auto* actor=dialogue_.external_actor(*snapshot,form_id,core::SnapshotClock::now());
+        if (!actor) return {};
         const auto idle=external_ready();
         if (!dialogue_.try_allows_ask(actor_key(identity(*actor)),idle)) return {};
         return integration::PromptTarget{cancellation_.token(),actor->form_id(),actor->base_form_id(),
@@ -818,7 +727,7 @@ private:
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
                                           std::optional<protocol_native::ControlSelection> retained_controls = {},
                                           protocol_native::TextIntent intent = protocol_native::TextIntent::unmarked) {
-        const auto controls = retained_controls.value_or(control_state().selection);
+        const auto controls = retained_controls.value_or(server_control_.state().selection);
         if (controls.mode != "NARRATOR" && controls.mode != "INJECTION_LOG" && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
@@ -890,7 +799,7 @@ public:
     [[nodiscard]] bool submit_visual_capture(Snapshot snapshot, std::string interaction_mode) {
         return vision_.submit(std::move(snapshot), std::move(interaction_mode),
             [this](const core::RuntimeSnapshot& current) -> std::optional<protocol_native::Identity> {
-                if (auto target = pointed_subject(current)) return identity(*target);
+                if (auto target = PlayerDialogue::pointed_subject(current)) return identity(*target);
                 return std::nullopt;
             },
             [this](std::string actor) { return begin_player_turn(std::move(actor)); });
@@ -912,7 +821,8 @@ public:
                                    const integration::PromptTarget* retained = nullptr) {
         return diary_.request(std::move(snapshot), role,
             [this, retained](const core::RuntimeSnapshot& current) -> std::optional<protocol_native::Identity> {
-                const auto selected = retained ? selected_target(current, false, retained) : pointed_subject(current);
+                const auto selected = retained ? dialogue_.selected_target(current, false, retained)
+                                               : PlayerDialogue::pointed_subject(current);
                 return selected ? std::optional{identity(*selected)} : std::nullopt;
             });
     }
@@ -928,56 +838,14 @@ public:
 
     [[nodiscard]] bool checkpoint_diary(Snapshot snapshot) {
         if (!snapshot || snapshot->generation() != cancellation_.token().generation() || !diary_checkpoint_needed()) return false;
-        const auto selected = selected_target(*snapshot, false);
+        const auto selected = dialogue_.selected_target(*snapshot, false);
         const auto target = selected ? std::optional{identity(*selected)} : std::nullopt;
         return diary_.checkpoint(std::move(snapshot), target);
     }
 
+    // ContextPublication copies identities and target here and publishes before the refresh RPC.
     [[nodiscard]] bool refresh_dynamic_profiles(Snapshot snapshot, std::string_view scope = "automatic", std::uint32_t target_form_id = 0) {
-        if (!snapshot || !client_.ready() || terminal_.load(std::memory_order_acquire) ||
-            runtime_paused_.load(std::memory_order_acquire)) {
-            return false;
-        }
-        std::vector<protocol_native::Identity> actors;
-        actors.reserve(std::min<std::size_t>(snapshot->actors().size(), 16));
-        for (const auto& actor : snapshot->actors()) {
-            if (scope == "narrator" || (scope == "target" && actor.form_id() != target_form_id)) continue;
-            if (actors.size() == 16) break;
-            if (targeting::distance(snapshot->player_pose().position(), actor.position()) <=
-                    configuration_.activation.automatic_hearing_distance &&
-                targeting::dialogue_actor_available(actor)) {
-                actors.push_back(identity(actor));
-            }
-        }
-        const auto include_narrator = scope == "narrator" ||
-            (scope == "automatic" && configuration_.behavior.dynamic_profile_include_narrator);
-        if (actors.empty() && !include_narrator) return false;
-        const auto selected = selected_target(*snapshot, false);
-        const auto target = selected ? std::optional{identity(*selected)} : std::nullopt;
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{request_timeout_ms() * 2ULL};
-        const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::background, deadline, cancellation_.token(),
-            [this, actors = std::move(actors), include_narrator, snapshot = std::move(snapshot), target](
-                const core::CancellationToken& cancellation) {
-                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                try {
-                    const auto context_turn = client_.begin_context_turn();
-                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto context_outcome = publish_snapshot(snapshot, target, cancellation);
-                    if (context_outcome.status != RequestStatus::complete) {
-                        push_notification("SYNTH profile context failed: " + context_outcome.detail);
-                        return;
-                    }
-                    const auto outcome = client_.refresh_dynamic_profiles(actors, include_narrator, context_outcome.context_binding);
-                    if (outcome.status != RequestStatus::complete) {
-                        push_notification("SYNTH dynamic profile refresh failed: " + outcome.detail);
-                    }
-                } catch (const std::exception& error) {
-                    push_notification(std::string{"SYNTH dynamic profile refresh: "} + error.what());
-                }
-            });
-        return accepted == tasks::SubmitResult::accepted;
+        return context_.refresh_dynamic_profiles(std::move(snapshot), scope, target_form_id);
     }
 
     [[nodiscard]] static config::Config load_configuration() {
@@ -991,7 +859,7 @@ private:
 
     // Per-call views of session state passed to the dialogue owner; never retained by it.
     [[nodiscard]] PlayerDialogue::Controls current_controls() {
-        return [this] { return control_state().selection; };
+        return [this] { return server_control_.state().selection; };
     }
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
@@ -1049,75 +917,6 @@ private:
                                 player_event, actor_events, controls, social_pair);
     }
 
-    [[nodiscard]] std::optional<context::TargetContext> selected_target(
-        const core::RuntimeSnapshot& snapshot, bool automatic, const integration::PromptTarget* retained = nullptr) {
-        const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
-        const auto now = core::SnapshotClock::now();
-        const auto eligible = [&](const core::ActorSnapshot& actor) {
-            if (!targeting::dialogue_actor_available(actor) ||
-                (configuration_.behavior.scene_safety && actor.talking_to_player()) ||
-                (automatic && !configuration_.activation.include_hostile &&
-                 actor.hostile_to_player())) {
-                return false;
-            }
-            if (conversation_on_cooldown(identity(actor), now)) return false;
-            if (!automatic || configuration_.activation.include_creatures) return true;
-            return targeting::automatic_actor_class_supported(actor.race(), false);
-        };
-        if(automatic&&snapshot.variant()==core::RuntimeVariant::flat)
-            return select_flat_automatic_activation(snapshot,now,cancellation_.token().generation(),
-                configuration_.activation.automatic_hearing_distance,eligible).target;
-        if (retained) {
-            if (retained->session.is_cancelled() || retained->session.generation() != snapshot.generation() ||
-                snapshot.generation() != cancellation_.token().generation()) return {};
-            for (const auto& actor : snapshot.actors()) {
-                if (!retained->matches(actor) || !eligible(actor)) continue;
-                const auto distance = targeting::distance(snapshot.player_pose().position(), actor.position());
-                if (distance > targeting::SelectionBounds{}.maximum_distance) return {};
-                return context::TargetContext{context::identity_of(actor), actor.name(), actor.position(),
-                    distance, snapshot.generation(), snapshot.frame()};
-            }
-            return {}; // Never silently retarget a draft after pause or actor replacement.
-        }
-        if (snapshot.variant() == core::RuntimeVariant::flat) {
-            auto selected = targeting::select_flat_crosshair(snapshot, playthrough, {}, eligible);
-            if (selected.target || !automatic) return std::move(selected.target);
-        } else {
-            auto selected = targeting::select_vr_controller_ray(
-                snapshot, playthrough, targeting::Hand::right, now, {}, eligible);
-            if (!selected.target) {
-                selected = targeting::select_vr_hmd_gaze(snapshot, playthrough, now, {}, eligible);
-            }
-            if (selected.target) return std::move(selected.target);
-        }
-        auto selected = targeting::select_nearest(
-            snapshot, playthrough, snapshot.player_pose().position(),
-            automatic ? configuration_.activation.automatic_hearing_distance
-                      : (snapshot.world() && snapshot.world()->interior
-                             ? configuration_.activation.interior_distance
-                             : configuration_.activation.exterior_distance),
-            eligible);
-        return std::move(selected.target);
-    }
-
-    [[nodiscard]] std::optional<context::TargetContext> pointed_subject(
-        const core::RuntimeSnapshot& snapshot) {
-        const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
-        const auto eligible = [](const core::ActorSnapshot& actor) {
-            return targeting::dialogue_actor_available(actor);
-        };
-        if (snapshot.variant() == core::RuntimeVariant::flat) {
-            return targeting::select_flat_crosshair(snapshot, playthrough, {}, eligible).target;
-        }
-        const auto now = core::SnapshotClock::now();
-        auto selected = targeting::select_vr_controller_ray(
-            snapshot, playthrough, targeting::Hand::right, now, {}, eligible);
-        if (!selected.target) {
-            selected = targeting::select_vr_hmd_gaze(snapshot, playthrough, now, {}, eligible);
-        }
-        return std::move(selected.target);
-    }
-
     void handle_line(const protocol_native::Line& line, const Snapshot& snapshot,
                      const core::CancellationToken& cancellation, bool allow_followup = true,
                      const std::shared_ptr<RechatPrefetch>& prefetch = {}, bool combat_bark = false) {
@@ -1150,7 +949,7 @@ private:
             // Preserve VR's existing presentation until its separate HUD ABI is verified.
             if (snapshot->variant() == core::RuntimeVariant::vr && configuration_.behavior.show_subtitles)
                 push_notification((speaker.empty() ? "SYNTH" : speaker) + ": " + dialogue->text);
-            const auto caption = make_caption(line, *dialogue, cancellation, snapshot, combat_bark);
+            const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_);
             const bool social_reply=social_.track(line,caption);
             speech_.deliver(line, *dialogue, snapshot, cancellation, caption, prefetch);
             if (!allow_followup||social_reply) return;
@@ -1176,52 +975,12 @@ private:
         }};
     }
 
-    [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
-        const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
-        const core::CancellationToken& cancellation, const Snapshot& snapshot, bool combat_bark = false) {
-        auto admission = std::make_shared<presentation::SceneAdmission>();
-        admission->original = snapshot;
-        const auto retain = [&](const protocol_native::Identity& actor) {
-            if (!snapshot) { admission->rejected.store(true); return; }
-            const auto key = actor_key(actor);
-            if (key == actor_key(identity(snapshot->player()))) return;
-            const auto found = std::ranges::find_if(snapshot->actors(),[&](const auto& value) { return actor_key(identity(value)) == key; });
-            if (found == snapshot->actors().end()) { admission->rejected.store(true); return; }
-            admission->actors.push_back({cancellation,found->form_id(),found->base_form_id(),found->origin_plugin(),
-                found->base_origin_plugin(),found->playthrough_id(),found->name(),true});
-        };
-        if (const auto* actor = std::get_if<protocol_native::Identity>(&dialogue.speaker)) {
-            retain(*actor);
-            if (combat_bark && !admission->actors.empty())
-                admission->combat_speaker_form_id = admission->actors.front().form_id;
-        }
-        if (dialogue.listener) retain(*dialogue.listener);
-        const auto facing=snapshot ? bind_speech_facing(line,dialogue,*snapshot,cancellation) : nullptr;
-        if (facing) {
-            conversation_holds_.add(facing->speaker,cancellation);
-            conversation_holds_.add(facing->listener,cancellation);
-        }
-        auto on_terminal = speech_.receipt_hook(line, dialogue);
-        return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
-            .generation = line.generation,
-            .speaker = std::visit([](const auto& value) {
-                return value.display_name.empty() ? std::string{"SYNTH"} : value.display_name;
-            }, dialogue.speaker),
-            .text = dialogue.text, .cancellation = cancellation,
-            .facing = facing,
-            .trace = trace_, .request_id = line.request_id, .line_id = line.line_id, .context_sequence = line.context_sequence,
-            .admission = std::move(admission), .on_terminal = std::move(on_terminal)});
-    }
-
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {
         return PlayerDialogue::identity(actor);
     }
 
     [[nodiscard]] static protocol_native::Identity identity(const context::TargetContext& actor) {
-        char form_id[11]{};
-        std::snprintf(form_id, sizeof(form_id), "0x%08X", actor.identity().form().form_id());
-        return {form_id, actor.identity().form().plugin(), actor.identity().playthrough().value(),
-                actor.name()};
+        return PlayerDialogue::identity(actor);
     }
 
     [[nodiscard]] static std::string actor_key(const protocol_native::Identity& actor) {
@@ -1261,8 +1020,6 @@ private:
 
     runtime::GameThreadDispatcher& dispatcher_;
     config::Config configuration_;
-    mutable std::mutex control_mutex_;
-    mutable ControlState control_state_;
     WinHttpTransport transport_;
     SynthClient client_;
     core::CancellationSource cancellation_;
@@ -1274,6 +1031,10 @@ private:
     std::atomic_bool halting_{};
     std::atomic_size_t halt_requests_{};
     ConversationHolds conversation_holds_;
+    // Borrows configuration, client, network lane and the terminal flag; owns the confirmed control
+    // selection and its pending revision. Its settings RPC captures it; ~PluginSession joins the
+    // network lane first. Dialogue, request and activation callbacks read it per call.
+    ServerControl server_control_{{configuration_, client_, network_, terminal_, cancellation_.token()}};
     // The single quest event buffer. Declared before both borrowers: context_ acknowledges journal
     // witnesses on its workers, and observations_ owns its scheduling, delivery and stop.
     QuestEventDelivery quest_events_;
@@ -1281,7 +1042,8 @@ private:
     std::mutex notification_mutex_;
     std::deque<std::string> notifications_;
     // Borrows configuration, client, control lane and trace declared above; ~PluginSession joins the
-    // control lane, whose cancel tasks capture this owner, before members are destroyed.
+    // control lane, whose cancel tasks capture this owner, before members are destroyed. Also the
+    // exact selected-target authority read by context publication, rechat and diary admission.
     PlayerDialogue dialogue_;
     // Borrows client, network lane, terminal flag and holds declared above; its callbacks capture this
     // session. ~PluginSession joins the network lane before members are destroyed, so every queued,
@@ -1290,12 +1052,15 @@ private:
     // Declared after every borrowed dependency, so it is destroyed before them. ~PluginSession joins
     // network, then speech jobs, then control, then halts playback; the member destructor repeats
     // join/halt as idempotent no-ops. If a later member's constructor throws, that fallback alone
-    // runs, before any pump could have queued a receipt drain on the still-live network lane.
+    // runs, before any pump could have queued a receipt drain on the still-live network lane. Captions
+    // are built on the delivering worker with the holds passed per call; presentation validation runs
+    // on the game thread and returns a result the session routes.
     SpeechDelivery speech_;
     voice::SampleWorker voice_samples_;
     // Borrows configuration, client, network lane, response accounting, voice samples, quest
-    // delivery, the terminal/pause flags and the save store. Its queued tasks and the rollback
-    // closure in each ContextBinding capture it; ~PluginSession joins the network lane first.
+    // delivery, the terminal/pause flags and the save store. Its queued tasks (including profile
+    // refresh) and the rollback closure in each ContextBinding capture it; ~PluginSession joins the
+    // network lane first.
     ContextPublication context_;
     // Borrows configuration, client, network lane, response accounting, context publication and the
     // terminal flag. Its network tasks and progress bindings capture it and its callbacks capture this
