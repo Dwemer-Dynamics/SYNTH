@@ -6,8 +6,8 @@
 // Framework adapter renders. It carries no state: every value is read from the
 // authoritative `synth::config::Config` and every edit is written back to the
 // authoritative INI override, so the catalog can never become a second settings
-// store. Labels, help text, ranges and ordering are the ones SYNTH shipped
-// previously, so the in-game surface is unchanged by the migration.
+// store. Row order and labels are presentation only: INI sections, keys, ranges
+// and framework hotkey identifiers are the stable contract and never change.
 
 #include "config/config.hpp"
 
@@ -81,10 +81,10 @@ inline constexpr std::array<ControlOption, 9> chat_modes{{
 }};
 
 inline constexpr std::array<ControlOption, 4> llm_models{{
-    {"Standard", "standard", "The balanced default model slot."},
-    {"Fast", "fast", "Lower latency, shorter replies."},
-    {"Powerful", "powerful", "Slower, for longer or more involved replies."},
-    {"Experimental", "experimental", "Whatever the server currently has under test."},
+    {"Standard", "standard", "The server-configured Standard model slot."},
+    {"Fast", "fast", "The server-configured Fast model slot."},
+    {"Powerful", "powerful", "The server-configured Powerful model slot."},
+    {"Experimental", "experimental", "The server-configured Experimental model slot."},
 }};
 
 // Who a dynamic profile refresh is asked for. The Control menu maps each of
@@ -104,34 +104,66 @@ struct HotkeyBinding final {
     const char* label;
 };
 
+// `SYNTH.VoiceChat` keeps its original identifier although the control is now
+// labelled Hold to Talk, so saved framework bindings still resolve.
 inline constexpr std::array<HotkeyBinding, 8> hotkey_bindings{{
     {"SYNTH.Chatbox", "TalkToNPC", "Chatbox"},
-    {"SYNTH.VoiceChat", "ToggleVoice", "Voice Chat"},
-    {"SYNTH.Control", "SYNTHControl", "SYNTH Control"},
-    {"SYNTH.ManualActivate", "ManualActivate", "Manual AI Activate"},
+    {"SYNTH.VoiceChat", "ToggleVoice", "Hold to Talk"},
     {"SYNTH.HaltActions", "StopTalking", "Halt AI Actions"},
-    {"SYNTH.PipVision", "PipVision", "Use PipVision"},
+    {"SYNTH.Control", "SYNTHControl", "SYNTH Control"},
     {"SYNTH.OpenMicMute", "OpenMicMute", "Open Mic Mute"},
+    {"SYNTH.ManualActivate", "ManualActivate", "Manual AI Activate"},
+    {"SYNTH.PipVision", "PipVision", "Use PipVision"},
     {"SYNTH.WriteDiary", "WriteDiary", "Write NPC Diary"},
 }};
 
 namespace detail {
 
+// All eight keyboard bindings live on this page, each exactly once. Target text
+// follows the flat conversation policy: the crosshair NPC first, otherwise the
+// nearest eligible NPC within hearing range for the current chat mode. The
+// visible notes say where a rebind takes effect: the framework registry only
+// mirrors SYNTH's INI for conflict checks and is never read back.
 inline constexpr Setting hotkeys_page[] = {
-    {"Hotkeys", "", "", "", SettingKind::section},
-    {"Chatbox", "Open text dialogue for the NPC in your crosshair. Unbound by default.",
+    {"Bindings", "", "", "", SettingKind::section},
+    {"Change SYNTH keys here or in SYNTH_custom.ini.",
+     "SYNTH reads its keys from SYNTH_custom.ini, and a change on this page is saved there. "
+     "Editing a SYNTH entry on the menu framework's own Hotkeys page does not change the key "
+     "SYNTH uses. 0 leaves a key unbound.",
+     "", "", SettingKind::note},
+    {"Conflict checks cover menu framework hotkeys only.",
+     "A key chosen here is refused if another menu framework hotkey already uses it. Duplicate "
+     "keys typed into SYNTH_custom.ini, and keys used by the game or other mods, may not be "
+     "detected.",
+     "", "", SettingKind::note},
+    {"Conversation", "", "", "", SettingKind::section},
+    {"Chatbox",
+     "Open text dialogue. The NPC in your crosshair is preselected, otherwise the nearest "
+     "eligible NPC within hearing range; pick another nearby NPC from the To: list before "
+     "sending. Narrator and Injection Log chat modes select no NPC. Unbound by default.",
      "Hotkeys", "TalkToNPC", SettingKind::keybind, 0, 255, 1},
-    {"Voice Chat", "Hold to talk to the selected NPC. Unbound by default.",
+    {"Hold to Talk",
+     "Hold to talk to the selected NPC. Unbound by default. Recording starts on press and is "
+     "sent on release. The NPC is chosen when recording starts (your crosshair NPC, otherwise "
+     "the nearest eligible NPC within hearing range) and does not change while you speak. "
+     "Narrator and Injection Log chat modes choose no NPC. Needs Enable Hold to Talk on the "
+     "Sound page.",
      "Hotkeys", "ToggleVoice", SettingKind::keybind, 0, 255, 1},
-    {"SYNTH Control",
-     "Open SYNTH's in-game control menu: chat mode, LLM mode, dynamic profiles, and wait here. "
-     "Unbound by default.",
-     "Hotkeys", "SYNTHControl", SettingKind::keybind, 0, 255, 1},
-    {"Manual AI Activate", "Activate the targeted NPC as a SYNTH AI agent. Unbound by default.",
-     "Hotkeys", "ManualActivate", SettingKind::keybind, 0, 255, 1},
     {"Halt AI Actions",
      "Hard stop dialogue, requests, media, playback, rechat, and active actions. Unbound by default.",
      "Hotkeys", "StopTalking", SettingKind::keybind, 0, 255, 1},
+    {"SYNTH Control",
+     "Open SYNTH's in-game control menu: chat mode, model slot, dynamic profiles, wait here, "
+     "NPC diary, and the server dashboard. Unbound by default.",
+     "Hotkeys", "SYNTHControl", SettingKind::keybind, 0, 255, 1},
+    {"Microphone", "", "", "", SettingKind::section},
+    {"Open Mic Mute",
+     "Toggle open mic mute for this session without saving it. Mute Open Mic on the Sound "
+     "page is the saved setting. Unbound by default.",
+     "Hotkeys", "OpenMicMute", SettingKind::keybind, 0, 255, 1},
+    {"NPCs", "", "", "", SettingKind::section},
+    {"Manual AI Activate", "Activate the targeted NPC as a SYNTH AI agent. Unbound by default.",
+     "Hotkeys", "ManualActivate", SettingKind::keybind, 0, 255, 1},
     {"Use PipVision",
      "Tap to capture the scene, double-tap to set the targeted NPC portrait, or hold to ask the "
      "nearest NPC to describe the scene. Unbound by default.",
@@ -209,6 +241,30 @@ inline constexpr Setting sound_page[] = {
      "Audio", "HeadVoiceVolume", SettingKind::integer, 0, 200, 5},
     {"Enable 3D Audio Playback", "Control player-heard spatial voice playback.",
      "Audio", "Enable3DPlayback", SettingKind::toggle},
+    {"Voice Input", "", "", "", SettingKind::section},
+    {"Microphone: Windows default recording device",
+     "SYNTH records from the Windows default input device. Change it in Windows sound "
+     "settings; SYNTH does not choose a microphone automatically.",
+     "", "", SettingKind::note},
+    {"Enable Hold to Talk",
+     "Allow the Hold to Talk hotkey to record voice input. Set the key on the Hotkeys page.",
+     "Input", "PushToTalkEnabled", SettingKind::toggle},
+    {"Enable Open Mic",
+     "Listen for speech during normal gameplay. The NPC is chosen when speech starts: your "
+     "crosshair NPC, otherwise the nearest eligible NPC within hearing range. Narrator and "
+     "Injection Log chat modes choose no NPC.",
+     "OpenMic", "Enabled", SettingKind::toggle},
+    {"Mute Open Mic",
+     "Saved preference: mute open mic detection without disabling it. The Open Mic Mute "
+     "hotkey on the Hotkeys page only toggles mute for the current session; reloading "
+     "restores this saved value.",
+     "OpenMic", "Muted", SettingKind::toggle},
+    {"Open Mic Sensitivity",
+     "RMS threshold for starting a recording. Higher values require louder speech.",
+     "OpenMic", "Sensitivity", SettingKind::integer, 100, 10000, 100},
+    {"Open Mic End Delay", "Seconds of silence before open mic recording is submitted.",
+     "OpenMic", "EndDelaySeconds", SettingKind::decimal, 0.1, 5.0, 0.1},
+    {"Advanced", "", "", "", SettingKind::section},
     {"AI Voice Distance Scale", "Adjust AI NPC voice volume at distance.",
      "Audio", "DistanceScale", SettingKind::decimal, 0.1, 20.0, 0.1},
     {"Interior Playback Dropoff",
@@ -219,23 +275,6 @@ inline constexpr Setting sound_page[] = {
      "Audio", "PlaybackDropoffExteriorPercent", SettingKind::integer, 25, 200, 5},
     {"3D Sound Invert Heading", "Try this if 3D audio left and right are reversed.",
      "Audio", "InvertHeading", SettingKind::toggle},
-    {"Open Mic", "", "", "", SettingKind::section},
-    {"Current Device: Detected automatically",
-     "The first in-game recording containing speech selects the microphone.",
-     "", "", SettingKind::note},
-    {"Enable Open Mic",
-     "Listen for speech during normal gameplay and start voice input for the current target.",
-     "OpenMic", "Enabled", SettingKind::toggle},
-    {"Mute Open Mic", "Temporarily mute open mic detection without disabling it.",
-     "OpenMic", "Muted", SettingKind::toggle},
-    {"Open Mic Mute Hotkey", "Toggle open mic mute. Unbound by default.",
-     "Hotkeys", "OpenMicMute", SettingKind::keybind, 0, 255, 1},
-    {"Open Mic Sensitivity",
-     "RMS threshold for starting a recording. Higher values require louder speech.",
-     "OpenMic", "Sensitivity", SettingKind::integer, 100, 10000, 100},
-    {"Open Mic End Delay", "Seconds of silence before open mic recording is submitted.",
-     "OpenMic", "EndDelaySeconds", SettingKind::decimal, 0.1, 5.0, 0.1},
-    {"Advanced", "", "", "", SettingKind::section},
     {"Skip Milliseconds at Beginning", "Skip silence at the beginning of generated voice clips.",
      "Audio", "PreClipMs", SettingKind::integer, 0, 1000, 25},
     {"Skip Milliseconds at End", "Skip silence at the end of generated voice clips.",
@@ -270,7 +309,9 @@ inline constexpr std::array<Page, 5> pages{{
     const auto section = setting.section;
     const auto key = setting.key;
     const auto boolean = [](bool value) { return value ? 1.0 : 0.0; };
-    if (section == "Hotkeys") {
+    if (section == "Input") {
+        if (key == "PushToTalkEnabled") return boolean(configuration.input.push_to_talk_enabled);
+    } else if (section == "Hotkeys") {
         if (key == "TalkToNPC") return configuration.hotkeys.talk_to_npc;
         if (key == "ToggleVoice") return configuration.hotkeys.toggle_voice;
         if (key == "SYNTHControl") return configuration.hotkeys.synth_control;

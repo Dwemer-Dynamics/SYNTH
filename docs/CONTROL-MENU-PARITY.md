@@ -4,11 +4,26 @@ Source: `codex/response-flow-parity`, preserving the response-flow, subtitle and
 
 ## In-game surface
 
-The existing `Hotkeys.SYNTHControl` scan-code binding opens SYNTH's own F4SE Menu Framework window. The saved P binding is retained. It no longer launches a browser. An explicit Open Server Dashboard row remains available.
+In the flat lane the `Hotkeys.SYNTHControl` scan-code binding opens SYNTH's own F4SE Menu Framework window. Like every SYNTH hotkey it ships as 0 (unbound) in `config/SYNTH.ini`. It no longer launches a browser. An explicit Open Server Dashboard row remains available.
 
-The menu exposes Chat Mode, LLM Mode, Dynamic Profiles, Wait Here, Release Wait and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
+The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
 
 Mode/model selectors wait for a validated server acknowledgement. Profile refresh waits until the menu closes. Wait Here and Release Wait close the menu automatically and execute on the next menu-free game pump, revalidating the originally displayed NPC. They cannot switch to a new target if that actor disappears.
+
+## Bindings and lanes
+
+All eight `[Hotkeys]` scan codes (`TalkToNPC`, `ToggleVoice`, `StopTalking`, `SYNTHControl`, `OpenMicMute`, `ManualActivate`, `PipVision`, `WriteDiary`) ship as 0, meaning unbound. SYNTH's INI chain is authoritative and the game thread polls it in both lanes.
+
+| Surface | Flat with Menu Framework | Flat without framework | VR |
+|---|---|---|---|
+| Rebinding | SYNTH Hotkeys page or `SYNTH_custom.ini` | `SYNTH_custom.ini` | `SYNTH_custom.ini` only |
+| Conflict check | Framework registry only, on SYNTH's page | None | None |
+| `TalkToNPC` | Native chatbox with To: NPC picker | Clipboard text | Clipboard text |
+| `SYNTHControl` | This control menu | Unavailable | Opens the server dashboard and retries the server status request |
+| `WriteDiary` | Dispatched | Dispatched | Dispatched for the NPC under the right-controller ray, else HMD gaze |
+| `PipVision` | Dispatched | Dispatched | Dispatched; VR capture acceptance unverified |
+
+SYNTH registers its hotkeys in the framework registry for conflict awareness only; their callbacks are inert and the registry is never read back into SYNTH's configuration (its binding lookup is read only to validate an explicit key selection). Editing a SYNTH entry on the framework's generic Hotkeys page therefore does not change the key SYNTH uses, and the SYNTH Hotkeys page says so. Duplicate keys typed into the INI and game or other-mod key conflicts are not universally detected. VR has no framework, MCM, ESP or controller rebinding surface and polls the desktop keyboard. After a VR session is created or recreated, dialogue and `WriteDiary` stay blocked until the server confirms the saved chat mode and model slot; a failed or busy status reply is reported once and needs a `SYNTHControl` press to retry. VR `WriteDiary` targets the right-controller ray, then HMD gaze, with no nearest-NPC fallback. The `WriteDiary` key held when a session is adopted needs a fresh press, and a `WriteDiary` press made while a menu, combat policy or unconfirmed status blocks dialogue is consumed rather than queued. No controller or headset behavior has been verified.
 
 ## Settings and response ownership
 
@@ -27,7 +42,7 @@ The coordinator loads local configuration without accessing game objects. Valid 
 ## Manual acceptance
 
 1. Start Fallout 4 manually, load a save, and press your configured SYNTH Control hotkey. Confirm an in-game menu opens rather than a browser.
-2. Rebind P while settings are open; confirm the pages remain populated and the AI connection is not restarted. Close, release the key, and reopen.
+2. Rebind SYNTH Control on SYNTH's Hotkeys page while settings are open; confirm the pages remain populated and the AI connection is not restarted. Close, release the key, and reopen.
 3. Select a chat mode/model. Wait for confirmation, close the menu, and send a new message.
-4. Exercise Target/Nearby/Narrator refresh separately. Select Wait Here with Preston and a non-companion; the menu closes automatically. Verify each stops, then use Release Wait to resume. Also test a hostile/combat NPC and five-minute expiry.
+4. Exercise Target/Nearby/Narrator refresh separately. Select Wait Here with Preston and a non-companion; the menu closes automatically. Verify each stops, then use Release Wait to resume. Also test a hostile/combat NPC and the expiry described in `WAIT-ALIAS-CHAT.md`.
 5. Reload a save with a menu open or an action pending. Confirm no stale action executes. Recheck voice identity, player TTS, real subtitles and dialogue interruption.

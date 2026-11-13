@@ -149,7 +149,8 @@ void test_settings_catalog_matches_configuration() {
             ++interactive;
             CHECK(!setting.section.empty() && !setting.key.empty());
             CHECK(setting.help != nullptr && *setting.help != 0);
-            CHECK(find_setting(setting.section, setting.key) != nullptr);
+            // Each INI key backs exactly one row, so no binding is rendered twice.
+            CHECK(find_setting(setting.section, setting.key) == &setting);
 
             for (const auto probe : {setting.minimum, setting.maximum}) {
                 Config config;
@@ -167,7 +168,7 @@ void test_settings_catalog_matches_configuration() {
             }
         }
     }
-    CHECK(interactive == 44);
+    CHECK(interactive == 45);
 
     // Every framework hotkey identifier must resolve to a catalog keybind row,
     // otherwise the reconcile pass would drop a rebind on the floor.
@@ -176,6 +177,9 @@ void test_settings_catalog_matches_configuration() {
         CHECK(setting != nullptr);
         CHECK(setting->kind == SettingKind::keybind);
         CHECK(setting->minimum == 0 && setting->maximum == 255);
+        bool on_hotkeys_page{};
+        for (const auto& row : pages[0].settings) on_hotkeys_page = on_hotkeys_page || &row == setting;
+        CHECK(on_hotkeys_page);
         CHECK(std::string_view{binding.framework_id}.starts_with("SYNTH."));
     }
 }
