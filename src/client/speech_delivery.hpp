@@ -133,7 +133,7 @@ public:
     [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
         const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
         const core::CancellationToken& cancellation, const Snapshot& snapshot, bool combat_bark,
-        ConversationHolds& holds) {
+        ConversationHolds& holds, std::function<void(presentation::DialogueDelivery, bool)> private_terminal = {}) {
         auto admission = std::make_shared<presentation::SceneAdmission>();
         admission->original = snapshot;
         const auto retain = [&](const protocol_native::Identity& actor) {
@@ -157,7 +157,7 @@ public:
             holds.add(facing->speaker,cancellation);
             holds.add(facing->listener,cancellation);
         }
-        auto on_terminal = receipt_hook(line, dialogue);
+        auto on_terminal = private_terminal ? std::move(private_terminal) : receipt_hook(line, dialogue);
         return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
             .generation = line.generation,
             .speaker = std::visit([](const auto& value) {

@@ -43,7 +43,10 @@
         "halt",
         "social_task_request",
         "social_task_progress",
-        "speech_receipt"
+        "speech_receipt",
+        "narrator_command",
+        "narrator_turn",
+        "narrator_receipt"
       ]
     },
     "session_id": {
@@ -831,7 +834,10 @@
               "action_result",
               "social_task_request",
               "social_task_progress",
-              "speech_receipt"
+              "speech_receipt",
+              "narrator_command",
+              "narrator_turn",
+              "narrator_receipt"
             ]
           }
         }
@@ -1583,6 +1589,120 @@
                 }
               }
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "narrator_command"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "narrator.private.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "narrator.schema.json#/$defs/command"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "narrator_turn"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "narrator.private.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "narrator.schema.json#/$defs/turn"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "narrator_receipt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "narrator.private.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "narrator.schema.json#/$defs/receipt"
           }
         }
       }

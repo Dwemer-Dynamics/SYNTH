@@ -1,5 +1,12 @@
 # SYNTH open-alpha acceptance
 
+## Private narrator
+
+- [ ] Flat: create/select/edit definitions, hear and cancel replies, reload an older save and inspect its revisions,
+  selection and complete private transcript; verify the next NPC turn and diary contain no private lines.
+- [ ] VR: repeat independently in headset, including push-to-talk, centered audio and readable transcript controls.
+- [ ] Qualify configured live model, speech recognition and voice providers. Off-game synthetic audio is insufficient.
+
 ## Stage 1 native typed turn
 
 - [x] Build, package and audit both DLLs with the paired server candidate: met locally by the

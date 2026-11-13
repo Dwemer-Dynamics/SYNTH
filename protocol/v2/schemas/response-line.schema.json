@@ -31,7 +31,9 @@
         "action",
         "status",
         "response_end",
-        "social_task"
+        "social_task",
+        "narrator_reply",
+        "narrator_state"
       ]
     },
     "line_id": {
@@ -82,6 +84,9 @@
           "type": "boolean"
         },
         "native_turn": {
+          "type": "boolean"
+        },
+        "private_narrator": {
           "type": "boolean"
         }
       },

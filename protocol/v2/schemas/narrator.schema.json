@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/narrator.schema.json",
+  "title": "SYNTH v2 private narrator commands, turns, receipts, replies and state",
+  "$defs": {
+    "definition_id": {
+      "type": "string",
+      "pattern": "^nd-[0-9a-f]{32}$"
+    },
+    "record_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "state_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "state",
+            "select",
+            "cancel",
+            "transcript"
+          ]
+        },
+        "definition_id": {
+          "$ref": "#/$defs/definition_id"
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "select"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "definition_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "definition_id"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "transcript"
+              }
+            }
+          },
+          "then": {},
+          "else": {
+            "not": {
+              "required": [
+                "cursor"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "definition_id",
+        "state_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "typed",
+            "voice",
+            "scene"
+          ]
+        },
+        "definition_id": {
+          "$ref": "#/$defs/definition_id"
+        },
+        "state_id": {
+          "$ref": "#/$defs/state_id"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "media": {
+          "$ref": "../../v1/schemas/media.schema.json"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "typed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ],
+            "not": {
+              "required": [
+                "media"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "voice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "media"
+            ],
+            "not": {
+              "required": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "scene"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "text"
+                  ]
+                },
+                {
+                  "required": [
+                    "media"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "narrator_request_id",
+        "line_id",
+        "definition_id",
+        "revision_id",
+        "parent_state_id",
+        "outcome"
+      ],
+      "properties": {
+        "narrator_request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "line_id": {
+          "type": "string",
+          "maxLength": 140,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:narrator$"
+        },
+        "definition_id": {
+          "$ref": "#/$defs/definition_id"
+        },
+        "revision_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "parent_state_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "outcome": {
+          "enum": [
+            "audio_completed",
+            "interrupted",
+            "failed"
+          ]
+        }
+      }
+    },
+    "narrator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "revision_id",
+        "display_name"
+      ],
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/definition_id"
+        },
+        "revision_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "reply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "narrator",
+        "parent_state_id",
+        "text",
+        "speech"
+      ],
+      "properties": {
+        "narrator": {
+          "$ref": "#/$defs/narrator"
+        },
+        "parent_state_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "speech": {
+          "$ref": "../../v1/schemas/speech.schema.json"
+        }
+      }
+    },
+    "transcript_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "display_name",
+        "text"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "player",
+            "narrator"
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_id",
+        "definitions",
+        "transcript"
+      ],
+      "properties": {
+        "state_id": {
+          "$ref": "#/$defs/state_id"
+        },
+        "selected": {
+          "$ref": "#/$defs/narrator"
+        },
+        "definitions": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/narrator"
+          }
+        },
+        "transcript": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "$ref": "#/$defs/transcript_entry"
+          }
+        },
+        "available": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/narrator"
+          }
+        },
+        "next_cursor": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

@@ -558,3 +558,26 @@ The server owns the origin's exact speaker and listener. Model listener labels c
 `context.location_ancestry` is a flat-only v2 capability requiring `context.location_identity`, with explicit boolean `location_ancestry` init acknowledgement. Without the acknowledgement clients omit the field, so an older server never receives it. The optional `payload.world.location_ancestry` object requires `world.location_ref` and contains `end` and `chain`. `chain` holds one to eight objects with exactly `origin_plugin`, `local_form_id` and `display_name`: the player's current `BGSLocation` first, then each `parentLoc`, nearest first. `local_form_id` is `0x` and six uppercase hex digits, decoded by the client only through the loaded plugin that defines the form (the low 24 bits for a full plugin slot, the low 12 bits for a light `FE` slot). A form whose prefix is not its plugin's slot, whose plugin is not in the manifest, or that was created at runtime is never decoded. The first entry must be the same form as `location_ref`, and no `(origin_plugin, local_form_id)` pair may repeat, compared case-insensitively by plugin. Identity is that pair; equal display names from different plugins are different locations, and an empty display name is allowed.
 
 `end` says why the parent walk stopped. Only `root` means the last entry has no parent. `unresolved` means its parent exists but could not be decoded, `cycle` means its parent repeats an earlier entry, and `depth_limit` (exactly eight entries) means the bound was reached. A reader must not infer parentage beyond the last entry. Ancestry describes where the captured scene is when the context was taken; it is not knowledge granted to any NPC, and it adds no audience or historical reader. It is stored only as part of the immutable context snapshot, so replaying the same context adds nothing new. VR does not offer this capability.
+
+## Private narrator capability
+
+`narrator.private.v1` is negotiated only with `context.saved_anchor` and `dialogue.turn_ownership`.
+The init ACK must contain `private_narrator: true`. Without it, private commands fail locally and the legacy
+`NARRATOR` mode remains unchanged. `narrator.schema.json` owns the closed payloads for `narrator_command`,
+`narrator_turn`, `narrator_receipt`, `narrator_state` and `narrator_reply`.
+
+Definitions have stable IDs and immutable revisions. A lane applies explicit revisions; context publications
+capture its applied state by opaque ID beside the existing saved anchor. Loading restores that exact state,
+including selection and transcript. `definitions` describes saved applied revisions; `available` is the live
+authoring library. Selecting a definition explicitly applies its latest revision. The co-save format is unchanged.
+
+Private input is committed before provider work. A reply carries its definition/revision and parent state;
+only a matching completed-audio receipt of a current emitted turn advances the transcript. Interruptions,
+failed output, editing, selection changes and replacement cannot publish a heard reply. Receipt replay is
+idempotent; conflicting outcomes are refused. NPC `speech_receipt` identities and semantics are unchanged.
+
+Private transcript content never enters NPC eventlog/history or derived journal sources. State replies contain
+at most 24 transcript entries. `narrator_command` action `transcript` accepts a server-issued `cursor` for an older
+page of that exact immutable state; a stale cursor is refused. Each page walks at most 24 parent links. Persona
+prompt history follows a separate parent link, so another persona cannot displace it. A save applies at most 16
+definitions; exceeding that bound is refused before changing its state.

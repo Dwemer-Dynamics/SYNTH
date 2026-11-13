@@ -174,10 +174,22 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, location_ancestry{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, location_ancestry{}, private_narrator{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
-using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
+// Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
+struct NarratorRef { std::string definition_id; std::uint64_t revision_id{}; std::string display_name; };
+struct NarratorReply { NarratorRef narrator; std::uint64_t parent_state_id{}; std::string text; Speech speech; };
+struct NarratorTranscriptEntry { bool narrator{}; std::string display_name, text; };
+struct NarratorState {
+    std::uint64_t state_id{};
+    std::optional<NarratorRef> selected;
+    std::vector<NarratorRef> definitions;
+    std::vector<NarratorTranscriptEntry> transcript;
+    std::vector<NarratorRef> available;
+    std::string next_cursor;
+};
+using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer, NarratorReply, NarratorState>;
 struct Line {
     std::string line_id, request_id, turn_id, runtime_variant;
     std::uint64_t generation{};
@@ -276,6 +288,53 @@ inline Speaker speaker(const json::Value& value) {
         throw std::invalid_argument{"invalid protocol speaker"};
     return Narrator{text(value, "id"), text(value, "display_name")};
 }
+inline bool narrator_definition_id(std::string_view value) noexcept {
+    return value.size() == 35 && value.starts_with("nd-") &&
+        std::ranges::all_of(value.substr(3), [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); });
+}
+inline std::uint64_t narrator_record_id(const json::Value& object, std::string_view key, std::uint64_t minimum = 1) {
+    const auto value = integer(object, key);
+    if (value < minimum || value > 9'007'199'254'740'991ULL) throw std::invalid_argument{"invalid narrator record id"};
+    return value;
+}
+inline std::string bounded_text(const json::Value& object, std::string_view key, std::size_t limit) {
+    auto value = text(object, key);
+    if (value.empty() || value.size() > limit * 4) throw std::invalid_argument{"narrator text is out of bounds"};
+    return value;
+}
+inline NarratorRef narrator_ref(const json::Value& value) {
+    closed_object(value, {"definition_id", "revision_id", "display_name"});
+    NarratorRef out{text(value, "definition_id"), narrator_record_id(value, "revision_id"), bounded_text(value, "display_name", 64)};
+    if (!narrator_definition_id(out.definition_id)) throw std::invalid_argument{"invalid narrator definition"};
+    return out;
+}
+inline NarratorState narrator_state(const json::Value& value) {
+    closed_object(value, {"state_id", "selected", "definitions", "transcript", "available", "next_cursor"});
+    NarratorState out{narrator_record_id(value, "state_id", 0), std::nullopt, {}, {}, {}, {}};
+    if (const auto* selected = value.find("selected")) out.selected = narrator_ref(*selected);
+    const auto& definitions = required(value, "definitions");
+    const auto& transcript = required(value, "transcript");
+    if (!definitions.is_array() || definitions.as_array().size() > 16 || !transcript.is_array() || transcript.as_array().size() > 24 ||
+        (out.state_id == 0 && out.selected))
+        throw std::invalid_argument{"invalid narrator state"};
+    for (const auto& definition : definitions.as_array()) out.definitions.push_back(narrator_ref(definition));
+    if (const auto* available = value.find("available")) {
+        if (!available->is_array() || available->as_array().size() > 16) throw std::invalid_argument{"invalid narrator library"};
+        for (const auto& definition : available->as_array()) out.available.push_back(narrator_ref(definition));
+    } else out.available = out.definitions;
+    if (value.find("next_cursor")) {
+        out.next_cursor = text(value, "next_cursor");
+        if (out.next_cursor.size() != 64 || !std::ranges::all_of(out.next_cursor, [](char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); })) throw std::invalid_argument{"invalid narrator cursor"};
+    }
+    for (const auto& entry : transcript.as_array()) {
+        closed_object(entry, {"role", "display_name", "text"});
+        const auto role = text(entry, "role");
+        if (role != "player" && role != "narrator") throw std::invalid_argument{"invalid narrator transcript role"};
+        out.transcript.push_back({role == "narrator", bounded_text(entry, "display_name", 64), bounded_text(entry, "text", 4096)});
+    }
+    return out;
+}
 inline Line decode_line(std::string_view wire) {
     auto root = json::parse(wire);
     const auto version = integer(root, "protocol_version");
@@ -363,8 +422,21 @@ inline Line decode_line(std::string_view wire) {
         closed_object(payload,{"task"});
         line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
     }
+    else if(type=="narrator_reply" || type=="narrator_state") {
+        if (line.protocol_version != 2 || line.context_sequence == 0)
+            throw std::invalid_argument{"private narrator lines require a bound v2 response"};
+        if (type == "narrator_state") line.payload = narrator_state(payload);
+        else {
+            closed_object(payload, {"narrator", "parent_state_id", "text", "speech"});
+            NarratorReply reply{narrator_ref(required(payload, "narrator")), narrator_record_id(payload, "parent_state_id"),
+                bounded_text(payload, "text", 1000), speech(required(payload, "speech"))};
+            if (line.line_id != line.request_id + ":narrator" || reply.speech.utterance_id != line.line_id)
+                throw std::invalid_argument{"narrator reply is not owned by its request"};
+            line.payload = std::move(reply);
+        }
+    }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "location_ancestry"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "location_ancestry", "private_narrator"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -374,7 +446,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
             payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false,
             payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false,
-            payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false};
+            payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false,
+            payload.find("private_narrator") ? required(payload,"private_narrator").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -745,7 +818,8 @@ inline std::string encode_event(const EventContext& context, std::string type, j
     if (context.protocol_version == 2) {
         const bool bound = type == "input_text" || type == "input_audio" || type == "activate"
             || type == "trigger" || type == "profile_refresh" || type == "diary_request" || type == "action_result"
-            || type == "social_task_request" || type == "social_task_progress" || type == "speech_receipt";
+            || type == "social_task_request" || type == "social_task_progress" || type == "speech_receipt"
+            || type == "narrator_command" || type == "narrator_turn" || type == "narrator_receipt";
         if (context.context_sequence > 9'007'199'254'740'991ULL
             || (bound ? context.context_sequence == 0 : context.context_sequence != 0))
             throw std::invalid_argument{"event context binding is invalid"};
@@ -816,6 +890,68 @@ inline std::string encode_speech_receipt(const EventContext& context, const Spee
     return encode_event(context, "speech_receipt", json::Value{object({
         {"dialogue_request_id", receipt.dialogue_request_id}, {"line_id", receipt.line_id},
         {"character", identity_value(receipt.character)}, {"outcome", outcome}})});
+}
+// Private narrator requests (protocol/v2/schemas/narrator.schema.json). All three are bound to an acknowledged
+// context and require the negotiated capability set; a receipt names its exact reply and checkpoint.
+enum class NarratorAction { state, select, cancel, transcript };
+enum class NarratorTurnKind { typed, voice, scene };
+struct NarratorTurn {
+    NarratorTurnKind kind{NarratorTurnKind::typed};
+    std::string definition_id;
+    std::uint64_t state_id{};
+    std::string text;
+    std::optional<Media> media;
+};
+enum class NarratorReceiptOutcome { audio_completed, interrupted, failed };
+struct NarratorReceipt {
+    std::string narrator_request_id;
+    NarratorRef narrator;
+    std::uint64_t parent_state_id{};
+    NarratorReceiptOutcome outcome{NarratorReceiptOutcome::failed};
+};
+inline void require_private_narrator(const EventContext& context) {
+    const auto has = [&](std::string_view value) { return std::ranges::find(context.capabilities, value) != context.capabilities.end(); };
+    if (context.protocol_version != 2 || context.context_sequence == 0 || !has("narrator.private.v1") ||
+        !has("context.saved_anchor") || !has("dialogue.turn_ownership"))
+        throw std::invalid_argument{"private narrator requires a bound, negotiated v2 context"};
+}
+inline std::string encode_narrator_command(const EventContext& context, NarratorAction action, std::string definition_id = {}, std::string cursor = {}) {
+    require_private_narrator(context);
+    if ((action == NarratorAction::select) != narrator_definition_id(definition_id))
+        throw std::invalid_argument{"invalid narrator command"};
+    auto payload = object({{"action", action == NarratorAction::state ? "state" : action == NarratorAction::select ? "select" :
+        action == NarratorAction::transcript ? "transcript" : "cancel"}});
+    if (!cursor.empty()) {
+        if (action != NarratorAction::transcript || cursor.size() != 64 || !std::ranges::all_of(cursor, [](char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); })) throw std::invalid_argument{"invalid narrator cursor"};
+        payload.emplace_back("cursor", json::Value{std::move(cursor)});
+    }
+    if (action == NarratorAction::select) payload.emplace_back("definition_id", json::Value{std::move(definition_id)});
+    return encode_event(context, "narrator_command", json::Value{std::move(payload)});
+}
+inline std::string encode_narrator_turn(const EventContext& context, const NarratorTurn& turn) {
+    require_private_narrator(context);
+    const auto typed = turn.kind == NarratorTurnKind::typed, voice = turn.kind == NarratorTurnKind::voice;
+    if (!narrator_definition_id(turn.definition_id) || turn.state_id > 9'007'199'254'740'991ULL ||
+        typed != (!turn.text.empty() && turn.text.size() <= 4096) || voice != turn.media.has_value())
+        throw std::invalid_argument{"invalid narrator turn"};
+    auto payload = object({{"kind", typed ? "typed" : voice ? "voice" : "scene"}, {"definition_id", turn.definition_id},
+        {"state_id", turn.state_id}});
+    if (typed) payload.emplace_back("text", json::Value{turn.text});
+    if (voice) payload.emplace_back("media", media_value(*turn.media));
+    return encode_event(context, "narrator_turn", json::Value{std::move(payload)});
+}
+inline std::string encode_narrator_receipt(const EventContext& context, const NarratorReceipt& receipt) {
+    require_private_narrator(context);
+    if (!runtime::social_id(receipt.narrator_request_id) || receipt.narrator_request_id.size() > 128 ||
+        !narrator_definition_id(receipt.narrator.definition_id) || receipt.narrator.revision_id == 0 || receipt.parent_state_id == 0)
+        throw std::invalid_argument{"narrator receipt does not own its reply"};
+    const char* outcome = receipt.outcome == NarratorReceiptOutcome::audio_completed ? "audio_completed" :
+        receipt.outcome == NarratorReceiptOutcome::interrupted ? "interrupted" : "failed";
+    return encode_event(context, "narrator_receipt", json::Value{object({
+        {"narrator_request_id", receipt.narrator_request_id}, {"line_id", receipt.narrator_request_id + ":narrator"},
+        {"definition_id", receipt.narrator.definition_id}, {"revision_id", receipt.narrator.revision_id},
+        {"parent_state_id", receipt.parent_state_id}, {"outcome", outcome}})});
 }
 inline std::string encode_init(const EventContext& context, std::string locale, bool hmd_pose_fresh=false,
                                const std::vector<LoadedPlugin>& loaded_plugins = {}) {

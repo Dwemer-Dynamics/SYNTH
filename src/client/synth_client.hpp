@@ -138,6 +138,17 @@ public:
     [[nodiscard]] bool native_turn_ready() const noexcept {
         return native_turn_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Private narrator commands, turns and receipts require this init's exact acknowledgement.
+    [[nodiscard]] bool uses_private_narrator_contract() const noexcept {
+        const auto has = [this](std::string_view value) {
+            return std::ranges::find(options_.capabilities, value) != options_.capabilities.end();
+        };
+        return options_.protocol_version == 2 && has("narrator.private.v1") && has("context.saved_anchor") &&
+            has("dialogue.turn_ownership");
+    }
+    [[nodiscard]] bool private_narrator_ready() const noexcept {
+        return private_narrator_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool social_tasks_ready() const noexcept {
         return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -280,6 +291,7 @@ public:
             rechat_scene_negotiated_.store(false, std::memory_order_release);
             social_tasks_negotiated_.store(false, std::memory_order_release);
             native_turn_negotiated_.store(false, std::memory_order_release);
+            private_narrator_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -319,6 +331,9 @@ public:
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
+                std::memory_order_release);
+            private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
                 std::memory_order_release);
             social_tasks_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->social_tasks &&
@@ -569,6 +584,29 @@ public:
             body = protocol_native::encode_speech_receipt(context(request_id, turn_id, binding), receipt);
         }
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", binding, false, 5000);
+    }
+
+    // Worker-only private narrator request bound to an acknowledged context of this generation. Narrator lines are
+    // accepted only on a negotiated session; a transport failure leaves the outcome unknown. Never retried here.
+    [[nodiscard]] RequestOutcome send_narrator(std::string_view type, ContextBinding binding,
+                                               const std::function<std::string(const protocol_native::EventContext&)>& encode) {
+        std::scoped_lock request_lock{request_mutex_};
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{};
+        const auto turn = type == "narrator_turn";
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            if (!private_narrator_ready() || (type != "narrator_command" && !turn && type != "narrator_receipt") ||
+                binding.generation != generation_ || binding.sequence == 0)
+                throw std::invalid_argument{"private narrator owner is not current"};
+            request_id = next_id(turn ? "narrator" : type == "narrator_receipt" ? "narrator-receipt" : "narrator-command");
+            turn_id = binding.turn_id.empty() ? next_id("narrator-turn") : binding.turn_id;
+            generation = generation_;
+            body = encode(context(request_id, turn_id, binding));
+        }
+        return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", binding, false,
+                          turn ? 0 : 5000);
     }
 
     [[nodiscard]] RequestOutcome activate(const protocol_native::Identity& actor,
@@ -1153,6 +1191,9 @@ private:
                     auto line = protocol_native::decode_line(wire);
                     if(std::holds_alternative<protocol_native::SocialTaskOffer>(line.payload)&&!social_tasks_ready())
                         throw std::invalid_argument{"unnegotiated saved social task"};
+                    if ((std::holds_alternative<protocol_native::NarratorReply>(line.payload) ||
+                         std::holds_alternative<protocol_native::NarratorState>(line.payload)) && !private_narrator_ready())
+                        throw std::invalid_argument{"unnegotiated private narrator line"};
                     if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload);
                         dialogue && dialogue->listener &&
                         (std::ranges::find(options_.capabilities, "dialogue.listener_identity") == options_.capabilities.end()
@@ -1345,6 +1386,7 @@ private:
     std::atomic_bool rechat_scene_negotiated_{};
     std::atomic_bool social_tasks_negotiated_{};
     std::atomic_bool native_turn_negotiated_{};
+    std::atomic_bool private_narrator_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};

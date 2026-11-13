@@ -61,6 +61,12 @@ public:
         serial_.fetch_add(1,std::memory_order_acq_rel);
     }
 
+    // A committed private narrator change (selection, recorded input or an accepted completed reply) is captured only
+    // by a later context publication, so it raises the same frontier under the same owner checks as a heard receipt.
+    void note_private_narrator(std::uint64_t generation, const core::CancellationToken& cancellation) {
+        note_heard_receipt(generation, cancellation);
+    }
+
     // The result is newer than its issuing snapshot. Reuse ordinary
     // world observation to acknowledge a frontier after the consequence.
     void note_wait_outcome(const core::CancellationToken& cancellation) {
