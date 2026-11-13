@@ -1,5 +1,7 @@
 #pragma once
 
+#include "client/synth_client.hpp"
+#include "core/cancellation.hpp"
 #include "presentation/dialogue_presentation.hpp"
 #include "protocol_native/v1_codec.hpp"
 
@@ -7,11 +9,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 
 namespace synth::client {
 
@@ -90,6 +94,68 @@ private:
     if (terminal == DialogueDelivery::discarded || terminal == DialogueDelivery::spoken)
         return cancelled ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::failed;
     return std::nullopt;
+}
+
+// Terminal caption hook for a native v2 turn line; empty for any other line. Its first terminal delivery
+// pushes one copied receipt; only completed native audio becomes audio_completed.
+[[nodiscard]] inline std::function<void(presentation::DialogueDelivery, bool)> speech_receipt_hook(
+    std::weak_ptr<SpeechReceiptOutbox> outbox, const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
+    bool native_turn_ready) {
+    const auto* speaker = std::get_if<protocol_native::Identity>(&dialogue.speaker);
+    if (!speaker || !dialogue.native_turn || !native_turn_ready ||
+        line.protocol_version != 2 || line.context_sequence == 0) return {};
+    return [outbox = std::move(outbox),
+            pending = PendingSpeechReceipt{line.generation, line.context_sequence, line.turn_id,
+                {line.request_id, line.line_id, *speaker, {}}}](
+                presentation::DialogueDelivery terminal, bool cancelled) mutable {
+        const auto outcome = speech_receipt_outcome(terminal, cancelled);
+        const auto target = outbox.lock();
+        if (!outcome || !target) return;
+        pending.receipt.outcome = *outcome;
+        (void)target->push(std::move(pending));
+    };
+}
+
+// The server's only receipt acknowledgement: start, one speech_receipt_accepted status carrying the
+// stored state, then a complete end. It also acknowledges interrupted and failed receipts, so this
+// is not a heard signal. HTTP success alone, refusals (receipt_conflict, receipt_owner_mismatch,
+// receipt_invalid) and extra or repeated lines return null.
+[[nodiscard]] inline const std::string* accepted_receipt_state(const RequestOutcome& outcome) {
+    if (outcome.status != RequestStatus::complete || outcome.lines.size() != 3) return nullptr;
+    const auto* status = std::get_if<protocol_native::Status>(&outcome.lines[1].payload);
+    const auto* end = std::get_if<protocol_native::End>(&outcome.lines[2].payload);
+    return std::holds_alternative<protocol_native::Start>(outcome.lines[0].payload) && status && end &&
+        status->code == "speech_receipt_accepted" && !status->detail.empty() && end->status == "complete"
+        ? &status->detail : nullptr;
+}
+
+// Network worker: one server-accepted spoken receipt for this generation, under the drain's token.
+using HeardReceipt = std::function<void(std::uint64_t, const core::CancellationToken&)>;
+
+struct SpeechReceiptExchange final {
+    RequestOutcome outcome;
+    std::optional<std::string> accepted_state;
+    bool heard{};
+};
+
+// Network worker, shared by SpeechDelivery's drain and the loopback driver: send one copied receipt and
+// notify heard history. Heard history exists only after an accepted completed-audio receipt stored as
+// spoken, while the drain is live and still owns the receipt's generation. Never retried here.
+[[nodiscard]] inline SpeechReceiptExchange exchange_speech_receipt(SynthClient& client, const PendingSpeechReceipt& value,
+                                                                   const core::CancellationToken& cancellation,
+                                                                   const std::atomic_bool& terminal,
+                                                                   const HeardReceipt& heard) {
+    SpeechReceiptExchange result{client.send_speech_receipt(value.receipt,
+        {value.generation, value.context_sequence, {}, value.turn_id})};
+    if (const auto* state = accepted_receipt_state(result.outcome)) result.accepted_state = *state;
+    if (heard && !cancellation.is_cancelled() && !terminal.load(std::memory_order_acquire) &&
+        value.generation == cancellation.generation().value() &&
+        value.receipt.outcome == protocol_native::SpeechReceiptOutcome::audio_completed &&
+        result.accepted_state == "spoken") {
+        heard(value.generation, cancellation);
+        result.heard = true;
+    }
+    return result;
 }
 
 } // namespace synth::client

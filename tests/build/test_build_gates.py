@@ -878,19 +878,46 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         # Social hydration and response rollback stay outside the publisher; it reaches them only by hooks.
         self.assertLess(publication.index("*published_audience = std::move(audience)"), publication.index("hydrate_social_(outcome, snapshot);"))
         self.assertLess(publication.index("hydrate_social_(outcome, snapshot);"), publication.index("invalidate_response_(cancellation);"))
-        self.assertLess(publication.index("save_context_->acknowledge(save_binding_.epoch,"), publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("))
-        self.assertLess(publication.index("history_checkpoint_acknowledged_.compare_exchange_weak("), publication.index("acknowledged_inventory_frame_.compare_exchange_weak("))
+        # The revision is read before the send; the shared SaveCheckpoint saves and covers it before inventory moves.
+        self.assertLess(publication.index("const auto checkpoint_revision=checkpoint_.revision();"), publication.index("client_.publish_context(0,"))
+        self.assertLess(publication.index("client_.publish_context(0,"), publication.index("checkpoint_.acknowledge(client_, outcome,"))
+        self.assertLess(publication.index("checkpoint_.acknowledge(client_, outcome,"), publication.index("acknowledged_inventory_frame_.compare_exchange_weak("))
         # A heard receipt raises only its live binding's frontier; every saved ACK needs an exact
-        # context_accepted, so a bare completion never advances the cutoff (executed in native_playback_tests).
-        self.assertIn("if (save_context_ && client_.context_accepted(outcome) && !cancellation.is_cancelled()", publication)
-        self.assertLess(publication.index("client_.context_accepted(outcome)"), publication.index("save_context_->acknowledge(save_binding_.epoch,"))
-        heard = context.split("void note_heard_receipt(", 1)[1].split("void note_wait_outcome(", 1)[0]
-        self.assertLess(heard.index("save_context_->writer_current(save_binding_.epoch)"), heard.index("history_checkpoint_serial_.fetch_add("))
+        # context_accepted, so a bare completion never advances the cutoff (executed in native_playback_tests
+        # and by the loopback dialogue driver through the same SaveCheckpoint).
+        checkpoint = read("src/client/save_checkpoint.hpp")
+        acknowledge = checkpoint.split("bool acknowledge(", 1)[1].split("private:", 1)[0]
+        self.assertLess(acknowledge.index("!client.context_accepted(outcome)"), acknowledge.index("store_->acknowledge(binding_.epoch,"))
+        self.assertLess(acknowledge.index("store_->acknowledge(binding_.epoch,"), acknowledge.index("acknowledged_.compare_exchange_weak("))
+        heard = checkpoint.split("void note_heard_receipt(", 1)[1].split("void note_wait_outcome(", 1)[0]
+        self.assertLess(heard.index("store_->writer_current(binding_.epoch)"), heard.index("serial_.fetch_add("))
+        self.assertIn("checkpoint_.note_heard_receipt(generation, cancellation);", context)
         self.assertNotIn("heard_receipt", publication)
-        drain = read("src/client/speech_delivery.hpp").split("void flush_speech_receipts(", 1)[1].split("void queue_speech(", 1)[0]
-        self.assertLess(drain.index("client_.send_speech_receipt("), drain.index("state && *state == \"spoken\""))
-        self.assertIn("const auto* state = accepted_receipt_state(outcome);", drain)  # Not transport completion.
+        for moved in ("save_context_", "save_binding_", "history_checkpoint_"):
+            self.assertNotIn(moved, context)
+        receipts = read("src/client/speech_receipts.hpp")
+        exchange = receipts.split("SpeechReceiptExchange exchange_speech_receipt(", 1)[1]
+        self.assertLess(exchange.index("client.send_speech_receipt("), exchange.index("accepted_receipt_state(result.outcome)"))  # Not transport completion.
+        self.assertLess(exchange.index("accepted_receipt_state(result.outcome)"), exchange.index("result.accepted_state == \"spoken\""))
+        self.assertLess(exchange.index("result.accepted_state == \"spoken\""), exchange.index("heard(value.generation, cancellation);"))
+        delivery = read("src/client/speech_delivery.hpp")
+        drain = delivery.split("void flush_speech_receipts(", 1)[1].split("void queue_speech(", 1)[0]
+        self.assertIn("exchange_speech_receipt(client_, value, cancellation, terminal_, heard_receipt_);", drain)
+        self.assertIn("return speech_receipt_hook(speech_receipts_, line, dialogue, client_.native_turn_ready());", delivery)
+        self.assertNotIn("send_speech_receipt(", delivery)
         self.assertIn("context_.note_heard_receipt(generation, cancellation);", session)
+        # The loopback driver runs the same shared receipt path and checkpoint, never a copied facsimile.
+        driver = read("tests/loopback_dialogue/loopback_dialogue_driver.cpp")
+        for shared in ("client::speech_receipt_hook(outbox,", "client::exchange_speech_receipt(first.synth,",
+                       "&client::SaveCheckpoint::note_heard_receipt, &first.checkpoint",
+                       "checkpoint.acknowledge(synth, outcome, playthrough, revision, generation, owner.token())"):
+            self.assertIn(shared, driver)
+        for copied in ("send_speech_receipt(", "speech_receipt_accepted", "store.acknowledge(", "context_accepted(",
+                       "speech_receipt_outcome(", ".push("):
+            self.assertNotIn(copied, driver)
+        loop = driver.split("for (int attempt = 1; attempt <= 2; ++attempt)", 1)
+        self.assertIn("CHECK(!first.checkpoint.due());", loop[0])
+        self.assertLess(loop[1].index("first.checkpoint.due()"), loop[1].index("first.publish()"))
         for forbidden in ("social_mutex_", "social_tasks_.", "PluginSession", "RE::", "REL::", "IFalloutRuntime"):
             self.assertNotIn(forbidden, context)
         forwarder = session.split("RequestOutcome publish_snapshot(", 1)[1].split("std::optional<context::TargetContext> selected_target(", 1)[0]

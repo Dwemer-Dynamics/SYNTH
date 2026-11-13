@@ -5,6 +5,7 @@
 #include "client/dialogue_requests.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
+#include "client/save_checkpoint.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/synth_client.hpp"
 #include "client/wait_action.hpp"
@@ -37,7 +38,7 @@ namespace synth::client {
 
 // Owns one session's registration and context publication: capability construction, server
 // initialization, full/delta context encoding and publication, the acknowledged world/quest frame,
-// the exact save binding and write epoch, the history checkpoint frontier with its wait notice,
+// the SaveCheckpoint (exact save binding, write epoch, history frontier and wait notice),
 // the acknowledged inventory frame, the world observation retry gate and the dynamic profile refresh
 // that publishes its own context first. SaveContextStore stays
 // the persisted-binding authority; this object only borrows it with the binding it was created for.
@@ -104,8 +105,7 @@ public:
           terminal_{dependencies.terminal},
           runtime_paused_{dependencies.runtime_paused},
           session_{std::move(dependencies.session)},
-          save_context_{dependencies.save_context},
-          save_binding_{std::move(dependencies.save_binding)},
+          checkpoint_{dependencies.save_context, std::move(dependencies.save_binding), session_, terminal_},
           select_target_{std::move(dependencies.select_target)},
           hydrate_social_{std::move(dependencies.hydrate_social)},
           invalidate_response_{std::move(dependencies.invalidate_response)},
@@ -248,16 +248,12 @@ public:
     }
 
     // Retirement revokes this binding's write epoch before any later ACK can land.
-    void stop_save_writer() {
-        if (save_context_) save_context_->stop_writer(save_binding_.epoch);
-    }
+    void stop_save_writer() { checkpoint_.stop_writer(); }
 
-    [[nodiscard]] bool save_writer_current() const {
-        return !save_context_ || save_context_->writer_current(save_binding_.epoch);
-    }
+    [[nodiscard]] bool save_writer_current() const { return checkpoint_.writer_current(); }
 
     // A bound save requires an ACK as part of a checkpoint; without one, publication alone suffices.
-    [[nodiscard]] bool save_bound() const noexcept { return save_context_ != nullptr; }
+    [[nodiscard]] bool save_bound() const noexcept { return checkpoint_.bound(); }
 
     // Background world publications, including the social checkpoint, track through this one counter.
     [[nodiscard]] std::size_t observation_tasks() const noexcept {
@@ -275,8 +271,7 @@ public:
 
     // This gate is also rechecked on the worker, under the serialized context transaction.
     [[nodiscard]] bool world_context_needed(const core::RuntimeSnapshot& snapshot, bool inventory_refresh = false) {
-        const bool wait_checkpoint=history_checkpoint_serial_.load(std::memory_order_acquire)>
-            history_checkpoint_acknowledged_.load(std::memory_order_acquire);
+        const bool wait_checkpoint=checkpoint_.due();
         if (inventory_refresh && snapshot.player().inventory_observation() == "unavailable") return false;
         const auto observed = context::world_observation(snapshot);
         const auto quests = context::quest_observation(snapshot);
@@ -329,38 +324,19 @@ public:
         return acknowledged_quest_sequence_ == previous_sequence;
     }
 
-    // An accepted flat dialogue response line, noted on receipt before presentation, raises the
-    // history frontier a later save-ACKed publication must cover. It is not a heard receipt.
+    // SaveCheckpoint owns the history frontier: accepted flat dialogue, heard receipts and wait outcomes.
     void note_dialogue_history(core::RuntimeVariant variant, const core::CancellationToken& cancellation) {
-        if(save_context_ && variant==core::RuntimeVariant::flat &&
-            !cancellation.is_cancelled() && !terminal_.load(std::memory_order_acquire))
-            history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel);
+        checkpoint_.note_dialogue_history(variant, cancellation);
     }
 
-    // The server inserts heard history only when it accepts a spoken receipt, after any earlier save
-    // ACK. It raises the same frontier, which only a later exactly accepted publication clears.
     void note_heard_receipt(std::uint64_t generation, const core::CancellationToken& cancellation) {
-        if(!save_context_ || cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
-            generation!=session_.generation().value() || cancellation.generation()!=session_.generation() ||
-            !save_context_->writer_current(save_binding_.epoch)) return;
-        history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel);
+        checkpoint_.note_heard_receipt(generation, cancellation);
     }
 
-    // The result is newer than its issuing snapshot. Reuse ordinary
-    // world observation to acknowledge a frontier after the consequence.
-    void note_wait_outcome(const core::CancellationToken& cancellation) {
-        if(!save_context_ || cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-        const auto serial=history_checkpoint_serial_.fetch_add(1,std::memory_order_acq_rel)+1;
-        wait_checkpoint_notice_.store(serial,std::memory_order_release);
-    }
+    void note_wait_outcome(const core::CancellationToken& cancellation) { checkpoint_.note_wait_outcome(cancellation); }
 
     // Game pump: true exactly once after a saved ACK covers the latest wait outcome.
-    [[nodiscard]] bool take_wait_checkpoint_notice(std::uint64_t generation) {
-        auto notice=wait_checkpoint_notice_.load(std::memory_order_acquire);
-        return notice && !terminal_.load(std::memory_order_acquire) && generation==session_.generation().value() &&
-            history_checkpoint_acknowledged_.load(std::memory_order_acquire)>=notice &&
-            wait_checkpoint_notice_.compare_exchange_strong(notice,0,std::memory_order_acq_rel);
-    }
+    [[nodiscard]] bool take_wait_checkpoint_notice(std::uint64_t generation) { return checkpoint_.take_wait_notice(generation); }
 
     // Worker only. Observation and session request callers hold begin_context_turn(); the manual
     // submit task calls this without it.
@@ -373,7 +349,7 @@ public:
                                          const protocol_native::ControlSelection& controls = {},
                                          const runtime::SocialTaskDescriptor* social_pair = nullptr) {
         const auto& snapshot = *owned_snapshot;
-        const auto wait_checkpoint=history_checkpoint_serial_.load(std::memory_order_acquire);
+        const auto checkpoint_revision=checkpoint_.revision();
         if (actor_events && (actor_events->capture->scene!=owned_snapshot || target || quest_events || player_event ||
             actor_events->actors.empty() || actor_events->actors.size()>ActorEventDelivery::actor_capacity))
             throw std::invalid_argument{"actor event context does not own this fragment"};
@@ -568,7 +544,7 @@ public:
                                                  snapshot.world()->location_ref}}
                                            : std::nullopt,
                                        active_quests, nearby_items, points_of_interest,
-                                       {}, cancellation, save_binding_.loaded_context, snapshot.active_quests_observation(),
+                                       {}, cancellation, checkpoint_.binding().loaded_context, snapshot.active_quests_observation(),
                                        snapshot.nearby_items_observation(), snapshot.points_of_interest_observation(),
                                        protocol_native::retained_collection_observation(
                                            snapshot.actors_observation(), snapshot.actors().size(), audience.size()), quest_events, player_event,
@@ -595,27 +571,15 @@ public:
                 world_context_failure_reported_.store(false, std::memory_order_release);
             }
         }
-        // Only an exact context_accepted proves the saved cutoff; a bare or wrong completion keeps the
-        // older ACK and any raised frontier, whatever arrived while the publication was in flight.
-        if (save_context_ && client_.context_accepted(outcome) && !cancellation.is_cancelled()
-            && !terminal_.load(std::memory_order_acquire)) {
-            outcome.save_checkpoint_acknowledged = save_context_->acknowledge(save_binding_.epoch,
-                {snapshot.player().playthrough_id(), client_.runtime_session_id(),
-                 outcome.context_binding.generation, outcome.context_binding.sequence});
-        }
-        if(wait_checkpoint && save_context_ && outcome.save_checkpoint_acknowledged &&
-            outcome.status==RequestStatus::complete && !cancellation.is_cancelled() &&
-            !terminal_.load(std::memory_order_acquire) && snapshot.generation()==session_.generation()) {
-            auto before=history_checkpoint_acknowledged_.load(std::memory_order_acquire);
-            while(before<wait_checkpoint && !history_checkpoint_acknowledged_.compare_exchange_weak(
-                before,wait_checkpoint,std::memory_order_release,std::memory_order_acquire)) {}
-        }
+        // Only an exact context_accepted saves the cutoff and covers the revision read before sending.
+        outcome.save_checkpoint_acknowledged = checkpoint_.acknowledge(client_, outcome, snapshot.player().playthrough_id(),
+            checkpoint_revision, snapshot.generation(), cancellation);
         // Acknowledgment belongs to copied values and the saved frontier, never merely to queue admission.
         if (outcome.status == RequestStatus::complete && !cancellation.is_cancelled() &&
             !terminal_.load(std::memory_order_acquire) &&
             snapshot.generation() == session_.generation() &&
             snapshot.player().inventory_observation() != "unavailable" &&
-            (!save_context_ || outcome.save_checkpoint_acknowledged)) {
+            (!checkpoint_.bound() || outcome.save_checkpoint_acknowledged)) {
             auto previous = acknowledged_inventory_frame_.load(std::memory_order_acquire);
             while (snapshot.frame() > previous && !acknowledged_inventory_frame_.compare_exchange_weak(
                 previous, snapshot.frame(), std::memory_order_release, std::memory_order_acquire)) {}
@@ -729,8 +693,7 @@ private:
     const std::atomic_bool& terminal_;
     const std::atomic_bool& runtime_paused_;
     const core::CancellationToken session_;
-    core::SaveContextStore* const save_context_;
-    const core::SaveContextStore::Binding save_binding_;
+    SaveCheckpoint checkpoint_;
     SelectTarget select_target_;
     HydrateSocial hydrate_social_;
     InvalidateResponse invalidate_response_;
@@ -739,7 +702,6 @@ private:
     std::atomic_bool initialization_failed_{};
     std::atomic_bool quest_event_ready_{};
     std::atomic_size_t world_context_tasks_{};
-    std::atomic_uint64_t history_checkpoint_serial_{},history_checkpoint_acknowledged_{},wait_checkpoint_notice_{};
     std::atomic_bool world_context_failure_reported_{};
     std::atomic_uint64_t acknowledged_inventory_frame_{};
     std::mutex world_context_mutex_;

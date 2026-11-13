@@ -1,8 +1,9 @@
 # Loopback dialogue driver (opt-in, test-only)
 
-`loopback_dialogue_driver.cpp` runs the real `SynthClient` and `SaveContextStore` over real HTTP
-against a disposable Synthserver that is already listening on `127.0.0.1`. CMake, xmake, ctest
-and hosted CI don't build it, and it is never packaged. The source comment describes what it does.
+`loopback_dialogue_driver.cpp` runs the real `SynthClient`, `SaveContextStore` and `SaveCheckpoint`
+and the shared speech receipt path over real HTTP against a disposable Synthserver that is already
+listening on `127.0.0.1`. CMake, xmake, ctest and hosted CI don't build it, and it is never
+packaged. The source comment describes what it does.
 
 The driver refuses any base URL other than `http://127.0.0.1:PORT`. Point it only at a disposable
 server, a throwaway database and a loopback fake provider, all inside an isolated network

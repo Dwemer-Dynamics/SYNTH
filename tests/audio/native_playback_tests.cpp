@@ -1,6 +1,7 @@
 // Compile with fake_windows before the SDK include path. No device, DLL, game or provider is used.
 #include "audio/native_playback.hpp"
 #include "client/fake_http.hpp"
+#include "client/save_checkpoint.hpp"
 #include "client/speech_delivery.hpp"
 #include "runtime/fake_fallout_runtime.hpp"
 #include <iostream>
@@ -469,8 +470,8 @@ int main() try {
         network.shutdown(tasks::ShutdownMode::cancel_pending);
     }
     {
-        // Production terminal hook -> outbox -> receipt drain -> SynthClient ACK parsing. Only the exact
-        // accepted spoken ACK of a completed-audio receipt reaches the heard hook; tracing follows the ACK.
+        // Production terminal hook -> outbox -> receipt drain -> SynthClient ACK parsing -> SaveCheckpoint. Only
+        // the exact accepted spoken ACK of a completed-audio receipt reaches the heard hook; tracing follows the ACK.
         runtime::FakeFalloutRuntime fallout{core::RuntimeVariant::flat};
         const auto current=fallout.capture_snapshot(core::SnapshotClock::now())->generation();
         ScriptedTransport wire;
@@ -482,9 +483,18 @@ int main() try {
         std::atomic_bool terminal{};
         core::CancellationSource session{current};
         auto trace=std::make_shared<diagnostics::ConversationTrace>();
+        core::SaveContextStore store;
+        CHECK(store.start_new_game([] { core::PlaythroughUuid bytes{}; bytes.fill(0x5a); return std::optional{bytes}; }).resolution==
+            core::IdentityResolution::new_game);
+        const auto playthrough=*store.playthrough_id();
+        client::SaveCheckpoint checkpoint{&store,*store.bind(playthrough,store.lifetime()),session.token(),terminal};
         std::vector<std::uint64_t> heard;
+        // The session's composition: every heard notification goes to its live checkpoint.
         client::SpeechDelivery speech{config::Config{},{synth,network,session.token(),terminal,trace,[](std::string){},
-            [&](std::uint64_t value,const core::CancellationToken& token) { if(!token.is_cancelled()) heard.push_back(value); }}};
+            [&](std::uint64_t value,const core::CancellationToken& token) {
+                if(!token.is_cancelled()) heard.push_back(value);
+                checkpoint.note_heard_receipt(value,token);
+            }}};
         unsigned ordinal{};
         const auto finish=[&](bool cancelled,unsigned callbacks=1) {
             protocol_native::Dialogue dialogue{protocol_native::Identity{"0x0001A4D7","Fallout4.esm","save-001","Preston"},"Line"};
@@ -520,9 +530,11 @@ int main() try {
         script({{"context_accepted",""}},"error"); CHECK(!synth.context_accepted(publish()));
         CHECK(wire.statuses.empty() && std::ranges::count(wire.types,"context")==5);
 
+        CHECK(!checkpoint.due());
         script({{"speech_receipt_accepted","spoken"}});
         finish(false,3); // Repeated terminal callbacks schedule exactly one receipt.
         CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==1 && heard==std::vector{current.value()});
+        CHECK(checkpoint.due() && checkpoint.revision()==1);
         script({{"receipt_conflict",""}},"error"); finish(false);
         CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && receipts()==2 && heard.size()==1);
         script({}); finish(false); // Complete transport, no receipt status.
@@ -537,14 +549,43 @@ int main() try {
         script({{"speech_receipt_accepted","spoken"}}); script({{"speech_receipt_accepted","spoken"}});
         finish(false); finish(false); // One drain, two accepted heard receipts.
         CHECK(drain(current.value())==std::vector(2,Stage::receipt_accepted) && receipts()==8 && heard.size()==3);
+        CHECK(checkpoint.revision()==3); // Rejected, interrupted and bare receipts never raised the frontier.
+
+        // ContextPublication's checkpoint step: only an exact context_accepted saves the cutoff, and it covers only
+        // the revision read before its publication.
+        const auto saved_player=protocol_native::Identity{"0x00000014","Fallout4.esm",playthrough,"Sole Survivor"};
+        const auto checkpoint_publish=[&](client::SaveCheckpoint& owner,std::uint64_t revision,
+                                           std::vector<protocol_native::Status> statuses,std::string end="complete") {
+            script(std::move(statuses),std::move(end));
+            const auto outcome=synth.publish_context(0,playthrough,saved_player,std::nullopt,{},{},std::nullopt,{},{},{});
+            return owner.acknowledge(synth,outcome,playthrough,revision,current,session.token());
+        };
+        const auto unsaved=store.for_save();
+        CHECK(!checkpoint_publish(checkpoint,checkpoint.revision(),{{"context_accepted",""}},"error") && checkpoint.due());
+        CHECK(!checkpoint_publish(checkpoint,checkpoint.revision(),{}) && checkpoint.due()); // Bare completion.
+        CHECK(store.for_save()==unsaved); // A failed publication saves nothing and the frontier stays due.
+        auto revision=checkpoint.revision();
+        script({{"speech_receipt_accepted","spoken"}}); finish(false); // Heard while the publication is in flight.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && heard.size()==4 && checkpoint.revision()==revision+1);
+        CHECK(checkpoint_publish(checkpoint,revision,{{"context_accepted",""}}) && checkpoint.due()); // Earlier revision.
+        CHECK(checkpoint_publish(checkpoint,checkpoint.revision(),{{"context_accepted",""}}) && !checkpoint.due()); // Covering.
+
+        // A replacement binding revokes this writer: its later heard receipt and ACK leave the new binding untouched.
+        const auto before_replacement=store.for_save();
+        client::SaveCheckpoint replacement{&store,*store.bind(playthrough,store.lifetime()),session.token(),terminal};
+        revision=checkpoint.revision();
+        script({{"speech_receipt_accepted","spoken"}}); finish(false);
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && heard.size()==5);
+        CHECK(checkpoint.revision()==revision && !checkpoint.due() && replacement.revision()==0 && !replacement.due());
+        CHECK(!checkpoint_publish(checkpoint,revision,{{"context_accepted",""}}) && store.for_save()==before_replacement);
         script({}); // The old trace treated this transport-complete, status-less reply as accepted.
         const auto unacknowledged=synth.send_speech_receipt({"request","request:dialogue:1",protocol_native::Identity{"0x0001A4D7",
             "Fallout4.esm","save-001","Preston"},protocol_native::SpeechReceiptOutcome::audio_completed},{current.value(),1,{},"turn:receipts"});
-        CHECK(unacknowledged.status==client::RequestStatus::complete && !client::SpeechDelivery::accepted_receipt_state(unacknowledged));
+        CHECK(unacknowledged.status==client::RequestStatus::complete && !client::accepted_receipt_state(unacknowledged));
         finish(false);
-        CHECK(drain(current.value()+1).empty() && receipts()==9); // A replaced generation drops its receipt unsent.
+        CHECK(drain(current.value()+1).empty() && receipts()==11); // A replaced generation drops its receipt unsent.
         session.cancel(); finish(false);
-        CHECK(drain(current.value()).empty() && receipts()==9 && heard.size()==3); // Retired session sends nothing.
+        CHECK(drain(current.value()).empty() && receipts()==11 && heard.size()==5); // Retired session sends nothing.
 
         network.shutdown(tasks::ShutdownMode::cancel_pending);
     }
