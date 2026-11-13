@@ -359,7 +359,10 @@ struct Writer final {
         // Streaming proof: the line callback ran for the parsed lines before send_text returned.
         CHECK(result.streamed_callbacks == result.reply.lines.size() && result.streamed_callbacks >= 3);
         CHECK(result.line.request_id == result.reply.request_id && result.line.context_sequence == result.context.context_binding.sequence);
-        CHECK(speaker && speaker->form_id == target_form_id && speaker->playthrough_id == playthrough);
+        // A marked conversation is owned by the native turn, never a legacy line, and spoken by the exact target.
+        CHECK(said.native_turn);
+        CHECK(speaker && speaker->form_id == target_form_id && speaker->origin_plugin == "Fallout4.esm"
+            && speaker->playthrough_id == playthrough);
         return result;
     }
 
