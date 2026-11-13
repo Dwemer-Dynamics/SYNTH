@@ -288,9 +288,15 @@ void pump_runtime_impl() {
             session->submit_rechat_capture(std::move(snapshot),*target);
         }
         const auto playback_frame = session->playback_frame();
-        // Advance the shared fallback reading window; VR retains its existing notification display.
-        (void)session->subtitle_frame(runtime->generation().value(), playback_frame,
-                                      runtime_paused || menu_mode, now);
+        // The shared frame keeps FIFO, pause and scene admission; each validated caption is posted once.
+        const auto caption = session->subtitle_frame(runtime->generation().value(), playback_frame,
+                                                     runtime_paused || menu_mode, now);
+        if (configuration.behavior.show_subtitles) {
+            (void)synth::presentation::present_caption_once(caption, runtime->generation().value(),
+                                                            [](const auto& line) {
+                present_notification(line.speaker + ": " + line.text);
+            });
+        }
         if (const auto result = speech_facing.pump(playback_frame ? playback_frame->facing : nullptr, *runtime)) {
             const auto& facing = *playback_frame->facing;
             spdlog::info("SYNTHVR facing: request={} utterance={} speaker={:08X} listener={:08X}: {}",

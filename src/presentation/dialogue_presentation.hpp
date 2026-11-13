@@ -42,6 +42,10 @@ struct DialogueCaption final {
     // It runs inside playback/presentation teardown and must only enqueue a bounded copy.
     std::function<void(DialogueDelivery terminal, bool cancelled)> on_terminal;
     std::shared_ptr<std::atomic_bool> terminal_reported{std::make_shared<std::atomic_bool>(false)};
+    // Presentation only, written by the game-thread present_caption_once: the caption has reached a
+    // sink that cannot retract it. Shared like delivery so requeued or copied values keep it; it is
+    // independent of delivery and receipts and never means delivered or heard.
+    std::shared_ptr<std::atomic_bool> posted{std::make_shared<std::atomic_bool>(false)};
 
     [[nodiscard]] bool scene_ready(core::SnapshotClock::time_point now) const noexcept {
         return !admission || admission->ready(now);
@@ -167,6 +171,50 @@ private:
     Caption active_;
     Clock::time_point expires_{};
     Clock::time_point last_frame_{};
+};
+
+// Game thread: hands the caption chosen by DialogueCaptions::frame to a sink that cannot retract its
+// output (the VR HUD message) at most once per caption lifetime. frame() keeps FIFO, pause and scene
+// admission; ownership is re-checked here, at display, so a cancelled, replaced, rejected or stale
+// caption never reaches the sink. The posted mark lives on the caption itself, so a failed spoken
+// line requeued as text, or a text caption resumed after any number of spoken ones, is not reposted
+// and no owner history is kept. Delivery state is untouched: text completion stays with the reading
+// window and heard receipts with playback. Once posted, a message cannot be withdrawn.
+template <class Sink>
+bool present_caption_once(const DialogueCaptions::Caption& caption, std::uint64_t generation, Sink&& sink) {
+    if (!caption || caption->generation != generation || caption->text.empty() ||
+        caption->cancellation.is_cancelled() || caption->scene_rejected() ||
+        caption->posted->exchange(true, std::memory_order_acq_rel)) return false;
+    sink(*caption);
+    return true;
+}
+
+// Bounded system-notification queue: any thread pushes copied text and the game-thread pump drains
+// it. Dialogue never enters it, so cancelling a turn cannot leave its text stranded here.
+class NotificationQueue final {
+public:
+    static constexpr std::size_t capacity = 16;
+
+    void push(std::string message) {
+        if (message.empty()) return;
+        std::scoped_lock lock{mutex_};
+        if (pending_.size() == capacity) pending_.pop_front();
+        pending_.push_back(std::move(message));
+    }
+
+    template <class Present>
+    void drain(Present&& present) {
+        std::deque<std::string> drained;
+        {
+            std::scoped_lock lock{mutex_};
+            drained.swap(pending_);
+        }
+        for (const auto& message : drained) present(message);
+    }
+
+private:
+    std::mutex mutex_;
+    std::deque<std::string> pending_;
 };
 
 struct Subtitle final {
