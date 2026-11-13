@@ -2,7 +2,7 @@
 
 ## NPC biography and SPECIAL candidate
 
-Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server NPC-BIOGRAPHY-REPAIR guide and protocol/v2/README.md.
+Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).
 
 ## Installed gift screen and shared wording
 
