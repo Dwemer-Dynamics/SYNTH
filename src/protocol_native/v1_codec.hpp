@@ -547,6 +547,9 @@ inline json::Value actor_state_value(const ActorState& value) {
         })}},
     });
     if (value.actor_stats) {
+        if (std::ranges::none_of(*value.actor_stats,[](const auto& pair){return pair.has_value();})) {
+            result.emplace_back("actor_stats",object({{"observation","unavailable"}}));
+        } else {
         constexpr std::array names{"strength","perception","endurance","charisma","intelligence","agility","luck"};
         json::Value::Object special;
         for (std::size_t index=0;index<names.size();++index) {
@@ -555,6 +558,7 @@ inline json::Value actor_state_value(const ActorState& value) {
             special.emplace_back(names[index],pair ? json::Value{object({{"base",pair->base},{"current",pair->current}})} : json::Value{});
         }
         result.emplace_back("actor_stats",object({{"observation","base_current"},{"special",std::move(special)}}));
+        }
     }
     if (value.combat_target) result.emplace_back("combat_target", combat_target_value(*value.combat_target, value));
     if (value.combat_contacts) {

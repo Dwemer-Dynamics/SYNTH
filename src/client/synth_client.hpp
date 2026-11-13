@@ -317,7 +317,8 @@ public:
                 std::holds_alternative<protocol_native::Start>(outcome.lines.front().payload) &&
                 std::holds_alternative<protocol_native::End>(outcome.lines.back().payload);
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
-            actor_stats_negotiated_.store(framed_init && status->code=="init_accepted" && status->actor_stats &&
+            actor_stats_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->actor_stats &&
                 std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),

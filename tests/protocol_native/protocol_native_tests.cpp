@@ -25,6 +25,9 @@ void actor_stats_tests() {
     const auto& special=protocol_native::required(protocol_native::required(wire,"actor_stats"),"special");
     if (json::write(protocol_native::required(special,"strength"))!="{\"base\":0,\"current\":1.5}" ||
         !protocol_native::required(special,"luck").is_null()) throw std::runtime_error{"zero/fraction/unknown lost"};
+    state.actor_stats=core::ActorStats{};
+    if (json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_stats"))!=
+        "{\"observation\":\"unavailable\"}") throw std::runtime_error{"unread stats claimed an observation"};
     bool refused=false;
     try { (void)actor.with_details_from(core::ActorSnapshot{0x2F20,"Piper",{},"Fallout4.esm","stats-save"}.with_actor_stats(values)); }
     catch (const std::invalid_argument&) { refused=true; }

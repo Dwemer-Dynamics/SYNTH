@@ -1,5 +1,9 @@
 # SYNTH protocol v1
 
+## Actor SPECIAL observations
+
+The optional v2 `context.actor_stats` capability adds seven exact-actor SPECIAL base/current pairs or unknown entries to the bound session snapshot. Clients require the explicit `actor_stats: true` init acknowledgement, including specialized `init_*_accepted` status codes. Wholly unread observations are `unavailable`. Values are never profile fields or generic history. See `protocol/v2/README.md` for the mirrored shape and bounds.
+
 ## Installed generic gift menu
 
 The shared wording check is installed for every NPC. Named offers such as

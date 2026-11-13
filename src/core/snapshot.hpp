@@ -458,9 +458,13 @@ public:
     [[nodiscard]] bool action_points_percent_available() const noexcept { return action_points_percent_available_; }
     [[nodiscard]] const ActorStats& actor_stats() const noexcept { return actor_stats_; }
     // Attach only copied, bounded engine reads; the enclosing snapshot owns their identity and generation.
-    [[nodiscard]] ActorSnapshot with_actor_stats(ActorStats stats) const {
+    [[nodiscard]] ActorSnapshot with_actor_stats(ActorStats stats) const & {
         for (const auto& value:stats) if (value && !value->valid()) throw std::invalid_argument{"invalid actor stats"};
         auto result=*this;result.actor_stats_=std::move(stats);return result;
+    }
+    [[nodiscard]] ActorSnapshot with_actor_stats(ActorStats stats) && {
+        for (const auto& value:stats) if (value && !value->valid()) throw std::invalid_argument{"invalid actor stats"};
+        actor_stats_=std::move(stats);return std::move(*this);
     }
     [[nodiscard]] const std::vector<InventoryItemSnapshot>& inventory() const noexcept {
         return inventory_;

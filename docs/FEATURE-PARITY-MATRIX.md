@@ -1,5 +1,9 @@
 # SYNTH feature parity matrix
 
+## NPC biography candidate
+
+Short description, Background (including legacy expertise), Appearance, Personality, Occupation, Speech style and authored Goals remain distinct. Both lanes support optional actor-owned SPECIAL observations; flat and VR gameplay acceptance remain open. Save/history ownership is unchanged.
+
 ## Current testing candidate
 
 | Feature | Flat | VR |

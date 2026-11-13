@@ -39,6 +39,7 @@ public:
     bool player_caps_support{};
     bool player_item_support{};
     bool gift_menu_support{};
+    bool actor_stats_support{};
     bool rechat_scene_support{};
     bool combat_targets_support{};
     std::optional<synth::json::Value> combat_contacts_ack;
@@ -85,6 +86,7 @@ public:
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
+            if (actor_stats_support) payload.emplace_back("actor_stats",true);
             if(social_support)payload.emplace_back("social_tasks",true);
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
             if (combat_targets_support) payload.emplace_back("combat_targets",true);
@@ -167,6 +169,22 @@ public:
 }
 
 int main() {
+    // Full flat clients receive a specialized accepted code, not the minimal loopback's init_accepted.
+    for (int mode=0;mode<4;++mode) {
+        BindingEchoTransport wire;wire.gift_menu_support=true;wire.actor_stats_support=mode!=1;
+        synth::client::SessionOptions options{.runtime_session_id="stats:full-flat",.runtime_variant="flat",
+            .client_version="test",.runtime_version="1.11.240",
+            .capabilities={"context.actor_stats","action.gift_menu_inventory","action.open_inventory",
+                "action.inventory_observation","dialogue.turn_ownership"},.protocol_version=2};
+        if (mode==2) options.capabilities.erase(options.capabilities.begin());
+        if (mode==3) wire.fault=BindingEchoTransport::Fault::truncated;
+        synth::client::SynthClient candidate{wire,options};
+        (void)candidate.initialize(1,false);
+        CHECK(candidate.actor_stats_ready()==(mode==0));
+        wire.actor_stats_support=false;wire.fault=BindingEchoTransport::Fault::none;
+        (void)candidate.initialize(2,false);
+        CHECK(!candidate.actor_stats_ready());
+    }
     {
         using namespace synth;
         const auto now = client::RechatPrefetch::Clock::now();

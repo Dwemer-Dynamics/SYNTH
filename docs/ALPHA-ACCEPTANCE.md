@@ -1,5 +1,11 @@
 # SYNTH open-alpha acceptance
 
+## NPC biography and actor stats
+
+- [ ] Flat in game: compare all seven SPECIAL base/current values with the next provider request, including an older-save load.
+- [ ] VR in headset: independently verify the same capture and prompt behavior.
+- [ ] Existing installation: review the biography repair dry run and back up the database before an explicitly authorized apply.
+
 ## Stage 1 native typed turn
 
 - [x] Build, package and audit both DLLs with the paired server candidate: met locally by the

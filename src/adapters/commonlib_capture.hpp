@@ -1388,7 +1388,7 @@ struct NearbyReferenceSnapshots final {
             if (pair.valid()) stats[index]=pair;
         }
     }
-    return captured.with_actor_stats(std::move(stats));
+    return std::move(captured).with_actor_stats(std::move(stats));
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.
