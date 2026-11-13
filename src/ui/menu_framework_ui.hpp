@@ -825,9 +825,15 @@ inline void __stdcall render_chatbox() {
                             ImGuiMCP::ImGuiWindowFlags_NoCollapse)) {
         ImGuiMCP::SetWindowFontScale(1.25f * scale);
         ImGuiMCP::PushTextWrapPos(0.0f);
+        // An untargeted draft follows the current chat mode; never promise an NPC it lacks.
+        const char* target_instruction = "Choose a nearby NPC to message.";
+        if (!chatbox_draft->target) {
+            target_instruction = "No NPC is selected; this message uses the current chat mode.";
+        } else if (chatbox_draft->targets.empty()) {
+            target_instruction = "Message the NPC shown below.";
+        }
         ImGuiMCP::TextDisabled(
-            "Choose a nearby NPC to message. Enter sends, Ctrl+Enter starts a new line, "
-            "Escape closes.");
+            "%s Enter sends, Ctrl+Enter starts a new line, Escape closes.", target_instruction);
         if (chatbox_draft->target) {
             if(chatbox_draft->targets.empty())ImGuiMCP::TextWrapped("To: %s",chatbox_draft->target->display_name.c_str());
             else if(ImGuiMCP::BeginCombo("To:##SYNTH.Chatbox.Target",chatbox_draft->target->display_name.c_str())) {
