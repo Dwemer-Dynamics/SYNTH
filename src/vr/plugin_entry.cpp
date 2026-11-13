@@ -225,6 +225,8 @@ void adopt_session_result(synth::core::SnapshotClock::time_point now) {
         rearm_initialize_control();
         present_notification("SYNTHVR initialization requested");
     }
+    if (session->configuration().behavior.companion_combat_comments)
+        spdlog::info("SYNTHVR companion combat comments are flat-only; the opt-in is ignored on VR");
     (void)session->request_control();
     prime_write_diary_edge();
 }

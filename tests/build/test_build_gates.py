@@ -777,9 +777,9 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         worker = triggers.split("bool queue_context_trigger(", 1)[1].split("private:", 1)[0]
         self.assertIn("snapshot->captured_at() > std::chrono::seconds{2}", worker)
         self.assertIn('kind=="player_reaction"', worker)
-        self.assertIn("line_(line, snapshot, cancellation, !one_shot, combat_bark)", worker)
+        self.assertIn("line_(line, snapshot, cancellation, !one_shot, combat_bark, start_by)", worker)
         self.assertLess(worker.index("observations_.enrich_selected_actor(snapshot, actor)"), worker.index("network_.try_submit("))
-        self.assertIn("handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark)", session)
+        self.assertIn("handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark, companion_start_by)", session)
         for moved in ("activation_mutex_", "last_automatic_actor_", "automatic_activation_cadence_", "active_quest_actors_",
                       "activity_mutex_", "last_activity_at_", "last_combat_bark_at_", "bool queue_context_trigger(",
                       "select_observation_reactor(const", "client_.activate("):
@@ -795,6 +795,13 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         entry = read("src/flat/plugin_entry.cpp")
         self.assertLess(entry.index("const auto player_history ="), entry.index("const auto player_reaction ="))
         self.assertLess(entry.index("const auto player_reaction ="), entry.index("const auto quest_reaction ="))
+        # The opt-in companion remark follows combat barks, precedes generic reactions and cancels only its child source.
+        self.assertLess(entry.index("const auto combat_bark ="), entry.index("const auto companion_comment ="))
+        self.assertLess(entry.index("const auto companion_comment ="), entry.index("const auto player_reaction ="))
+        owned = session.split("void cancel_companion_remark(", 1)[1].split("\n    }\n", 1)[0]
+        for forbidden in ("replace_turn", "stop_dialogue", "begin_player_turn", "cancel_turn_if_owner"):
+            self.assertNotIn(forbidden, owned)
+        self.assertNotIn("maybe_trigger_companion_comment", read("src/vr/plugin_entry.cpp"))
 
     def test_combat_interrupts_a_turn_without_retiring_the_runtime_session(self) -> None:
         session = read("src/client/plugin_session.hpp")

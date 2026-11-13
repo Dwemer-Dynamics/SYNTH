@@ -28,6 +28,7 @@ public:
     bool quest_reaction_support{};
     bool player_support{};
     bool player_reaction_support{};
+    bool companion_support{};
     bool actor_support{};
     bool social_support{};
     bool location_ancestry_support{};
@@ -94,6 +95,7 @@ public:
             if (enemy_awareness_ack) payload.emplace_back("enemy_awareness",*enemy_awareness_ack);
             if (ambient_npc_ack) payload.emplace_back("ambient_npc",*ambient_npc_ack);
             else if (ambient_npc_support) payload.emplace_back("ambient_npc",true);
+            if (companion_support) payload.emplace_back("companion_combat_comments",true);
             body += line("status", json::Value{std::move(payload)});
         }
         if (protocol_native::text(event, "type") == "input_text") {
@@ -1353,6 +1355,63 @@ int main() {
             player_transport.fault=BindingEchoTransport::Fault::truncated;
             CHECK(player_client.initialize(2,false).status==RequestStatus::malformed_response);
             CHECK(!player_client.player_events_ready());
+        }
+        // Companion remarks need the server flag, both reaction capabilities and the opt-in capability.
+        // Participant evidence is sent only after that ACK; re-init clears it.
+        for (int mode=0; mode<4; ++mode) {
+            BindingEchoTransport companion_transport;companion_transport.player_support=true;
+            companion_transport.player_reaction_support=true;companion_transport.companion_support=mode!=1;
+            SessionOptions options{.runtime_session_id="session:companion",.runtime_variant=mode==3?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities={"context.player_events","dialogue.player_reactions",
+                    "dialogue.companion_combat_comments"},.protocol_version=2};
+            if (mode==2) options.capabilities.pop_back();
+            SynthClient companion_client{companion_transport,options};
+            CHECK(companion_client.initialize(1,false).status==RequestStatus::complete);
+            CHECK(companion_client.companion_comments_ready()==(mode==0));
+            const synth::protocol_native::Identity owner{"0x00000014","Fallout4.esm","save:one","Player"};
+            const synth::protocol_native::Identity companion{"0x0001A4D7","Fallout4.esm","save:one","Preston"};
+            const auto attempt=[&](const ContextBinding& binding) {
+                return companion_client.trigger("companion_combat_comment",companion,{},std::nullopt,std::nullopt,binding,
+                    std::nullopt,std::nullopt,7);
+            };
+            if (mode==3) {
+                bool refused=false;try{(void)attempt({});}catch(const std::invalid_argument&){refused=true;}
+                CHECK(refused && !companion_client.player_reactions_ready());continue;
+            }
+            const auto now=synth::core::SnapshotClock::now();
+            synth::core::PlayerEventSample before{synth::core::RuntimeGeneration::initial(),synth::core::RuntimeVariant::flat,
+                0x14,"Fallout4.esm","save:one",now,100,10,true};
+            auto after=before;after.observed_at+=std::chrono::seconds{1};after.game_time_ticks=101;after.in_combat=false;
+            synth::protocol_native::NativePlayerEvent ended{{7,synth::core::PlayerEventKind::combat_end,before,after,
+                {{0x1A4D7,"Fallout4.esm","save:one",100,now}}},200};
+            const auto publish=[&] {
+                return companion_client.publish_context(0,"save:one",owner,companion,{companion},{},std::nullopt,
+                    {},{},{},{},{},std::nullopt,{},{},{},{},std::nullopt,ended);
+            };
+            const auto published=publish();
+            CHECK(published.status==RequestStatus::complete);
+            const auto evidence=synth::protocol_native::required(synth::protocol_native::required(
+                synth::json::parse(companion_transport.requests.back().body),"payload"),"player_event");
+            CHECK(static_cast<bool>(evidence.find("participants"))==(mode==0));
+            if (mode!=0) {
+                bool refused=false;try{(void)attempt(published.context_binding);}catch(const std::invalid_argument&){refused=true;}
+                CHECK(refused);continue;
+            }
+            const auto& participant=synth::protocol_native::required(evidence,"participants").as_array().at(0);
+            CHECK(synth::protocol_native::text(participant,"form_id")=="0x0001A4D7" &&
+                  synth::protocol_native::integer(participant,"observed_game_time_ticks")==100);
+            CHECK(attempt(published.context_binding).status==RequestStatus::complete);
+            const auto payload=synth::protocol_native::required(synth::json::parse(companion_transport.requests.back().body),"payload");
+            CHECK(payload.as_object().size()==3 && synth::protocol_native::text(payload,"kind")=="companion_combat_comment" &&
+                  synth::protocol_native::text(payload,"event_id")=="player:7");
+            for (auto invalid : {std::uint32_t{0},std::uint32_t{0x14}}) { // Unknown or player identity is never evidence.
+                ended.transition.participants[0].form_id=invalid;
+                bool refused=false;try{(void)publish();}catch(const std::invalid_argument&){refused=true;}CHECK(refused);
+            }
+            ended.transition.participants[0].form_id=0x1A4D7;ended.transition.participants[0].game_time_ticks=102;
+            bool late=false;try{(void)publish();}catch(const std::invalid_argument&){late=true;}CHECK(late); // After the end.
+            companion_transport.fault=BindingEchoTransport::Fault::truncated;
+            CHECK(companion_client.initialize(2,false).status==RequestStatus::malformed_response && !companion_client.companion_comments_ready());
         }
         for(int mode=0;mode<4;++mode) {
             // Ancestry reaches only a flat server that acknowledged it; others keep the runtime location_ref.

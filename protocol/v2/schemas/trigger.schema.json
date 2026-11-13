@@ -22,7 +22,8 @@
         "external_reaction",
         "external_tts",
         "quest_updated",
-        "player_reaction"
+        "player_reaction",
+        "companion_combat_comment"
       ]
     },
     "actor": {
@@ -60,7 +61,7 @@
       "then": {"required": ["reply_to_request_id", "reply_to_line_id"], "properties": {"kind": {"const": "rechat"}}}
     },
     {
-      "if": {"properties": {"kind": {"const": "player_reaction"}}},
+      "if": {"properties": {"kind": {"enum": ["player_reaction", "companion_combat_comment"]}}},
       "then": {"required": ["event_id"], "not": {"required": ["game_time_ticks"]}},
       "else": {"not": {"required": ["event_id"]}}
     },
@@ -132,7 +133,8 @@
               "rechat",
               "external_comment",
               "quest_updated",
-              "player_reaction"
+              "player_reaction",
+              "companion_combat_comment"
             ]
           }
         }

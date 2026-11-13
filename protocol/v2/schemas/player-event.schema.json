@@ -11,9 +11,22 @@
     "before": {"$ref": "#/$defs/state"},
     "after": {"$ref": "#/$defs/state"},
     "interval_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
-    "age_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+    "age_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "participants": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/participant"}}
   },
   "$defs": {
+    "participant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["form_id", "origin_plugin", "playthrough_id", "observed_game_time_ticks", "in_combat", "teammate"],
+      "properties": {
+        "form_id": {"type": "string", "pattern": "^0x[0-9A-F]{8}$"},
+        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 260},
+        "playthrough_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "observed_game_time_ticks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "in_combat": {"const": true},
+        "teammate": {"const": true}
+      }
+    },
     "state": {
       "type": "object", "additionalProperties": false,
       "required": ["game_time_ticks", "level", "in_combat"],
@@ -25,6 +38,9 @@
     }
   },
   "allOf": [{
+    "if": {"required": ["participants"]},
+    "then": {"properties": {"kind": {"const": "combat_end"}}}
+  }, {
     "if": {"properties": {"kind": {"const": "combat_end"}}},
     "then": {"properties": {
       "before": {"properties": {"in_combat": {"const": true}}},

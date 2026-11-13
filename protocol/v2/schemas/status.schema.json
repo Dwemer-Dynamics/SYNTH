@@ -37,6 +37,9 @@
     "native_turn": {
       "type": "boolean"
     },
+    "companion_combat_comments": {
+      "type": "boolean"
+    },
     "location_ancestry": {
       "type": "boolean"
     }

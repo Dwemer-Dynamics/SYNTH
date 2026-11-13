@@ -119,6 +119,7 @@ void test_shipped_defaults_and_override_precedence() {
     CHECK(shipped.audio.distance_scale == 2.0);
     CHECK(shipped.audio.pre_clip_ms == 100);
     CHECK(shipped.tools.initialize_requested == false);
+    CHECK(!shipped.behavior.companion_combat_comments && !Config{}.behavior.companion_combat_comments);
 
     const auto config = load(root / "config/SYNTH.ini", custom);
     CHECK(config.hotkeys.pip_vision == 43);
@@ -168,7 +169,7 @@ void test_settings_catalog_matches_configuration() {
             }
         }
     }
-    CHECK(interactive == 45);
+    CHECK(interactive == 46);
 
     // Every framework hotkey identifier must resolve to a catalog keybind row,
     // otherwise the reconcile pass would drop a rebind on the floor.

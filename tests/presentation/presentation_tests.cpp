@@ -17,7 +17,7 @@ static void test_scene_admission_movement(const synth::adapters::AdapterDescript
     using namespace synth;
     using Stage = diagnostics::ConversationStage;
     const core::WorldPose pose{{},core::UnitVector3::from({0,1,0}),core::UnitVector3::from({0,0,1})};
-    bool interior = false, present = true, alive = true, disabled = false, in_combat = false;
+    bool interior = false, present = true, alive = true, disabled = false, in_combat = false, teammate = false, player_combat = false;
     std::uint32_t cell = 0x200, worldspace = 0x3C, base = 0x179FF;
     std::string cell_plugin = "Fallout4.esm", worldspace_plugin = "Fallout4.esm";
     std::string actor_plugin = "Fallout4.esm", player_save = "save:a", posture = "normal";
@@ -25,12 +25,12 @@ static void test_scene_admission_movement(const synth::adapters::AdapterDescript
     adapters::detail::RuntimeBase runtime{descriptor,[&](auto,auto) {
         std::vector<core::ActorSnapshot> actors;
         if (present) actors.emplace_back(0x101,"Codsworth",position,actor_plugin,"save:a",alive,disabled,
-            in_combat,false,false,std::int16_t{1},"RobotRace","male","RobotMrHandy",false,100.0,100.0,
+            in_combat,false,false,std::int16_t{1},"RobotRace","male","RobotMrHandy",teammate,100.0,100.0,
             std::vector<core::InventoryItemSnapshot>{},std::nullopt,std::vector<core::FactionMembershipSnapshot>{},
             "unavailable","alive",posture,false,150.0,false,false,false,std::nullopt,base,"Fallout4.esm");
         const auto vr = descriptor.variant == core::RuntimeVariant::vr;
         return adapters::detail::CapturedRuntimeValues{pose,vr?std::optional{pose}:std::nullopt,{}, {},
-            core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm",player_save},std::move(actors),100,
+            core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm",player_save,true,false,player_combat},std::move(actors),100,
             core::WorldState{"Commonwealth","Outdoors","Commonwealth","",interior,100,
                 core::SceneIdentity{cell,worldspace,cell_plugin,worldspace_plugin}}};
     },[](auto){},[](auto){return runtime::RuntimeActionResult{};}};
@@ -54,6 +54,23 @@ static void test_scene_admission_movement(const synth::adapters::AdapterDescript
     CHECK(!replacement.cancel_if_owner(owner.token()));
     CHECK(!replacement.is_cancelled()); // A late bark cannot cancel a replacement player turn.
     admission.combat_speaker_form_id = 0; CHECK(!reason()); // Ordinary speech can continue after combat.
+    // An owned companion remark needs its speaker still following, everyone calm, and a start inside its budget.
+    admission.companion_speaker_form_id = speaker.form_id();
+    CHECK(reason() == Stage::presentation_actor_unavailable); // Dismissed or departed: teammate bit gone.
+    teammate = true; CHECK(!reason());
+    in_combat = true; CHECK(reason() == Stage::presentation_actor_unavailable); in_combat = false;
+    player_combat = true; CHECK(reason() == Stage::presentation_actor_unavailable); player_combat = false;
+    admission.start_by = core::SnapshotClock::now() - std::chrono::milliseconds{1};
+    CHECK(reason() == Stage::presentation_actor_unavailable); // Delayed provider output: no late start or text fallback.
+    admission.accept(core::SnapshotClock::now()); CHECK(reason() == Stage::presentation_actor_unavailable);
+    admission.started = true; CHECK(!reason()); // Actual presentation, not early validation, owns the start marker.
+    admission.verified_until = 0; admission.start_by.reset(); admission.companion_speaker_form_id = 0;
+    // The remark is a child of the turn: its own cancellation spares the turn; player input or load cancels both.
+    core::CancellationSource turn{scene->generation()};
+    core::CancellationSource remark{turn.token()};
+    remark.cancel(); CHECK(remark.is_cancelled() && !turn.is_cancelled());
+    core::CancellationSource next_remark{turn.token()};
+    turn.cancel(); CHECK(next_remark.is_cancelled());
     cell = 0x201; position = {300,0,0}; CHECK(!reason());
     cell_plugin = "Settlement.esp"; CHECK(!reason()); // One verified exterior worldspace spans cells/plugins.
     worldspace = 0x3D; CHECK(reason() == Stage::presentation_scene_changed); worldspace = 0x3C;
