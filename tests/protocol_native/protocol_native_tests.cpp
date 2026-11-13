@@ -183,7 +183,7 @@ void enemy_awareness_tests() {
         if(bad==10)item.hostile=false;
         if(bad==11)item.line_of_sight="unknown";
         if(bad==12)observed.enemy_awareness->current.push_back(item);
-        if(bad==13)observed.enemy_awareness->current.assign(9,item);
+        if(bad==13)observed.enemy_awareness->current.assign(9,protocol_native::VisibleEnemyState{item});
         if(bad==14)observed.enemy_awareness->recent.push_back({item.actor,item.race,"seen_hostile",0});
         if(bad==15) { observed.enemy_awareness->recent.push_back({item.actor,item.race,"killed",0});observed.enemy_awareness->current.clear(); }
         if(bad==16) { observed.enemy_awareness->recent.push_back({item.actor,item.race,"seen_dead",30001});observed.enemy_awareness->current.clear(); }
@@ -413,7 +413,7 @@ int main(int argc,char** argv){
       if(bad==13) contact.in_combat=false;
       if(bad==14) contact.line_of_sight="unknown";
       if(bad==15) observed.combat_contacts->push_back(contact);
-      if(bad==16) observed.combat_contacts->assign(9,contact);
+      if(bad==16) observed.combat_contacts->assign(9,synth::protocol_native::CombatContactState{contact});
       if(bad==17) contact.actor.form_id="0x00000000";
       if(bad==18) { observed.combat_contacts->clear();observed.alive=false; }
       if(bad==19) { observed.combat_contacts->clear();observed.actor=player; }

@@ -1547,7 +1547,7 @@ int main() {
                 .client_version="test",.runtime_version="1.11.240",
                 .capabilities={"action.consume_inventory","action.consume","action.inventory_observation","dialogue.turn_ownership",
                     "context.inventory_512","context.actor_events","context.quest_events"},.protocol_version=2};
-            if(mode>=3 && mode<=6) options.capabilities.erase(options.capabilities.begin()+mode-3);
+            if(mode>=3 && mode<=6) options.capabilities.erase(options.capabilities.begin()+(mode-3));
             if(mode==8) options.protocol_version=1;
             if(mode==9) wire.fault=BindingEchoTransport::Fault::truncated;
             if(mode==10) wire.fault=BindingEchoTransport::Fault::sequence;
@@ -1585,7 +1585,7 @@ int main() {
                 .client_version="test",.runtime_version="1.11.240",
                 .capabilities={"action.transfer_inventory","action.give_item_to","action.inventory_observation","dialogue.turn_ownership",
                     "context.inventory_512","context.actor_events","context.quest_events"},.protocol_version=2};
-            if(mode>=3 && mode<=6) options.capabilities.erase(options.capabilities.begin()+mode-3);
+            if(mode>=3 && mode<=6) options.capabilities.erase(options.capabilities.begin()+(mode-3));
             if(mode==8) options.protocol_version=1;
             if(mode==9) wire.fault=BindingEchoTransport::Fault::truncated;
             if(mode==10) wire.fault=BindingEchoTransport::Fault::sequence;
@@ -1646,7 +1646,7 @@ int main() {
                 .client_version="test",.runtime_version="1.11.240",
                 .capabilities={"action.caps_inventory","action.give_caps_to","action.transfer_inventory","action.give_item_to",
                     "action.inventory_observation","dialogue.turn_ownership"},.protocol_version=mode==12?1ULL:2ULL};
-            if(mode>=5 && mode<=10) options.capabilities.erase(options.capabilities.begin()+mode-5);
+            if(mode>=5 && mode<=10) options.capabilities.erase(options.capabilities.begin()+(mode-5));
             if(mode>=13 && mode<=19) wire.fault=std::array{BindingEchoTransport::Fault::truncated,BindingEchoTransport::Fault::sequence,
                 BindingEchoTransport::Fault::timeout,BindingEchoTransport::Fault::failed,BindingEchoTransport::Fault::http_error,
                 BindingEchoTransport::Fault::version,BindingEchoTransport::Fault::duplicate_id}[mode-13];
@@ -1693,7 +1693,7 @@ int main() {
                 .capabilities={"action.player_caps_inventory","action.take_caps_from_player","action.caps_inventory","action.give_caps_to",
                     "action.transfer_inventory","action.give_item_to","action.inventory_observation","dialogue.turn_ownership"},
                 .protocol_version=mode==15?1ULL:2ULL};
-            if(mode>=6 && mode<=13) options.capabilities.erase(options.capabilities.begin()+mode-6);
+            if(mode>=6 && mode<=13) options.capabilities.erase(options.capabilities.begin()+(mode-6));
             if(mode>=16 && mode<=22) wire.fault=std::array{BindingEchoTransport::Fault::truncated,BindingEchoTransport::Fault::sequence,
                 BindingEchoTransport::Fault::timeout,BindingEchoTransport::Fault::failed,BindingEchoTransport::Fault::http_error,
                 BindingEchoTransport::Fault::version,BindingEchoTransport::Fault::duplicate_id}[mode-16];
