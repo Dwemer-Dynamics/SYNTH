@@ -46,8 +46,7 @@ public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
     using Notify = std::function<void(std::string)>;
     using TerminalHook = std::function<void(presentation::DialogueDelivery, bool)>;
-    // Network worker: one server-accepted spoken receipt for this generation, under the drain's token.
-    using HeardReceipt = std::function<void(std::uint64_t, const core::CancellationToken&)>;
+    using HeardReceipt = client::HeardReceipt;
 
     struct Dependencies final {
         SynthClient& client;
@@ -202,32 +201,7 @@ public:
 
     // Terminal caption hook for native v2 turns. Only completed native audio becomes audio_completed.
     [[nodiscard]] TerminalHook receipt_hook(const protocol_native::Line& line, const protocol_native::Dialogue& dialogue) {
-        const auto* speaker = std::get_if<protocol_native::Identity>(&dialogue.speaker);
-        if (!speaker || !dialogue.native_turn || !client_.native_turn_ready() ||
-            line.protocol_version != 2 || line.context_sequence == 0) return {};
-        return [outbox = std::weak_ptr<SpeechReceiptOutbox>{speech_receipts_},
-                pending = PendingSpeechReceipt{line.generation, line.context_sequence, line.turn_id,
-                    {line.request_id, line.line_id, *speaker, {}}}](
-                    presentation::DialogueDelivery terminal, bool cancelled) mutable {
-            const auto outcome = speech_receipt_outcome(terminal, cancelled);
-            const auto target = outbox.lock();
-            if (!outcome || !target) return;
-            pending.receipt.outcome = *outcome;
-            (void)target->push(std::move(pending));
-        };
-    }
-
-    // The server's only receipt acknowledgement: start, one speech_receipt_accepted status carrying the
-    // stored state, then a complete end. It also acknowledges interrupted and failed receipts, so this
-    // is not a heard signal. HTTP success alone, refusals (receipt_conflict, receipt_owner_mismatch,
-    // receipt_invalid) and extra or repeated lines return null.
-    [[nodiscard]] static const std::string* accepted_receipt_state(const RequestOutcome& outcome) {
-        if (outcome.status != RequestStatus::complete || outcome.lines.size() != 3) return nullptr;
-        const auto* status = std::get_if<protocol_native::Status>(&outcome.lines[1].payload);
-        const auto* end = std::get_if<protocol_native::End>(&outcome.lines[2].payload);
-        return std::holds_alternative<protocol_native::Start>(outcome.lines[0].payload) && status && end &&
-            status->code == "speech_receipt_accepted" && !status->detail.empty() && end->status == "complete"
-            ? &status->detail : nullptr;
+        return speech_receipt_hook(speech_receipts_, line, dialogue, client_.native_turn_ready());
     }
 
     // Text-only and failed speech go straight to captions; ready/pending speech joins the ordered lane.
@@ -278,17 +252,11 @@ private:
                 for (const auto& value : pending) {
                     if (stopped(cancellation) || value.generation != cancellation.generation().value()) break;
                     try {
-                        const auto outcome = client_.send_speech_receipt(value.receipt,
-                            {value.generation, value.context_sequence, {}, value.turn_id});
-                        const auto* state = accepted_receipt_state(outcome);
-                        trace_->record(state
+                        // Each terminal hook pushes once and receipts are never retried, so heard fires once per line.
+                        const auto exchange = exchange_speech_receipt(client_, value, cancellation, terminal_, heard_receipt_);
+                        trace_->record(exchange.accepted_state
                             ? diagnostics::ConversationStage::receipt_accepted : diagnostics::ConversationStage::receipt_rejected,
                             value.generation, value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
-                        // Heard history exists only after an accepted completed-audio receipt stored as spoken.
-                        // Each terminal hook pushes once and receipts are never retried, so this fires once per line.
-                        if (heard_receipt_ && !stopped(cancellation) && value.generation == cancellation.generation().value() &&
-                            value.receipt.outcome == protocol_native::SpeechReceiptOutcome::audio_completed &&
-                            state && *state == "spoken") heard_receipt_(value.generation, cancellation);
                     } catch (const std::exception&) {
                         trace_->record(diagnostics::ConversationStage::receipt_rejected, value.generation,
                             value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);

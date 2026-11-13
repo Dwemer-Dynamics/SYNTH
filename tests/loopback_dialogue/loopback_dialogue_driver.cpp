@@ -9,9 +9,11 @@
 // advances the save anchor; then two replacement sessions restored from the older and the newer serialized
 // co-save bytes, each publishing its loaded_context and making one /talk.
 //
-// ContextPublication and SpeechDelivery transitively need Windows headers (WinHTTP, XAudio2), so their few lines of
-// ACK/receipt glue are mirrored below and marked; everything else is the shipped code. The second receipt is an
-// explicit server idempotence probe: production sends each receipt once and never retries.
+// ContextPublication and SpeechDelivery transitively need Windows headers (WinHTTP, XAudio2), so the driver calls
+// the engine-free pieces they delegate to: speech_receipt_hook (terminal delivery -> outbox), exchange_speech_receipt
+// (receipt ACK parsing and the heard notification) and SaveCheckpoint (history frontier and exact context ACK
+// revision). The driver feeds no flat dialogue history, so the frontier it observes is raised by the heard receipt
+// alone. The second receipt is an explicit server idempotence probe without a heard hook: production never retries.
 //
 // Handshake (stdout/stdin, one line each): the driver prints "PHASE <name> <json>" and waits for "GO" so the harness
 // can register the actor, script the loopback provider and inspect the database between real client operations.
@@ -19,6 +21,7 @@
 //
 // Usage: loopback_dialogue_driver http://127.0.0.1:PORT   (any non-loopback address is refused)
 #include "client/http.hpp"
+#include "client/save_checkpoint.hpp"
 #include "client/speech_receipts.hpp"
 #include "client/synth_client.hpp"
 #include "core/save_context.hpp"
@@ -39,6 +42,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -261,38 +265,27 @@ const protocol_native::Status* only_status(const client::RequestOutcome& outcome
     return outcome.lines.size() == 3 ? std::get_if<protocol_native::Status>(&outcome.lines[1].payload) : nullptr;
 }
 
-// Mirror of SpeechDelivery::accepted_receipt_state (speech_delivery.hpp): start, one speech_receipt_accepted status
-// carrying the stored state, then a complete end.
-const std::string* accepted_receipt_state(const client::RequestOutcome& outcome) {
-    if (outcome.status != client::RequestStatus::complete || outcome.lines.size() != 3) return nullptr;
-    const auto* status = std::get_if<protocol_native::Status>(&outcome.lines[1].payload);
-    const auto* end = std::get_if<protocol_native::End>(&outcome.lines[2].payload);
-    return std::holds_alternative<protocol_native::Start>(outcome.lines[0].payload) && status && end &&
-        status->code == "speech_receipt_accepted" && !status->detail.empty() && end->status == "complete"
-        ? &status->detail : nullptr;
-}
-
 constexpr std::string_view player_form{"0x00000014"};
 constexpr std::string_view target_form{"0x0001A4D7"};
 
-// One runtime session: the shipped client plus the store binding a writer holds.
+// One runtime session: the shipped client plus the shipped SaveCheckpoint over the store binding a writer holds.
 struct Writer final {
     std::string session;
     core::RuntimeGeneration generation;
-    core::SaveContextStore& store;
-    core::SaveContextStore::Binding binding;
     std::string playthrough;
     client::SynthClient synth;
     core::CancellationSource owner{generation};
+    std::atomic_bool terminal{};
+    client::SaveCheckpoint checkpoint;
 
     Writer(client::IHttpTransport& transport, std::string id, std::uint64_t generation_value, core::SaveContextStore& save)
-        : session{id}, generation{core::RuntimeGeneration::from_value(generation_value)}, store{save},
-          binding{*save.bind(*save.playthrough_id(), save.lifetime())}, playthrough{*save.playthrough_id()},
+        : session{id}, generation{core::RuntimeGeneration::from_value(generation_value)}, playthrough{*save.playthrough_id()},
           synth{transport, client::SessionOptions{.runtime_session_id = std::move(id), .runtime_variant = "flat",
               .client_version = "loopback-driver", .runtime_version = "1.10.163",
               .capabilities = {"dialogue.text", "dialogue.native_turn", "dialogue.turn_ownership", "context.saved_anchor",
                                "context.actor_identity"},
-              .protocol_version = 2}} {
+              .protocol_version = 2}},
+          checkpoint{&save, *save.bind(playthrough, save.lifetime()), owner.token(), terminal} {
         const auto outcome = synth.initialize(generation.value(), false);
         const auto* status = only_status(outcome);
         evidence("init", {{"session", session}, {"generation", generation.value()}, {"status", text(status ? status->code : "")},
@@ -304,18 +297,17 @@ struct Writer final {
         return {std::string{form}, "Fallout4.esm", playthrough, std::move(name)};
     }
 
-    // Mirror of ContextPublication::publish's checkpoint step (context_publication.hpp): only an exact
-    // context_accepted ACK advances this writer's saved anchor in the shared store.
+    // ContextPublication::publish's checkpoint order: read the frontier revision, publish, then the shared
+    // SaveCheckpoint saves only an exact context_accepted ACK and covers that revision.
     client::RequestOutcome publish() {
         const auto target = actor(target_form, "Settler");
+        const auto revision = checkpoint.revision();
         auto outcome = synth.publish_context(0, playthrough, actor(player_form, "Sole Survivor"), target, {target}, {},
-            std::nullopt, {}, {}, {}, {}, owner.token(), binding.loaded_context);
-        CHECK(synth.context_accepted(outcome));
-        outcome.save_checkpoint_acknowledged = store.acknowledge(binding.epoch,
-            {playthrough, synth.runtime_session_id(), outcome.context_binding.generation, outcome.context_binding.sequence});
+            std::nullopt, {}, {}, {}, {}, owner.token(), checkpoint.binding().loaded_context);
+        outcome.save_checkpoint_acknowledged = checkpoint.acknowledge(synth, outcome, playthrough, revision, generation, owner.token());
         CHECK(outcome.save_checkpoint_acknowledged);
         evidence("context_ack", {{"session", session}, {"sequence", outcome.context_binding.sequence},
-            {"request_id", outcome.request_id}, {"loaded_context", anchor_value(binding.loaded_context)}});
+            {"request_id", outcome.request_id}, {"loaded_context", anchor_value(checkpoint.binding().loaded_context)}});
         return outcome;
     }
 
@@ -363,7 +355,7 @@ int run(std::string_view base) {
     CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
 
     Writer first{transport, "loopback-s1", 1, store};
-    CHECK(!first.binding.loaded_context);
+    CHECK(!first.checkpoint.binding().loaded_context);
     const auto initial = first.publish();
     phase("context", {{"session", first.session}, {"playthrough_id", first.playthrough},
         {"target_form", std::string{target_form}}, {"sequence", initial.context_binding.sequence}});
@@ -373,44 +365,43 @@ int run(std::string_view base) {
     const auto older_bytes = store.for_save();
     CHECK(older_bytes && saved_anchor(*older_bytes) && saved_anchor(*older_bytes)->context_sequence == heard.context.context_binding.sequence);
 
-    // Delivery boundary exactly as SpeechDelivery wires it (receipt_hook): a native-turn caption's first terminal
-    // delivery, here audio playback reported spoken and not cancelled, becomes one copied pending receipt.
+    // Delivery boundary through SpeechDelivery's shared hook: a native-turn caption's first terminal delivery, here
+    // audio playback reported spoken and not cancelled, becomes one copied pending receipt.
     const auto& said = std::get<protocol_native::Dialogue>(heard.line.payload);
-    const auto* speaker = std::get_if<protocol_native::Identity>(&said.speaker);
-    CHECK(speaker && speaker->form_id == target_form && said.native_turn && first.synth.native_turn_ready() && heard.line.protocol_version == 2 && heard.line.context_sequence != 0);
     const auto outbox = std::make_shared<client::SpeechReceiptOutbox>();
     {
         presentation::DialogueCaption caption{.generation = heard.line.generation, .text = said.text, .cancellation = first.owner.token(),
-            .request_id = heard.line.request_id, .line_id = heard.line.line_id, .context_sequence = heard.line.context_sequence};
-        caption.on_terminal = [target = std::weak_ptr<client::SpeechReceiptOutbox>{outbox},
-            pending = client::PendingSpeechReceipt{heard.line.generation, heard.line.context_sequence, heard.line.turn_id,
-                {heard.line.request_id, heard.line.line_id, *speaker, {}}}](presentation::DialogueDelivery terminal, bool cancelled) mutable {
-            const auto outcome = client::speech_receipt_outcome(terminal, cancelled);
-            const auto locked = target.lock();
-            if (!outcome || !locked) return;
-            pending.receipt.outcome = *outcome;
-            (void)locked->push(std::move(pending));
-        };
+            .request_id = heard.line.request_id, .line_id = heard.line.line_id, .context_sequence = heard.line.context_sequence,
+            .on_terminal = client::speech_receipt_hook(outbox, heard.line, said, first.synth.native_turn_ready())};
+        CHECK(caption.on_terminal);
         caption.mark_delivery(presentation::DialogueDelivery::playing);
         caption.mark_delivery(presentation::DialogueDelivery::spoken);
         caption.mark_delivery(presentation::DialogueDelivery::spoken); // A repeated terminal report must not push again.
     }
     auto pending = outbox->take(first.generation.value());
     CHECK(pending.size() == 1 && pending.front().receipt.outcome == protocol_native::SpeechReceiptOutcome::audio_completed);
+    // The /talk's own ACK covered every earlier frontier revision, so nothing is due until the line is heard.
+    CHECK(!first.checkpoint.due());
     json::Value::Array receipts;
     for (int attempt = 1; attempt <= 2; ++attempt) {
         const auto& value = pending.front();
-        const auto outcome = first.synth.send_speech_receipt(value.receipt, {value.generation, value.context_sequence, {}, value.turn_id});
-        const auto* state = accepted_receipt_state(outcome);
-        evidence("receipt", {{"attempt", static_cast<std::uint64_t>(attempt)}, {"request_id", outcome.request_id},
+        // The session's composition (PluginSession -> ContextPublication -> SaveCheckpoint) for the real receipt only.
+        const auto exchange = client::exchange_speech_receipt(first.synth, value, first.owner.token(), first.terminal,
+            attempt == 1 ? client::HeardReceipt{std::bind_front(&client::SaveCheckpoint::note_heard_receipt, &first.checkpoint)}
+                         : client::HeardReceipt{});
+        evidence("receipt", {{"attempt", static_cast<std::uint64_t>(attempt)}, {"request_id", exchange.outcome.request_id},
             {"dialogue_request_id", value.receipt.dialogue_request_id}, {"line_id", value.receipt.line_id},
-            {"accepted_state", text(state ? *state : "")}, {"status", static_cast<std::uint64_t>(outcome.status)}});
-        CHECK(state && *state == "spoken");
-        receipts.emplace_back(text(outcome.request_id));
+            {"accepted_state", text(exchange.accepted_state.value_or(""))},
+            {"status", static_cast<std::uint64_t>(exchange.outcome.status)}});
+        CHECK(exchange.accepted_state == "spoken");
+        // The accepted heard receipt makes a checkpoint due before anything is published.
+        CHECK(exchange.heard == (attempt == 1) && first.checkpoint.due());
+        receipts.emplace_back(text(exchange.outcome.request_id));
     }
 
-    // Checkpoint: the next exact context ACK after the heard receipt becomes the newer saved anchor.
+    // Checkpoint: the next exact context ACK covers the heard receipt and becomes the newer saved anchor.
     const auto checkpoint = first.publish();
+    CHECK(!first.checkpoint.due());
     const auto newer_bytes = store.for_save();
     CHECK(newer_bytes);
     const auto older = saved_anchor(*older_bytes);
@@ -429,9 +420,10 @@ int run(std::string_view base) {
         CHECK(loaded.finish_load(true, fill).resolution == core::IdentityResolution::restored);
         CHECK(loaded.playthrough_id() == first.playthrough);
         Writer writer{transport, std::move(id), generation, loaded};
-        CHECK(writer.binding.loaded_context == saved_anchor(bytes));
+        CHECK(writer.checkpoint.binding().loaded_context == saved_anchor(bytes));
         const auto reply = writer.talk("Loopback question from the " + std::string{name} + " save?");
-        phase(std::string{name} + "_talk", {{"session", writer.session}, {"loaded_context", anchor_value(writer.binding.loaded_context)},
+        phase(std::string{name} + "_talk", {{"session", writer.session},
+            {"loaded_context", anchor_value(writer.checkpoint.binding().loaded_context)},
             {"request_id", reply.reply.request_id}});
     };
     load("loopback-s2", 2, *older_bytes, "older");

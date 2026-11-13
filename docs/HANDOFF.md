@@ -197,9 +197,11 @@ From any clean checkout pair, as root on Linux or WSL:
 the client `HEAD` and runs it against the server `HEAD`, a disposable PostgreSQL cluster and a
 loopback fake provider, all in private namespaces. It requires one heard row. The older anchor's
 prompt must omit the line, and the newer anchor's prompt must contain it exactly once. The driver
-uses a POSIX test transport, not WinHTTP, and copies the short ACK/receipt glue from
-`ContextPublication` and `SpeechDelivery`. It proves no audio, game thread, socket loss or
-flat/VR gameplay.
+uses a POSIX test transport, not WinHTTP. It copies no ACK or receipt glue: it calls the same
+engine-free `speech_receipt_hook`, `exchange_speech_receipt` and `SaveCheckpoint` that
+`SpeechDelivery` and `ContextPublication` delegate to, and checks that the accepted heard receipt
+makes a checkpoint due before the covering publication clears it. It proves no audio, game thread,
+socket loss or flat/VR gameplay.
 
 ## Current handoff priorities
 
