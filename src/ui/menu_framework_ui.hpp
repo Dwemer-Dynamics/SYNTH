@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/narrator_transcript.hpp"
 
 // SYNTH's native F4SE Menu Framework surface.
 //
@@ -834,6 +835,17 @@ inline void __stdcall render_chatbox() {
         }
         ImGuiMCP::TextDisabled(
             "%s Enter sends, Ctrl+Enter starts a new line, Escape closes.", target_instruction);
+        ImGuiMCP::TextDisabled("Private narrator: type /narrator for select, talk, scene, transcript and cancel controls.");
+        const auto narrator_page = narrator_transcript.page();
+        if (narrator_page.visible) {
+            ImGuiMCP::TextWrapped("Private narrator transcript");
+            if (ImGuiMCP::BeginChild("SYNTH.Narrator.Transcript", ImGuiMCP::ImVec2{0.0f, std::min(150.0f * scale, height * 0.3f)}))
+                for (const auto& [name, text] : narrator_page.entries)
+                    ImGuiMCP::TextWrapped("%s: %s", name.c_str(), text.c_str());
+            ImGuiMCP::EndChild();
+            ImGuiMCP::TextDisabled(narrator_page.older ? "Type /narrator older for the previous page." : "Beginning of transcript.");
+            if (ImGuiMCP::Button("Hide transcript##SYNTH.Narrator")) narrator_transcript.hide();
+        }
         if (chatbox_draft->target) {
             if(chatbox_draft->targets.empty())ImGuiMCP::TextWrapped("To: %s",chatbox_draft->target->display_name.c_str());
             else if(ImGuiMCP::BeginCombo("To:##SYNTH.Chatbox.Target",chatbox_draft->target->display_name.c_str())) {

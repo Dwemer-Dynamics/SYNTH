@@ -4,6 +4,7 @@
 #include "integration/external_requests.hpp"
 #include "integration/papyrus_requests.hpp"
 #include "client/social_task_input.hpp"
+#include "client/private_narrator.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -17,6 +18,9 @@ static_assert(sizeof(SynthExternalRequestV1)==1032 && offsetof(SynthExternalRequ
               offsetof(SynthExternalRequestV1,text)==24 && sizeof(SynthExternalAPIV1)==24);
 #define CHECK(x) do { if (!(x)) throw std::runtime_error{#x}; } while(false)
 int main() try {
+    CHECK(!synth::client::PrivateNarrator::parse("ordinary NPC text"));
+    CHECK(synth::client::PrivateNarrator::parse("/narrator select 1")->command == synth::client::PrivateNarrator::Command::select);
+    CHECK(synth::client::PrivateNarrator::parse("/narrator cancel")->command == synth::client::PrivateNarrator::Command::cancel);
     {
         std::ifstream stream{std::filesystem::path{__FILE__}.parent_path()/"social-task-commands.json"};
         CHECK(stream.good());

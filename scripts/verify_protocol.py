@@ -236,6 +236,11 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") == "synth.event.v2" and payload_type == "speech_receipt":
         catalog_path = PROTOCOL / "v2/schemas/speech-receipt.schema.json"
         payload_schema = load_json(catalog_path)
+    narrator_payloads = {"narrator_command": "command", "narrator_turn": "turn", "narrator_receipt": "receipt",
+                         "narrator_reply": "reply", "narrator_state": "state"}
+    if value.get("schema") in {"synth.event.v2", "synth.response.line.v2"} and payload_type in narrator_payloads:
+        catalog_path = PROTOCOL / "v2/schemas/narrator.schema.json"
+        payload_schema = {"$ref": "#/$defs/" + narrator_payloads[payload_type]}
     if value.get("schema") == "synth.response.line.v2" and payload_type == "social_task":
         catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
         payload_schema = {"type": "object", "additionalProperties": False, "required": ["task"],
@@ -252,6 +257,17 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if payload_type == "speech_receipt":
         if not {"dialogue.native_turn", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])) or                 not payload["line_id"].startswith(payload["dialogue_request_id"] + ":dialogue:"):
             raise ValidationError(f"{path}: speech receipt requires native-turn ownership of its exact line")
+    if payload_type in {"narrator_command", "narrator_turn", "narrator_receipt"}:
+        if value.get("protocol_version") != 2 or int(value.get("context_sequence", 0)) < 1 or not {
+            "narrator.private.v1", "context.saved_anchor", "dialogue.turn_ownership"
+        }.issubset(value.get("capabilities", [])):
+            raise ValidationError(f"{path}: private narrator requires a bound, saved, owned v2 context")
+    if payload_type == "narrator_receipt" and payload["line_id"] != payload["narrator_request_id"] + ":narrator":
+        raise ValidationError(f"{path}: narrator receipt must name its exact reply line")
+    if payload_type == "narrator_reply" and value["line_id"] != value["request_id"] + ":narrator":
+        raise ValidationError(f"{path}: narrator reply line is not owned by its request")
+    if payload_type == "narrator_state" and payload["state_id"] == 0 and "selected" in payload:
+        raise ValidationError(f"{path}: an empty narrator state has no selection")
     if payload_type == "input_text" and "intent" in payload:
         if not {"dialogue.native_turn", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])) or                 value.get("protocol_version") != 2 or int(value.get("context_sequence", 0)) < 1:
             raise ValidationError(f"{path}: conversation intent requires a bound native-turn context")
