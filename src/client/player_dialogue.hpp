@@ -115,12 +115,19 @@ public:
         return turn_cancellation_.token();
     }
 
-    [[nodiscard]] core::CancellationToken replace_turn() {
+    [[nodiscard]] core::CancellationToken replace_turn(bool close_capture = false) {
         std::scoped_lock lock{turn_mutex_};
         turn_cancellation_.cancel();
         const core::CancellationSource next{session_};
         turn_cancellation_ = next;
+        close_capture_ = close_capture;
         return turn_cancellation_.token();
+    }
+
+    // The original turn's capture policy survives prefetch children, but never an unrelated or replaced owner.
+    [[nodiscard]] bool close_capture(const core::CancellationToken& owner) {
+        std::scoped_lock lock{turn_mutex_};
+        return close_capture_ && !owner.is_cancelled() && turn_cancellation_.contains(owner);
     }
 
     [[nodiscard]] bool cancel_turn_if_owner(const core::CancellationToken& cancellation) {
@@ -299,7 +306,12 @@ public:
         voice_controls_ = controls();
         if (!snapshot || snapshot->generation() != session_.generation() ||
             voice_turn_.is_cancelled() || !microphone_.recording()) return;
-        voice_target_ = prepare_chat_target(snapshot, controls);
+        {
+            std::scoped_lock lock{turn_mutex_};
+            if (!voice_turn_.is_cancelled() && turn_cancellation_.contains(voice_turn_))
+                close_capture_ = voice_controls_.mode == "CLOSE";
+        }
+        voice_target_ = prepare_chat_target(snapshot, [selection = voice_controls_] { return selection; });
     }
 
     // Empty and target-less recordings are reported here; the session submits an admitted turn.
@@ -585,8 +597,12 @@ private:
         const auto range = targeting::conversation_range(snapshot.world() && snapshot.world()->interior
             ? configuration_.activation.interior_hearing_distance
             : configuration_.activation.exterior_hearing_distance, controls.mode);
+        // VR selects from the HMD, but the server-visible Whisper/Close radius is measured from the body pose.
+        // A narrow addressed actor must satisfy both so context capture cannot omit the selected target.
+        const bool narrow = controls.mode == "WHISPER" || controls.mode == "CLOSE";
         const auto direct_eligible = [&](const core::ActorSnapshot& actor) {
             return actor.conversation_area_available() && targeting::dialogue_actor_available(actor) &&
+                (!narrow || targeting::distance(snapshot.player_pose().position(), actor.position()) <= range) &&
                 !(configuration_.behavior.scene_safety && actor.talking_to_player()) &&
                 !on_cooldown(actor_key(identity(actor)), now);
         };
@@ -621,6 +637,7 @@ private:
     const core::CancellationToken session_;
     std::mutex turn_mutex_;
     core::CancellationSource turn_cancellation_;
+    bool close_capture_{};
     std::mutex conversation_mutex_;
     integration::ExternalConversationOwner external_owner_;
     std::unordered_map<std::string, core::SnapshotClock::time_point> conversation_cooldowns_;

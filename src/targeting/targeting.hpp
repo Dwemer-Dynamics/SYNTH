@@ -369,24 +369,36 @@ private:
 }
 
 // Reserve packet capacity for the addressed actor before nearby bystanders. Pointers stay snapshot-owned.
+// An absent, STANDARD or SHOUT mode keeps the caller's hearing distance. WHISPER and CLOSE narrow speech
+// to the established mode radius around the player pose and require captured conversation-area proof.
+// WHISPER is the addressed actor only and is empty without one; neither mode substitutes another hearer
+// for a selected actor that is unavailable or outside the radius.
 [[nodiscard]] inline std::vector<const core::ActorSnapshot*> context_participants(
     const core::RuntimeSnapshot& snapshot, double hearing_distance,
-    const std::function<bool(const core::ActorSnapshot&)>& selected = {}) {
+    const std::function<bool(const core::ActorSnapshot&)>& selected = {}, std::string_view mode = {}) {
     if (!std::isfinite(hearing_distance) || hearing_distance < 0.0)
         throw std::invalid_argument{"context hearing distance is invalid"};
+    const bool whisper = mode == "WHISPER", narrow = whisper || mode == "CLOSE";
+    if (narrow) hearing_distance = conversation_range(hearing_distance, mode);
     std::vector<const core::ActorSnapshot*> result;
     result.reserve(16);
     const auto eligible = [&](const core::ActorSnapshot& actor) {
-        return actor.playthrough_id() == snapshot.player().playthrough_id() && dialogue_actor_available(actor);
+        return actor.playthrough_id() == snapshot.player().playthrough_id() && dialogue_actor_available(actor) &&
+            (!narrow || actor.conversation_area_available());
     };
-    if (selected && !selected(snapshot.player())) {
+    const bool addressed = selected && !selected(snapshot.player());
+    if (whisper && !addressed) return result;
+    if (addressed) {
         const auto found = std::ranges::find_if(snapshot.actors(), [&](const auto& actor) {
             return selected(actor) && eligible(actor);
         });
         if (found == snapshot.actors().end())
             throw std::invalid_argument{"selected actor is absent or unavailable in the owned snapshot"};
+        if (narrow && distance(snapshot.player_pose().position(), found->position()) > hearing_distance)
+            throw std::invalid_argument{"selected actor is outside the narrow speech radius"};
         result.push_back(&*found);
     }
+    if (whisper) return result;
     for (const auto& actor : snapshot.actors()) {
         if (result.size() == 16) break;
         if (!eligible(actor) || (selected && selected(actor)) ||

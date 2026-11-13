@@ -427,7 +427,11 @@ private:
                             defer_capture(std::move(rechat));
                             return;
                         }
-                        const auto publication=context_.publish(rechat.snapshot,rechat.actor,cancellation);
+                        // Only this still-live turn may inherit Close; a later UI selection cannot widen its capture.
+                        const protocol_native::ControlSelection capture_controls{
+                            dialogue_.close_capture(cancellation) ? "CLOSE" : "", 1};
+                        const auto publication=context_.publish(rechat.snapshot,rechat.actor,cancellation,
+                            nullptr, {}, {}, {}, capture_controls);
                         if (publication.status==RequestStatus::complete && !cancellation.is_cancelled() &&
                             (runtime_paused() || core::SnapshotClock::now()-rechat.snapshot->captured_at()>std::chrono::seconds{2}) &&
                             !terminal_.load(std::memory_order_acquire)) {

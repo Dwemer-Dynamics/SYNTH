@@ -430,7 +430,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertEqual(halt_order, sorted(halt_order))
         turn = session.split("core::CancellationToken begin_player_turn(", 1)[1].split("return turn;", 1)[0]
         turn_order = [turn.index(step) for step in (
-            "dialogue_.replace_turn();", "(void)network_.discard_cancelled();", "(void)speech_.discard_cancelled_jobs();",
+            "dialogue_.replace_turn(close_capture);", "(void)network_.discard_cancelled();", "(void)speech_.discard_cancelled_jobs();",
             "dialogue_.begin_external(std::move(actor));",
             "dialogue_.cancel_interrupted_turn();", "speech_.interrupt_playback();")]
         self.assertEqual(turn_order, sorted(turn_order))
@@ -960,7 +960,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn("invalidate_response(cancellation)", session)
         self.assertIn("{line.request_id, line.line_id}", rechat)
         self.assertIn("client_.uses_rechat_parent_contract() ? std::optional{rechat.parent}", rechat)
-        self.assertIn("deadline, begin_player_turn(actor_key(target)))", text_turn)
+        self.assertIn('deadline, begin_player_turn(actor_key(target), controls.mode == "CLOSE"))', text_turn)
         self.assertIn("deadline, voice->turn))", voice)
         self.assertEqual(dialogue.count("voice_turn_ = begin_turn();"), 2)
         self.assertEqual(session.count("[this] { return begin_player_turn(); }"), 2)
@@ -1028,7 +1028,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         self.assertIn('!available(*action->target)', release)
         self.assertIn('prefetch->cancel(); return;', release)
         self.assertIn("audio_.post_clip_ms, cancellation", read("src/client/speech_delivery.hpp"))
-        admission = session.split("core::CancellationToken begin_player_turn(std::string actor = {})", 1)[1].split(
+        admission = session.split("core::CancellationToken begin_player_turn(std::string actor = {}, bool close_capture = false)", 1)[1].split(
             "request_timeout_ms()", 1)[0]
         self.assertNotIn("transport_", admission)
         self.assertIn("dialogue_.cancel_interrupted_turn();", admission)

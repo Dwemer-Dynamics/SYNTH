@@ -217,6 +217,59 @@ int main() {
             CHECK(rejected);
         }
         CHECK(targeting::context_participants(crowded,100,[](const auto& actor){return actor.form_id()==0x14;}).size()==16);
+        {
+            const auto at=core::SnapshotClock::now();
+            AmbientState dead,no_area,other_save;dead.alive=false;dead.life="dead";no_area.area=false;other_save.save="other-save";
+            const auto piper=ambient_actor(0x2F1,{150,0,0}),nick=ambient_actor(0x2F2,{200,0,0});
+            const auto scene=ambient_scene({ambient_actor(0x2F3,{1000,0,0}),ambient_actor(0x2F4,{200.01,0,0}),
+                ambient_actor(0x2F5,{50,0,0},dead),ambient_actor(0x2F6,{60,0,0},no_area),
+                ambient_actor(0x2F7,{70,0,0},other_save),nick,piper},at);
+            const auto ids=[](const auto& packet){std::vector<std::uint32_t> out;
+                for(const auto* actor:packet) out.push_back(actor->form_id());return out;};
+            const auto selected_id=[](std::uint32_t id){return [id](const core::ActorSnapshot& actor){return actor.form_id()==id;};};
+            const auto piper_selected=selected_id(0x2F1);
+            CHECK(ids(targeting::context_participants(scene,1050,piper_selected,"WHISPER"))==std::vector<std::uint32_t>{0x2F1});
+            CHECK((ids(targeting::context_participants(scene,1050,piper_selected,"CLOSE"))==std::vector<std::uint32_t>{0x2F1,0x2F2}));
+            CHECK(ids(targeting::context_participants(scene,1050,{},"CLOSE"))==(std::vector<std::uint32_t>{0x2F2,0x2F1}));
+            CHECK(targeting::context_participants(scene,1050,{},"WHISPER").empty()); // No implicit Whisper listener.
+            CHECK(targeting::context_participants(scene,1050,selected_id(0x14),"WHISPER").empty());
+            CHECK(ids(targeting::context_participants(scene,1050,selected_id(0x2F2),"WHISPER"))==std::vector<std::uint32_t>{0x2F2});
+            // Standard and Shout keep the caller's radius and the default area-agnostic hearers.
+            const auto standard=ids(targeting::context_participants(scene,1050,piper_selected));
+            CHECK((standard==std::vector<std::uint32_t>{0x2F1,0x2F3,0x2F4,0x2F6,0x2F2}));
+            CHECK(ids(targeting::context_participants(scene,1050,piper_selected,"STANDARD"))==standard);
+            CHECK(ids(targeting::context_participants(scene,1050,piper_selected,"SHOUT"))==standard);
+            CHECK(ids(targeting::context_participants(scene,1050,{},"SHOUT"))==ids(targeting::context_participants(scene,1050)));
+            CHECK(targeting::context_participants(scene,0,piper_selected,"STANDARD").size()==1);
+            for(const auto mode:{"WHISPER","CLOSE"}) {
+                for(const std::uint32_t refused:{0x2F4u,0x2F5u,0x2F6u,0x2F7u,0x999u}) {
+                    bool rejected{};
+                    try{(void)targeting::context_participants(scene,1050,selected_id(refused),mode);}
+                    catch(const std::invalid_argument&){rejected=true;}
+                    CHECK(rejected); // Out of 200, dead, no area proof, foreign save or absent: fail closed.
+                }
+            }
+            CHECK(ids(targeting::context_participants(scene,1050,selected_id(0x2F6)))==
+                (std::vector<std::uint32_t>{0x2F6,0x2F3,0x2F4,0x2F2,0x2F1})); // Default selection stays area-agnostic.
+            // Simulated VR geometry only: the HMD leans 100 units toward an actor the body cannot reach in 200.
+            const auto hmd=core::TimedPose{pose({100,0,0}),at,50ms,4};
+            const auto vr=ambient_scene({ambient_actor(0x2F8,{250,0,0}),ambient_actor(0x2F9,{-200,0,0})},
+                at,core::RuntimeVariant::vr,hmd);
+            const auto any=[](const core::ActorSnapshot&){return true;};
+            const auto body_within=[&](const core::ActorSnapshot& actor){
+                return targeting::distance(vr.player_pose().position(),actor.position())<=200;};
+            const context::PlaythroughIdentity vr_save{"save-a"};
+            CHECK(targeting::select_conversation(vr,vr_save,at,{200,75},any,any).target->identity().form().form_id()==0x2F8);
+            CHECK(!targeting::select_conversation(vr,vr_save,at,{200,75},body_within,body_within).target);
+            for(const auto mode:{"WHISPER","CLOSE"}) {
+                bool rejected{};
+                try{(void)targeting::context_participants(vr,1050,selected_id(0x2F8),mode);}
+                catch(const std::invalid_argument&){rejected=true;}
+                CHECK(rejected); // Server-visible range is the body pose, never the HMD.
+                CHECK(ids(targeting::context_participants(vr,1050,selected_id(0x2F9),mode))==std::vector<std::uint32_t>{0x2F9});
+            }
+            CHECK(targeting::context_participants(vr,1050,selected_id(0x2F8),"SHOUT").size()==2);
+        }
         CHECK(targeting::automatic_actor_class_supported("HumanRace", false));
         CHECK(targeting::automatic_actor_class_supported("GhoulRace", false));
         CHECK(targeting::automatic_actor_class_supported("SuperMutantRace", false));
