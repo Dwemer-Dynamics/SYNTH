@@ -19,11 +19,11 @@ All eight `[Hotkeys]` scan codes (`TalkToNPC`, `ToggleVoice`, `StopTalking`, `SY
 | Rebinding | SYNTH Hotkeys page or `SYNTH_custom.ini` | `SYNTH_custom.ini` | `SYNTH_custom.ini` only |
 | Conflict check | Framework registry only, on SYNTH's page | None | None |
 | `TalkToNPC` | Native chatbox with To: NPC picker | Clipboard text | Clipboard text |
-| `SYNTHControl` | This control menu | Unavailable | Opens the server dashboard |
-| `WriteDiary` | Dispatched | Dispatched | Not dispatched |
+| `SYNTHControl` | This control menu | Unavailable | Opens the server dashboard and retries the server status request |
+| `WriteDiary` | Dispatched | Dispatched | Dispatched for the NPC under the right-controller ray, else HMD gaze |
 | `PipVision` | Dispatched | Dispatched | Dispatched; VR capture acceptance unverified |
 
-SYNTH registers its hotkeys in the framework registry for conflict awareness only; their callbacks are inert and the registry is never read back into SYNTH's configuration (its binding lookup is read only to validate an explicit key selection). Editing a SYNTH entry on the framework's generic Hotkeys page therefore does not change the key SYNTH uses, and the SYNTH Hotkeys page says so. Duplicate keys typed into the INI and game or other-mod key conflicts are not universally detected. VR has no framework, MCM, ESP or controller rebinding surface and polls the desktop keyboard. No controller or headset behavior has been verified.
+SYNTH registers its hotkeys in the framework registry for conflict awareness only; their callbacks are inert and the registry is never read back into SYNTH's configuration (its binding lookup is read only to validate an explicit key selection). Editing a SYNTH entry on the framework's generic Hotkeys page therefore does not change the key SYNTH uses, and the SYNTH Hotkeys page says so. Duplicate keys typed into the INI and game or other-mod key conflicts are not universally detected. VR has no framework, MCM, ESP or controller rebinding surface and polls the desktop keyboard. After a VR session is created or recreated, dialogue and `WriteDiary` stay blocked until the server confirms the saved chat mode and model slot; a failed or busy status reply is reported once and needs a `SYNTHControl` press to retry. VR `WriteDiary` targets the right-controller ray, then HMD gaze, with no nearest-NPC fallback. The `WriteDiary` key held when a session is adopted needs a fresh press, and a `WriteDiary` press made while a menu, combat policy or unconfirmed status blocks dialogue is consumed rather than queued. No controller or headset behavior has been verified.
 
 ## Settings and response ownership
 

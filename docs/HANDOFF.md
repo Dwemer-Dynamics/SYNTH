@@ -253,8 +253,10 @@ Hotkeys edits do not change SYNTH keys, and the framework conflict check covers
 its own registry only. Hold to Talk has its own enable toggle on the Sound page,
 and the Mute Open Mic help separates the saved preference from the session-only
 hotkey. Chatbox and help text no longer promise an NPC in untargeted chat modes.
-Per-lane availability, including VR's missing WriteDiary dispatch and unverified
-PipVision acceptance, is in `CONTROL-MENU-PARITY.md` and the package READMEs.
+Per-lane availability, including VR's keyboard WriteDiary dispatch to the
+right-controller ray or HMD-gaze NPC, the VR SYNTH Control status retry and
+unverified PipVision acceptance, is in `CONTROL-MENU-PARITY.md` and the package
+READMEs.
 
 
 ## Supported-action consumption correction

@@ -26,12 +26,20 @@ or for conflicts with the game or other mods.
   TalkToNPC       Sends 1-4096 characters of clipboard text
   ToggleVoice     Hold to Talk; also needs [Input] PushToTalkEnabled=true
   StopTalking     Halt AI Actions
-  SYNTHControl    Opens the server dashboard in the desktop browser
+  SYNTHControl    Opens the server dashboard in the desktop browser and retries the
+                  server settings check
   OpenMicMute     Open mic mute for this session only; [OpenMic] Muted is the saved value
   ManualActivate  Manual AI Activate for the targeted NPC
   PipVision       Tap, double-tap or hold gesture is dispatched; whether a VR capture is
                   accepted and usable is not yet verified
-  WriteDiary      Shared INI key with no VR dispatch; pressing it does nothing in VR
+  WriteDiary      Requests a diary entry for the NPC your right controller points at,
+                  or, if none, the NPC you are looking at; there is no nearest-NPC
+                  fallback. Ignored while a menu or combat blocks dialogue; press again
+                  afterwards
+
+After loading a save or changing SYNTH_custom.ini, dialogue and diary requests wait until
+the server confirms your saved chat mode and model slot. If the check fails or the server
+is busy, a notification appears; press SYNTHControl to retry.
 
 No controller, HMD or in-headset behavior of these keys has been verified.
 
