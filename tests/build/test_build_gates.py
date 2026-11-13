@@ -411,7 +411,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertIn("void join_jobs() noexcept { speech_.shutdown(tasks::ShutdownMode::cancel_pending); }", delivery)
         self.assertIn('tasks::TaskLanes speech_{{tasks::LaneConfig{"speech", 16, 4, 3}}, 1};', delivery)
         self.assertIn("SpeechDelivery speech_;", session)
-        self.assertLess(session.index("std::deque<std::string> notifications_;"), session.index("SpeechDelivery speech_;"))
+        self.assertLess(session.index("presentation::NotificationQueue notifications_;"), session.index("SpeechDelivery speech_;"))
         speech = delivery.split("void queue_speech(", 1)[1].split("void enqueue_prepared_speech(", 1)[0]
         self.assertIn("speech_.try_submit(", speech)
         self.assertNotIn("network_.try_submit(", speech)
@@ -434,7 +434,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
             "dialogue_.begin_external(std::move(actor));",
             "dialogue_.cancel_interrupted_turn();", "speech_.interrupt_playback();")]
         self.assertEqual(turn_order, sorted(turn_order))
-        self.assertLess(session.index("std::deque<std::string> notifications_;"), session.index("PlayerDialogue dialogue_;"))
+        self.assertLess(session.index("presentation::NotificationQueue notifications_;"), session.index("PlayerDialogue dialogue_;"))
         self.assertLess(session.index("PlayerDialogue dialogue_;"), session.index("SpeechDelivery speech_;"))
         self.assertNotIn("retire_remote_session", destructor)
         host = read("src/client/plugin_session_host.hpp")

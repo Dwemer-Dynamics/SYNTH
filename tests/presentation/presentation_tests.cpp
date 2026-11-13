@@ -7,6 +7,9 @@
 #include <limits>
 #include <thread>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
 using namespace synth::presentation;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error{#x}; } while(false)
 
@@ -167,6 +170,175 @@ int main() try {
         CHECK(!text->delivered());
         spoken->mark_delivery(DialogueDelivery::spoken);
         CHECK(!spoken->delivered()); // Cancellation wins even over a late playback-completion observation.
+    }
+    {
+        // VR handoff: one pump runs frame -> caption handoff -> system notifications into one HUD sink.
+        using namespace std::chrono_literals;
+        std::vector<std::string> hud;
+        DialogueCaptions captions;
+        NotificationQueue notifications;
+        const auto now = DialogueCaptions::Clock::now();
+        const auto pump = [&](std::uint64_t current, DialogueCaptions::Caption spoken, bool hidden,
+                              DialogueCaptions::Clock::time_point at) {
+            (void)present_caption_once(captions.frame(current, spoken, hidden, at), current,
+                [&](const DialogueCaption& line) { hud.push_back(line.speaker + ": " + line.text); });
+            notifications.drain([&](std::string_view message) { hud.emplace_back(message); });
+        };
+        const auto make = [&](const synth::core::CancellationSource& turn, std::string text) {
+            return std::make_shared<const DialogueCaption>(DialogueCaption{
+                generation.value(), "Piper", std::move(text), turn.token()});
+        };
+
+        synth::core::CancellationSource first{generation};
+        const auto live = make(first, "Live line.");
+        captions.enqueue(live);
+        notifications.push("SYNTH connected");
+        pump(generation.value(), {}, false, now);
+        CHECK((hud == std::vector<std::string>{"Piper: Live line.", "SYNTH connected"}));
+        pump(generation.value(), {}, false, now + 1s);
+        pump(generation.value(), {}, true, now + 2s); // A pause hides it; resuming must not repost it.
+        pump(generation.value(), {}, false, now + 2s);
+        CHECK(hud.size() == 2); // Repeated pumps never duplicate the posted line.
+        CHECK(live->delivery->load() == DialogueDelivery::reading); // Posting is not completion.
+        pump(generation.value(), {}, false, now + 30s);
+        CHECK(live->delivered() && live->delivery->load() == DialogueDelivery::text_complete && hud.size() == 2);
+
+        // Replaced before display: the old turn is cancelled between enqueue and drain.
+        hud.clear();
+        synth::core::CancellationSource old_turn{generation};
+        const auto replaced = make(old_turn, "Replaced line.");
+        captions.enqueue(replaced);
+        old_turn.cancel();
+        synth::core::CancellationSource new_turn{generation};
+        const auto replacement = make(new_turn, "Replacement line.");
+        captions.enqueue(replacement);
+        notifications.push("SYNTH still listening");
+        pump(generation.value(), {}, false, now + 31s);
+        CHECK((hud == std::vector<std::string>{"Piper: Replacement line.", "SYNTH still listening"}));
+        CHECK(replaced->delivery->load() == DialogueDelivery::discarded && !replaced->delivered());
+        new_turn.cancel();
+        pump(generation.value(), {}, false, now + 32s);
+        CHECK(hud.size() == 2);
+
+        // Spoken captions arrive through playback and follow the same once-only, owned handoff.
+        hud.clear();
+        synth::core::CancellationSource speech{generation};
+        const auto spoken = make(speech, "Spoken line.");
+        pump(generation.value(), spoken, false, now + 33s);
+        pump(generation.value(), spoken, false, now + 34s);
+        CHECK((hud == std::vector<std::string>{"Piper: Spoken line."}));
+        CHECK(spoken->delivery->load() == DialogueDelivery::pending); // Heard receipts stay with playback.
+        synth::core::CancellationSource cancelled_speech{generation};
+        const auto withdrawn = make(cancelled_speech, "Cancelled speech.");
+        cancelled_speech.cancel();
+        pump(generation.value(), withdrawn, false, now + 35s);
+        CHECK(hud.size() == 1);
+
+        // A load boundary invalidates queued and spoken captions from the previous generation.
+        synth::core::GenerationClock clock; (void)clock.advance();
+        const auto next = clock.current().value();
+        synth::core::CancellationSource stale_turn{generation};
+        const auto stale = make(stale_turn, "Previous save line.");
+        captions.enqueue(stale);
+        notifications.push("SYNTH session ready");
+        pump(next, stale, false, now + 36s);
+        CHECK((hud == std::vector<std::string>{"Piper: Spoken line.", "SYNTH session ready"}));
+        CHECK(stale->delivery->load() == DialogueDelivery::discarded && captions.idle());
+        CHECK(!present_caption_once(stale, next, [&](const DialogueCaption&) { hud.emplace_back("stale"); }));
+        CHECK(hud.size() == 2); // Display-time ownership rejects a stale caption handed in directly.
+
+        // Scene rejection after admission also never reaches the sink.
+        synth::core::CancellationSource scene_turn{generation};
+        auto proof = std::make_shared<SceneAdmission>();
+        auto value = DialogueCaption{generation.value(), "Piper", "Rejected scene.", scene_turn.token()};
+        value.admission = proof;
+        const auto rejected = std::make_shared<const DialogueCaption>(std::move(value));
+        proof->rejected.store(true);
+        CHECK(!present_caption_once(rejected, generation.value(), [&](const DialogueCaption&) { hud.emplace_back("rejected"); }));
+        CHECK(hud.size() == 2);
+
+        // System notifications keep their 16-entry bound and FIFO order with no dialogue present.
+        hud.clear();
+        for (int index = 0; index < 20; ++index) notifications.push("note " + std::to_string(index));
+        notifications.push("");
+        pump(generation.value(), {}, false, now + 37s);
+        CHECK(hud.size() == NotificationQueue::capacity && hud.front() == "note 4" && hud.back() == "note 19");
+        pump(generation.value(), {}, false, now + 38s);
+        CHECK(hud.size() == NotificationQueue::capacity);
+    }
+    {
+        // Interleaving: the active text caption resumes after spoken captions and must not be reposted.
+        using namespace std::chrono_literals;
+        std::vector<std::string> hud;
+        DialogueCaptions captions;
+        const auto now = DialogueCaptions::Clock::now();
+        const auto sink = [&](const DialogueCaption& line) { hud.push_back(line.speaker + ": " + line.text); };
+        const auto pump = [&](DialogueCaptions::Caption spoken, bool hidden, DialogueCaptions::Clock::time_point at) {
+            const auto chosen = captions.frame(generation.value(), spoken, hidden, at);
+            (void)present_caption_once(chosen, generation.value(), sink);
+            return chosen;
+        };
+        const auto make = [&](const synth::core::CancellationSource& turn, std::string text) {
+            return std::make_shared<const DialogueCaption>(DialogueCaption{
+                generation.value(), "Piper", std::move(text), turn.token()});
+        };
+        synth::core::CancellationSource text_turn{generation}, speech_b{generation}, speech_c{generation};
+        const auto a = make(text_turn, "A.");
+        const auto b = make(speech_b, "B.");
+        const auto c = make(speech_c, "C.");
+        captions.enqueue(a);
+        CHECK(pump({}, false, now) == a);
+        CHECK(pump(b, false, now + 1s) == b);
+        CHECK(!pump(b, true, now + 2s)); // Pause between the spoken and resumed text caption.
+        CHECK(pump(b, false, now + 3s) == b);
+        CHECK(!pump({}, true, now + 3500ms));
+        CHECK(pump({}, false, now + 4s) == a); // Text A resumes inside its extended reading window.
+        CHECK((hud == std::vector<std::string>{"Piper: A.", "Piper: B."}));
+        CHECK(pump(c, false, now + 5s) == c);
+        CHECK(pump({}, false, now + 6s) == a); // A resumed after two distinct spoken captions is not reposted.
+        CHECK((hud == std::vector<std::string>{"Piper: A.", "Piper: B.", "Piper: C."}));
+        CHECK(a->delivery->load() == DialogueDelivery::reading); // Handoff never completes text.
+        CHECK(b->delivery->load() == DialogueDelivery::pending && c->delivery->load() == DialogueDelivery::pending);
+        CHECK(!pump({}, false, now + 60s) && a->delivery->load() == DialogueDelivery::text_complete);
+        CHECK(hud.size() == 3);
+
+        // Cancelled after frame selection but before present: the selected caption never reaches the sink.
+        synth::core::CancellationSource late_text{generation};
+        const auto d = make(late_text, "D.");
+        captions.enqueue(d);
+        const auto chosen_text = captions.frame(generation.value(), {}, false, now + 61s);
+        CHECK(chosen_text == d && d->delivery->load() == DialogueDelivery::reading);
+        late_text.cancel();
+        CHECK(!present_caption_once(chosen_text, generation.value(), sink));
+        synth::core::CancellationSource late_speech{generation};
+        const auto e = make(late_speech, "E.");
+        const auto chosen_spoken = captions.frame(generation.value(), e, false, now + 62s);
+        CHECK(chosen_spoken == e);
+        late_speech.cancel();
+        CHECK(!present_caption_once(chosen_spoken, generation.value(), sink));
+        CHECK(hud.size() == 3);
+        CHECK(!pump({}, false, now + 63s) && d->delivery->load() == DialogueDelivery::discarded && captions.idle());
+        CHECK(hud.size() == 3);
+
+        // Failed playback: spoken G is posted, requeued behind active text F, then spoken H plays.
+        // When F expires the G fallback is selected, and its own posted mark keeps it off the HUD.
+        hud.clear();
+        synth::core::CancellationSource text_f{generation}, speech_g{generation}, speech_h{generation};
+        const auto f = make(text_f, "F.");
+        const auto g = make(speech_g, "G.");
+        const auto h = make(speech_h, "H.");
+        captions.enqueue(f);
+        CHECK(pump({}, false, now + 70s) == f);
+        CHECK(pump(g, false, now + 71s) == g);
+        auto failed = g;
+        captions.enqueue_failed(failed); // Same path as SpeechDelivery::pump after a playback error.
+        CHECK(pump(h, false, now + 72s) == h);
+        CHECK(pump({}, false, now + 73s) == f);
+        CHECK(pump({}, false, now + 76s) == g && f->delivery->load() == DialogueDelivery::text_complete);
+        CHECK((hud == std::vector<std::string>{"Piper: F.", "Piper: G.", "Piper: H."}));
+        CHECK(g->delivery->load() == DialogueDelivery::reading && !g->delivered()); // Posting is not delivery.
+        CHECK(!pump({}, false, now + 90s) && g->delivered() && captions.idle());
+        CHECK(hud.size() == 3);
     }
     {
         synth::core::CancellationSource turn{generation};

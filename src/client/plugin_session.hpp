@@ -355,16 +355,7 @@ public:
     }
 
     template <class Present>
-    void drain_notifications(Present&& present) {
-        std::deque<std::string> notifications;
-        {
-            std::scoped_lock lock{notification_mutex_};
-            notifications.swap(notifications_);
-        }
-        for (const auto& notification : notifications) {
-            present(notification);
-        }
-    }
+    void drain_notifications(Present&& present) { notifications_.drain(std::forward<Present>(present)); }
 
     [[nodiscard]] const config::Config& configuration() const noexcept { return configuration_; }
 
@@ -948,11 +939,7 @@ private:
         if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload)) {
             context_.note_dialogue_history(snapshot->variant(), cancellation);
             mark_activity();
-            const auto speaker = std::visit([](const auto& value) { return value.display_name; },
-                                           dialogue->speaker);
-            // Preserve VR's existing presentation until its separate HUD ABI is verified.
-            if (snapshot->variant() == core::RuntimeVariant::vr && configuration_.behavior.show_subtitles)
-                push_notification((speaker.empty() ? "SYNTH" : speaker) + ": " + dialogue->text);
+            // VR shows this caption from its subtitle frame, so a cancelled or replaced turn never displays.
             const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_);
             const bool social_reply=social_.track(line,caption);
             speech_.deliver(line, *dialogue, snapshot, cancellation, caption, prefetch);
@@ -1006,16 +993,7 @@ private:
         rechat_.forget(key);
     }
 
-    void push_notification(std::string message) {
-        if (message.empty()) {
-            return;
-        }
-        std::scoped_lock lock{notification_mutex_};
-        if (notifications_.size() == 16) {
-            notifications_.pop_front();
-        }
-        notifications_.push_back(std::move(message));
-    }
+    void push_notification(std::string message) { notifications_.push(std::move(message)); }
 
     // Game-thread runtime capture before worker admission; see ObservedEventDelivery::enrich_selected_actor.
     [[nodiscard]] bool enrich_selected_actor(Snapshot& snapshot, const protocol_native::Identity& selected) {
@@ -1043,8 +1021,7 @@ private:
     // witnesses on its workers, and observations_ owns its scheduling, delivery and stop.
     QuestEventDelivery quest_events_;
     std::shared_ptr<diagnostics::ConversationTrace> trace_{std::make_shared<diagnostics::ConversationTrace>()};
-    std::mutex notification_mutex_;
-    std::deque<std::string> notifications_;
+    presentation::NotificationQueue notifications_;
     // Borrows configuration, client, control lane and trace declared above; ~PluginSession joins the
     // control lane, whose cancel tasks capture this owner, before members are destroyed. Also the
     // exact selected-target authority read by context publication, rechat and diary admission.
