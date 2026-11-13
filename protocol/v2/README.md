@@ -1,5 +1,21 @@
 # SYNTH protocol v2
 
+## Addressed actor SPECIAL values (2026-11-13)
+
+`context.actor_stats` is optional for flat and VR. A v2 init that lists it is
+acknowledged with status `actor_stats: true`; a client sends
+`actor_states[].actor_stats` only after that acknowledgement, so an older server
+never receives the key. The client captures it on the game thread for the exact
+selected actor (form, origin plugin, base and playthrough re-resolved), never by
+name. `observation: "base_current"` carries seven SPECIAL entries, each as
+`base` (engine base value) and `current` (with active modifiers), finite numbers
+bounded between -1,000,000 and 1,000,000. Zero and fractions are preserved. An unreadable entry is
+null (unknown); other readable entries survive. `observation: "unavailable"`
+with no `special` also represents a wholly unavailable observation. The engine's
+permanent value is never reported as base. The server keeps it only in the
+bound session context snapshot and renders it as the actor's skills; it is never
+written to the NPC profile.
+
 ## Native typed turn and speech receipts (2026-11-09, Stage 1)
 
 `dialogue.native_turn` requires v2 and `dialogue.turn_ownership`. Only the init

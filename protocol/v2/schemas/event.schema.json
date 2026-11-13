@@ -1271,6 +1271,38 @@
       "if": {
         "properties": {
           "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "actor_states"
+            ],
+            "properties": {
+              "actor_states": {
+                "contains": {
+                  "required": [
+                    "actor_stats"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "context.actor_stats"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "social_task_request"
           }
         }

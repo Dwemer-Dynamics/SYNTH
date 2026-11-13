@@ -1,5 +1,11 @@
 # SYNTH open-alpha acceptance
 
+## NPC biography and actor stats
+
+- [ ] Flat in game: compare all seven SPECIAL base/current values with the next provider request, including an older-save load.
+- [ ] VR in headset: independently verify the same capture and prompt behavior.
+- [ ] Existing installation: review the biography repair dry run and back up the database before an explicitly authorized apply.
+
 ## Optional companion combat comments
 
 - [ ] Flat: verify participant selection, duplicate ends, dismissal, re-aggro by

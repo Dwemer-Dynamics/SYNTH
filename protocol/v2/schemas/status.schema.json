@@ -37,6 +37,9 @@
     "native_turn": {
       "type": "boolean"
     },
+    "actor_stats": {
+      "type": "boolean"
+    },
     "companion_combat_comments": {
       "type": "boolean"
     },

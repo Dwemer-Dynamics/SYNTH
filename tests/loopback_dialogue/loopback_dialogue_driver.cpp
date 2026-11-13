@@ -277,7 +277,7 @@ constexpr std::string_view player_form{"0x00000014"};
 constexpr std::string_view target_form{"0x0001A4D7"};
 
 std::vector<std::string> dialogue_capabilities() {
-    return {"dialogue.text", "dialogue.native_turn", "dialogue.turn_ownership", "context.saved_anchor", "context.actor_identity"};
+    return {"dialogue.text", "dialogue.native_turn", "dialogue.turn_ownership", "context.saved_anchor", "context.actor_identity", "context.actor_stats"};
 }
 
 // One runtime session: the shipped client plus the shipped SaveCheckpoint over the store binding a writer holds.
@@ -289,7 +289,7 @@ struct Writer final {
     core::CancellationSource owner{generation};
     std::atomic_bool terminal{};
     client::SaveCheckpoint checkpoint;
-    // What each context publishes about its target. The default scenario publishes no actor states.
+    // Synthetic copied observations for the exact target, including fresh stats after a load.
     std::string target_form_id{target_form}, target_name{"Settler"};
     std::vector<protocol_native::ActorState> actor_states;
     std::string audience_observation;
@@ -332,6 +332,15 @@ struct Writer final {
         protocol_native::Line line;
         std::size_t streamed_callbacks{};
     };
+
+    // Synthetic recapture after a load; values are deliberately different from the saved world's last snapshot.
+    void capture_stats(double current) {
+        protocol_native::ActorState state{.actor=actor(target_form_id,target_name),.base_form_id=target_form_id,
+            .base_origin_plugin="Fallout4.esm",.alive=true,.level=12,.line_of_sight="visible",.life_state="alive",.posture="normal"};
+        state.actor_stats=core::ActorStats{};
+        (*state.actor_stats)[0]=core::ActorStatValue{4,current};
+        actor_states={state};
+    }
 
     // DialogueRequests::submit_text's sequence: hold the context turn, publish, then send bound input_text.
     Talk talk(std::string question) {
@@ -386,6 +395,7 @@ int run(std::string_view base) {
     CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
 
     Writer first{transport, "loopback-s1", 1, store};
+    first.capture_stats(4);
     CHECK(!first.checkpoint.binding().loaded_context);
     const auto initial = first.publish();
     phase("context", {{"session", first.session}, {"playthrough_id", first.playthrough},
@@ -451,6 +461,7 @@ int run(std::string_view base) {
         CHECK(loaded.finish_load(true, fill).resolution == core::IdentityResolution::restored);
         CHECK(loaded.playthrough_id() == first.playthrough);
         Writer writer{transport, std::move(id), generation, loaded};
+        writer.capture_stats(name=="older" ? 5 : 6);
         CHECK(writer.checkpoint.binding().loaded_context == saved_anchor(bytes));
         const auto reply = writer.talk("Loopback question from the " + std::string{name} + " save?");
         phase(std::string{name} + "_talk", {{"session", writer.session},
@@ -501,6 +512,8 @@ int run_companion(std::string_view base) {
     CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
     // The flat Wait capabilities come from the shipped helper; turn cancellation anchors the cancelled-work probe.
     auto capabilities = dialogue_capabilities();
+    // Exercise the specialized flat init acknowledgement used by the shipped capability set.
+    capabilities.emplace_back("context.inventory_512");
     capabilities.emplace_back("dialogue.turn_cancel");
     client::append_wait_capabilities(capabilities, core::RuntimeVariant::flat);
 
@@ -514,6 +527,9 @@ int run_companion(std::string_view base) {
         .race = "HumanRace", .sex = "female", .teammate = true, .health_percent = 100.0, .action_points_percent = 100.0,
         .line_of_sight = "visible", .life_state = "alive", .posture = "normal", .health_percent_available = true,
         .action_points_percent_available = true, .wait_held = false};
+    captured.actor_stats=core::ActorStats{};
+    (*captured.actor_stats)[0]=core::ActorStatValue{0,1.5};
+    (*captured.actor_stats)[3]=core::ActorStatValue{6,7};
     s.actor_states = {captured};
     s.audience_observation = "complete";
 

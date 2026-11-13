@@ -11,6 +11,32 @@
 #include <vector>
 
 namespace {
+// Protect numeric fidelity, unavailable entries and the enrichment identity boundary without an engine.
+void actor_stats_tests() {
+    using namespace synth;
+    core::ActorStats values{};
+    values[0]=core::ActorStatValue{0,1.5};
+    core::ActorSnapshot actor{0x2F1F,"Piper",{},"Fallout4.esm","stats-save"};
+    auto observed=actor.with_actor_stats(values);
+    if (actor.with_details_from(observed).actor_stats()[0]->current!=1.5 || actor.actor_stats()[0])
+        throw std::runtime_error{"stat enrichment leaked or lost values"};
+    protocol_native::ActorState state;state.actor_stats=observed.actor_stats();
+    const auto wire=protocol_native::actor_state_value(state);
+    const auto& special=protocol_native::required(protocol_native::required(wire,"actor_stats"),"special");
+    if (json::write(protocol_native::required(special,"strength"))!="{\"base\":0,\"current\":1.5}" ||
+        !protocol_native::required(special,"luck").is_null()) throw std::runtime_error{"zero/fraction/unknown lost"};
+    state.actor_stats=core::ActorStats{};
+    if (json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_stats"))!=
+        "{\"observation\":\"unavailable\"}") throw std::runtime_error{"unread stats claimed an observation"};
+    bool refused=false;
+    try { (void)actor.with_details_from(core::ActorSnapshot{0x2F20,"Piper",{},"Fallout4.esm","stats-save"}.with_actor_stats(values)); }
+    catch (const std::invalid_argument&) { refused=true; }
+    if (!refused) throw std::runtime_error{"same-name stat owner accepted"};
+    values[0]=core::ActorStatValue{0,std::numeric_limits<double>::infinity()};refused=false;
+    try { (void)actor.with_actor_stats(values); } catch (const std::invalid_argument&) { refused=true; }
+    if (!refused) throw std::runtime_error{"non-finite stat accepted"};
+}
+
 void verified_wait_tests() {
     using namespace synth;
     const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
@@ -297,6 +323,7 @@ void native_turn_receipt_tests(const std::string& root) {
 
 int main(int argc,char** argv){
  try{
+  actor_stats_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   verified_wait_tests();
