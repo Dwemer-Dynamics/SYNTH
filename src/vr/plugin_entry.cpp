@@ -44,6 +44,8 @@ bool runtime_disabled{};
 std::array<bool, 256> hotkey_down{};
 bool voice_capture_down{};
 bool player_was_in_combat{};
+bool control_status_confirmed{};
+std::uint64_t control_failure_revision{};
 auto next_context_publish = synth::core::SnapshotClock::time_point{};
 auto next_profile_refresh = synth::core::SnapshotClock::time_point{};
 auto profile_timer_paused_at = synth::core::SnapshotClock::time_point{};
@@ -119,6 +121,33 @@ void present_notification(std::string_view message) {
     return virtual_key != 0 && (GetAsyncKeyState(static_cast<int>(virtual_key)) & 0x8000) != 0;
 }
 
+// Polled before any gate, so a press made while a menu, combat or unconfirmed settings block dialogue
+// is consumed there and never becomes a request once the block lifts.
+[[nodiscard]] bool write_diary_requested(std::uint32_t scan_code, bool menu_mode, bool dialogue_blocked) {
+    return hotkey_pressed(scan_code) && !menu_mode && !dialogue_blocked;
+}
+
+// Edges are not polled while no session runs, so an adopted session (including one created by a
+// rebind) samples the current key state first: a key held across that gap needs a fresh press.
+void prime_write_diary_edge() {
+    (void)hotkey_pressed(session->configuration().hotkeys.write_diary);
+}
+
+// No retained target: the shared request resolves the right-controller ray, then HMD gaze, and never
+// falls back to the nearest NPC. Returns false when the session or generation changed during capture.
+[[nodiscard]] bool request_pointed_diary(synth::core::SnapshotClock::time_point now) {
+    const auto* owner = session.get();
+    const auto generation = runtime->generation();
+    auto snapshot = runtime->capture_snapshot(now, synth::runtime::RuntimeCapturePurpose::dialogue);
+    if (session.get() != owner || runtime->generation() != generation) return false;
+    if (!snapshot) {
+        present_notification("SYNTHVR diary: the scene could not be captured");
+    } else if (session->request_npc_diary(std::move(snapshot))) {
+        present_notification("SYNTHVR diary requested for the pointed NPC");
+    }
+    return true;
+}
+
 // "false", not "0": the configuration parser only accepts the boolean spelling
 // it emits, so re-arming with a numeric literal would break the next reload.
 void rearm_initialize_control() {
@@ -149,6 +178,8 @@ void invalidate_sessions(bool discard_speech = false) noexcept {
     synth::integration::external_requests.set_available(false);
     pending_session_request = 0;
     runtime_disabled = false;
+    control_status_confirmed = false;
+    control_failure_revision = 0;
     if (session_host) session_host->invalidate();
     if (dispatcher) dispatcher->discard_pending();
     if (session) {
@@ -193,6 +224,26 @@ void adopt_session_result(synth::core::SnapshotClock::time_point now) {
     if (session->configuration().tools.initialize_requested) {
         rearm_initialize_control();
         present_notification("SYNTHVR initialization requested");
+    }
+    (void)session->request_control();
+    prime_write_diary_edge();
+}
+
+// A new session starts from the STANDARD/slot-1 default, not the server's persisted selection. Only a
+// completed status reply confirms it: a failed or busy request also advances the revision but leaves
+// that default in place, so dialogue stays closed until the SYNTH Control hotkey retries.
+void track_control_status() {
+    const auto controls = session->control_state();
+    if (controls.revision == 0) {
+        (void)session->request_control();
+    } else if (!controls.pending && !control_status_confirmed) {
+        if (controls.status == "Server settings confirmed") {
+            control_status_confirmed = true;
+        } else if (controls.revision != control_failure_revision) {
+            control_failure_revision = controls.revision;
+            present_notification("SYNTHVR server settings: " + controls.status +
+                                 "; press SYNTH Control to retry");
+        }
     }
 }
 
@@ -257,6 +308,7 @@ void pump_runtime_impl() {
         const auto& configuration = session->configuration();
         const auto runtime_paused = configuration.behavior.pause_dialogue_in_menus && menu_mode;
         session->set_runtime_paused(runtime_paused);
+        track_control_status();
         if (runtime_paused && profile_timer_paused_at.time_since_epoch().count() == 0) {
             profile_timer_paused_at = now;
         } else if (!runtime_paused && profile_timer_paused_at.time_since_epoch().count() != 0) {
@@ -335,8 +387,10 @@ void pump_runtime_impl() {
         }
         const auto capture_batch = runtime->capture_batch();
         const auto& configuration = session->configuration();
-        const auto regular_dialogue_blocked = session->runtime_paused() ||
+        const auto regular_dialogue_blocked = session->runtime_paused() || !control_status_confirmed ||
             (player_in_combat && !configuration.behavior.enable_combat_dialogue);
+        const auto diary_requested = write_diary_requested(
+            configuration.hotkeys.write_diary, menu_mode, regular_dialogue_blocked);
         const auto* external_owner = session.get();
         const auto external_generation = runtime->generation();
         if (const auto external=synth::adapters::commonlib::pump_external_requests(
@@ -414,6 +468,7 @@ void pump_runtime_impl() {
             }
         }
         if (hotkey_pressed(configuration.hotkeys.synth_control)) {
+            (void)session->request_control();
             session->open_control_panel();
         }
         if (session && hotkey_pressed(configuration.hotkeys.hard_halt)) {
@@ -422,6 +477,7 @@ void pump_runtime_impl() {
             pip_vision_gesture.reset();
             return;
         }
+        if (diary_requested && !request_pointed_diary(now)) return;
         const auto pip_vision = pip_vision_gesture.update(
             hotkey_held(configuration.hotkeys.pip_vision), now);
         if (!regular_dialogue_blocked && pip_vision != synth::input::PressGestureEvent::none) {
@@ -448,7 +504,7 @@ void pump_runtime_impl() {
                 now, manual ? synth::runtime::RuntimeCapturePurpose::dialogue
                             : synth::runtime::RuntimeCapturePurpose::background);
             if (session.get() != owner || runtime->generation() != generation) return;
-            const auto combat_bark = periodic && !manual &&
+            const auto combat_bark = periodic && !manual && control_status_confirmed &&
                                      session->maybe_trigger_combat_bark(snapshot, now);
             const auto bored = periodic && !regular_dialogue_blocked && !manual && !combat_bark &&
                                session->maybe_trigger_bored(snapshot, now);
