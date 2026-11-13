@@ -441,8 +441,9 @@ inline void __stdcall render_control_menu() {
     auto go_back = false;
     if (ImGuiMCP::Begin("SYNTH Control##SYNTH.Control", &keep_open,
                         ImGuiMCP::ImGuiWindowFlags_NoSavedSettings)) {
-        ImGuiMCP::TextDisabled(
-            "Arrow keys move, Enter selects, Escape goes back and closes this menu.");
+        ImGuiMCP::TextWrapped(
+            "Arrow keys move, Enter selects. Escape returns from a submenu or closes SYNTH "
+            "Control from its main page.");
         if (!target.empty()) ImGuiMCP::TextWrapped("Talking to: %s", target.c_str());
         ImGuiMCP::Spacing();
 
@@ -459,7 +460,7 @@ inline void __stdcall render_control_menu() {
             if (control_row(mode_row, true)) control_menu_level = ControlLevel::chat_mode;
 
             const auto model_row =
-                std::string{"LLM Mode  ["} +
+                std::string{"Model Slot  ["} +
                 control_label(llm_models,
                               view.pending_model.empty() ? view.model : view.pending_model) +
                 (view.pending_model.empty() ? "]" : "] (pending)") + "##SYNTH.Control.LlmMode";
@@ -537,7 +538,9 @@ inline void __stdcall render_control_menu() {
             break;
         }
         case ControlLevel::llm_model: {
-            ImGuiMCP::SeparatorText("LLM Mode");
+            ImGuiMCP::SeparatorText("Model Slot");
+            ImGuiMCP::TextWrapped("Choose a model slot configured in the server dashboard.");
+            ImGuiMCP::Spacing();
             auto first = true;
             for (const auto& option : llm_models) {
                 const auto current = view.model == option.value;

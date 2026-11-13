@@ -6,7 +6,7 @@ Source: `codex/response-flow-parity`, preserving the response-flow, subtitle and
 
 In the flat lane the `Hotkeys.SYNTHControl` scan-code binding opens SYNTH's own F4SE Menu Framework window. Like every SYNTH hotkey it ships as 0 (unbound) in `config/SYNTH.ini`. It no longer launches a browser. An explicit Open Server Dashboard row remains available.
 
-The menu exposes Chat Mode, the model slot selector (labelled in `ui/control_menu.hpp`), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
+The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
 
 Mode/model selectors wait for a validated server acknowledgement. Profile refresh waits until the menu closes. Wait Here and Release Wait close the menu automatically and execute on the next menu-free game pump, revalidating the originally displayed NPC. They cannot switch to a new target if that actor disappears.
 

@@ -81,10 +81,10 @@ inline constexpr std::array<ControlOption, 9> chat_modes{{
 }};
 
 inline constexpr std::array<ControlOption, 4> llm_models{{
-    {"Standard", "standard", "The balanced default model slot."},
-    {"Fast", "fast", "Lower latency, shorter replies."},
-    {"Powerful", "powerful", "Slower, for longer or more involved replies."},
-    {"Experimental", "experimental", "Whatever the server currently has under test."},
+    {"Standard", "standard", "The server-configured Standard model slot."},
+    {"Fast", "fast", "The server-configured Fast model slot."},
+    {"Powerful", "powerful", "The server-configured Powerful model slot."},
+    {"Experimental", "experimental", "The server-configured Experimental model slot."},
 }};
 
 // Who a dynamic profile refresh is asked for. The Control menu maps each of
