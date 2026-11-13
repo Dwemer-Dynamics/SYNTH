@@ -189,8 +189,49 @@ private:
     return static_cast<std::uint64_t>(std::llround(hours * (10'000'000.0 / 24.0)));
 }
 
+// Game thread only. Reads the declared BGSLocation::parentLoc member of each pinned adapter (no
+// relocation). Every entry is decoded through the same plugin manifest the snapshot carries; the walk
+// stops explicitly at the root, an undecodable parent, a repeated location or the depth bound.
+[[nodiscard]] inline std::optional<core::LocationAncestry> location_ancestry(
+    const RE::BGSLocation& current, const std::vector<core::LoadedPlugin>& plugins) {
+    core::LocationAncestry result;
+    std::array<const RE::BGSLocation*, core::maximum_location_ancestry> visited{};
+    for (const RE::BGSLocation* location = &current;;) {
+        if (location == nullptr) {
+            result.end = core::LocationAncestryEnd::root;
+            break;
+        }
+        if (std::ranges::find(visited.begin(), visited.begin() + result.chain.size(), location) !=
+            visited.begin() + result.chain.size()) {
+            result.end = core::LocationAncestryEnd::cycle;
+            break;
+        }
+        if (result.chain.size() == core::maximum_location_ancestry) {
+            result.end = core::LocationAncestryEnd::depth_limit;
+            break;
+        }
+        const auto* file = location->GetFile(0);
+        auto plugin = file ? std::string{file->GetFilename()} : std::string{};
+        const auto local = core::plugin_local_form_id(location->GetFormID(), plugin, plugins);
+        if (!local) {
+            result.end = core::LocationAncestryEnd::unresolved;
+            break;
+        }
+        core::LocalLocationIdentity entry{std::move(plugin), *local, bounded_label(location->GetFullName())};
+        if (std::ranges::any_of(result.chain, [&](const auto& prior) { return prior.same_form(entry); })) {
+            result.end = core::LocationAncestryEnd::cycle;
+            break;
+        }
+        visited[result.chain.size()] = location;
+        result.chain.push_back(std::move(entry));
+        location = location->parentLoc;
+    }
+    if (!result.valid()) return std::nullopt;
+    return result;
+}
+
 [[nodiscard]] inline std::optional<core::WorldState> world_state(
-    RE::PlayerCharacter& player, std::uint64_t ticks) {
+    RE::PlayerCharacter& player, std::uint64_t ticks, const std::vector<core::LoadedPlugin>& plugins) {
     auto* cell = player.GetParentCell();
     if (cell == nullptr || ticks == 0) return std::nullopt;
     const auto interior = cell->IsInterior();
@@ -221,10 +262,17 @@ private:
     const auto* location_file = current_location ? current_location->GetFile(0) : nullptr;
     core::LocationIdentity location_ref{current_location ? current_location->GetFormID() : 0,
         location_file ? std::string{location_file->GetFilename()} : std::string{}};
+    // Ancestry exists only beside a valid runtime identity for the same first form.
+    std::optional<core::LocationAncestry> ancestry;
+#ifndef SYNTH_WITH_F4SEVR
+    if (location_ref.valid()) ancestry = location_ancestry(*current_location, plugins);
+#endif
+    if (ancestry && !ancestry->valid_for(location_ref)) ancestry.reset();
     return core::WorldState{std::move(location), std::move(cell_name), std::move(worldspace),
                             std::move(weather), interior, ticks,
                             scene.valid(interior) ? std::optional{std::move(scene)} : std::nullopt,
-                            location_ref.valid() ? std::optional{std::move(location_ref)} : std::nullopt};
+                            location_ref.valid() ? std::optional{std::move(location_ref)} : std::nullopt,
+                            std::move(ancestry)};
 }
 
 [[nodiscard]] inline std::vector<core::LoadedPlugin> loaded_plugins() {
@@ -1673,7 +1721,7 @@ inline void reset_flat_capture_cache() noexcept {
         // Only the audited inventory collector is enabled, never deep faction/package reads.
         // No cross-frame inventory cache: every dialogue owns a fresh observation or explicit unavailability.
         actor_snapshot(*player, playthrough, player, (dialogue || player_inventory) && !menu_mode_active(), false),
-        std::move(actors.actors), ticks, world_state(*player, ticks),
+        std::move(actors.actors), ticks, world_state(*player, ticks, flat_capture_cache.loaded_plugins),
         flat_capture_cache.loaded_plugins, flat_capture_cache.active_quests.quests,
         flat_capture_cache.nearby_references.items,
         flat_capture_cache.nearby_references.points_of_interest,
@@ -1743,12 +1791,14 @@ inline void reset_flat_capture_cache() noexcept {
                                 : nearby_reference_snapshots(*player, hmd_pose);
     auto quests = bootstrap ? QuestCapture{} : active_quest_snapshot(*player);
     auto actors = bootstrap ? NearbyActorSnapshots{} : nearby_actors(*player, playthrough);
+    auto plugins = loaded_plugins();
+    auto world = world_state(*player, ticks, plugins);
     return {actor_pose(*player), hmd_pose,
             left == nullptr ? std::nullopt : std::optional{pose(left->world)},
             right == nullptr ? std::nullopt : std::optional{pose(right->world)},
             actor_snapshot(*player, playthrough, player, !bootstrap, !bootstrap),
             std::move(actors.actors),
-            ticks, world_state(*player, ticks), loaded_plugins(),
+            ticks, std::move(world), std::move(plugins),
             std::move(quests.quests),
             std::move(references.items), std::move(references.points_of_interest),
             std::move(quests.observation), std::move(references.items_observation),

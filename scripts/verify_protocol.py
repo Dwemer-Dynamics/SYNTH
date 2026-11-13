@@ -258,6 +258,18 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if payload_type == "context" and "location_ref" in payload.get("world", {}):
         if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.location_identity" not in value.get("capabilities", []):
             raise ValidationError(f"{path}: canonical location requires negotiated v2 flat capability")
+    if payload_type == "context" and "location_ancestry" in payload.get("world", {}):
+        world = payload["world"]
+        reference = world.get("location_ref")
+        if reference is None or "context.location_ancestry" not in value.get("capabilities", []):
+            raise ValidationError(f"{path}: location ancestry requires negotiated location identity")
+        runtime = int(reference["form_id"], 16)
+        local = runtime & 0xFFF if runtime >> 24 == 0xFE else runtime & 0xFFFFFF
+        chain = world["location_ancestry"]["chain"]
+        keys = {(entry["origin_plugin"].lower(), entry["local_form_id"]) for entry in chain}
+        if runtime >> 24 == 0xFF or chain[0]["origin_plugin"] != reference["origin_plugin"] \
+                or int(chain[0]["local_form_id"], 16) != local or len(keys) != len(chain):
+            raise ValidationError(f"{path}: location ancestry is not the plugin-local chain of location_ref")
     wait_caps={"context.wait_state", "action.wait_verified"}
     caps=set(value.get("capabilities", []))
     if wait_caps & caps and (value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat"

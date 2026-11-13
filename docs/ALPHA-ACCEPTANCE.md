@@ -122,6 +122,21 @@ exactly when the loaded anchor's snapshot covers its heard row.
   ownership/hashes and dashboard visibility (4 November 2026).
 - [ ] VR: verify a controller-accessible diary request and saved entry in-headset.
 
+## Location ancestry
+
+See [LOCATION-ANCESTRY.md](LOCATION-ANCESTRY.md). Builds and fixtures only so far.
+
+- [ ] Flat: in a named interior inside a settlement or district (for example a Diamond City
+  shop), the next context's `world.location_ancestry` lists the interior first and its
+  containing location next, with plugin-local IDs and `end` `root`; the server's prompt line
+  names both.
+- [ ] Flat: a location from a light (ESL-flagged) plugin and one from a full plugin both
+  decode, and the same IDs appear after changing the load order.
+- [ ] Flat: a modded location whose parent is in a plugin outside the manifest, or a
+  runtime-created one, ends `unresolved` (or sends no ancestry); no parent is invented.
+- [ ] Flat: an older server without the init acknowledgement still accepts contexts.
+- [ ] VR: not offered. Location identity and ancestry need in-headset evidence first.
+
 
 Status: **OPEN**. The optional flat radio startup and static A/B playback checks
 have passed on the isolated test save. The broader baseline (client `f34da88`, server

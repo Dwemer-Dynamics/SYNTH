@@ -172,6 +172,9 @@ public:
     [[nodiscard]] bool enemy_awareness_ready() const noexcept {
         return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
     }
+    [[nodiscard]] bool location_ancestry_ready() const noexcept {
+        return location_ancestry_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool action_inventory_ready() const noexcept {
         return action_inventory_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -283,6 +286,7 @@ public:
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
+            location_ancestry_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
             player_events_negotiated_.store(false, std::memory_order_release);
@@ -339,6 +343,11 @@ public:
                 std::ranges::find(options_.capabilities,"context.enemy_awareness")!=options_.capabilities.end() &&
                 std::ranges::find(options_.capabilities,"context.combat_targets")!=options_.capabilities.end() &&
                 std::ranges::find(options_.capabilities,"dialogue.turn_ownership")!=options_.capabilities.end(),std::memory_order_release);
+            // An older server never acknowledges ancestry, so its closed world schema never receives it.
+            location_ancestry_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->location_ancestry &&
+                std::ranges::find(options_.capabilities,"context.location_ancestry")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"context.location_identity")!=options_.capabilities.end(),std::memory_order_release);
             rechat_scene_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->rechat_scene && uses_rechat_scene_contract(),
                 std::memory_order_release);
@@ -434,6 +443,7 @@ public:
         bool companion_supported{};
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
+        bool location_ancestry_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
@@ -461,6 +471,7 @@ public:
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
             companion_supported = companion_comments_ready();
+            location_ancestry_supported = location_ancestry_ready();
         }
         // Participant evidence goes only to a server that acknowledged the companion contract.
         auto negotiated_player_event = player_event;
@@ -469,6 +480,8 @@ public:
         // request_mutex_ still serializes publication and initialization; send_event rechecks cancellation/retirement.
         auto negotiated_quests = active_quests;
         if (!tracking_supported) for (auto& quest : negotiated_quests) quest.tracked.reset();
+        auto negotiated_world = world;
+        if (negotiated_world && !location_ancestry_supported) negotiated_world->location_ancestry.reset();
         auto negotiated_states = actor_states;
         const std::size_t inventory_limit = inventory_supported ? 512 : 32;
         for (auto& state : negotiated_states) {
@@ -485,7 +498,7 @@ public:
             try {
                 body = protocol_native::encode_context(
                     publication_context, playthrough_id, sequence, player, target,
-                    audience, negotiated_states, world, negotiated_quests, nearby_items, points_of_interest, loaded_context,
+                    audience, negotiated_states, negotiated_world, negotiated_quests, nearby_items, points_of_interest, loaded_context,
                     active_quests_observation, nearby_items_observation,
                     points_of_interest_observation, audience_observation, quest_events, negotiated_player_event, actor_events);
                 if (body.size() <= 1'048'576) break;
@@ -1334,6 +1347,7 @@ private:
     std::atomic_bool combat_targets_negotiated_{};
     std::atomic_bool combat_contacts_negotiated_{};
     std::atomic_bool enemy_awareness_negotiated_{};
+    std::atomic_bool location_ancestry_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};

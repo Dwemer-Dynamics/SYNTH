@@ -15,7 +15,7 @@ The acknowledged combat-end observation retains typed participant identities and
 observation times. The server checks that evidence, the active registration,
 current audience and teammate state, event ownership, freshness and first claim.
 It records an observation rather than inventing a player utterance. Comments cannot
-start actions or rechat. New player input, composing, menus, load, dismissal,
+start actions or rechat. New player input, composing, menus configured to pause dialogue, load, dismissal,
 departure or renewed combat cancel only the owned remark. Speech or text must start
 within 15 seconds of admission; early scene validation does not count as delivery.
 
