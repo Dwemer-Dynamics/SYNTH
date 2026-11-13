@@ -305,6 +305,15 @@ struct PackageSnapshot final {
     }
 };
 
+// Copied engine base/current SPECIAL pairs, in SPECIAL order. A missing pair is unknown, not zero.
+struct ActorStatValue final {
+    double base{}, current{};
+    [[nodiscard]] bool valid() const noexcept {
+        return std::isfinite(base) && std::isfinite(current) && std::abs(base)<=1000000 && std::abs(current)<=1000000;
+    }
+};
+using ActorStats = std::array<std::optional<ActorStatValue>, 7>;
+
 class ActorSnapshot final {
 public:
     ActorSnapshot(std::uint32_t form_id,
@@ -447,6 +456,12 @@ public:
     [[nodiscard]] double action_points_percent() const noexcept { return action_points_percent_; }
     [[nodiscard]] bool health_percent_available() const noexcept { return health_percent_available_; }
     [[nodiscard]] bool action_points_percent_available() const noexcept { return action_points_percent_available_; }
+    [[nodiscard]] const ActorStats& actor_stats() const noexcept { return actor_stats_; }
+    // Attach only copied, bounded engine reads; the enclosing snapshot owns their identity and generation.
+    [[nodiscard]] ActorSnapshot with_actor_stats(ActorStats stats) const {
+        for (const auto& value:stats) if (value && !value->valid()) throw std::invalid_argument{"invalid actor stats"};
+        auto result=*this;result.actor_stats_=std::move(stats);return result;
+    }
     [[nodiscard]] const std::vector<InventoryItemSnapshot>& inventory() const noexcept {
         return inventory_;
     }
@@ -533,6 +548,7 @@ public:
         result.faction_observation_ = observed.faction_observation_;
         result.faction_completeness_ = observed.faction_completeness_;
         result.current_package_ = observed.current_package_;
+        result.actor_stats_ = observed.actor_stats_;
         // Selection facts remain frozen; a combat transition during enrichment cannot attest a current opponent.
         result.combat_target_ = in_combat_ == observed.in_combat_ && alive_ == observed.alive_ && disabled_ == observed.disabled_
             ? observed.combat_target_ : CombatTargetSnapshot{};
@@ -607,6 +623,7 @@ private:
     EnemyAwarenessSnapshot enemy_awareness_;
     bool conversation_held_{};
     std::optional<bool> wait_held_;
+    ActorStats actor_stats_{};
 };
 
 class RuntimeSnapshot final {

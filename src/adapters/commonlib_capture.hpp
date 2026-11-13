@@ -1359,7 +1359,7 @@ struct NearbyReferenceSnapshots final {
         !mutable_actor.IsDeleted() && (player_cell == actor_cell ||
         (!player_cell->IsInterior() && !actor_cell->IsInterior() && player_cell->worldSpace &&
          player_cell->worldSpace == actor_cell->worldSpace));
-    return {actor.GetFormID(), name, point(actor.GetPosition()), std::move(plugin), playthrough,
+    auto captured = core::ActorSnapshot{actor.GetFormID(), name, point(actor.GetPosition()), std::move(plugin), playthrough,
             !actor.IsDead(false), mutable_actor.IsDisabled(), actor.IsInCombat(),
             player != nullptr && &actor != player && mutable_actor.GetHostileToActor(player),
             mutable_actor.IsSneaking(), std::max<std::int16_t>(1, mutable_actor.GetLevel()),
@@ -1378,6 +1378,17 @@ struct NearbyReferenceSnapshots final {
             include_details ? enemy_awareness_snapshot(actor,playthrough,player) : core::EnemyAwarenessSnapshot{},
             conversation_hold_observer && conversation_hold_observer(actor.GetFormID()),
             explicit_wait_observer ? explicit_wait_observer(actor.GetFormID()) : std::nullopt};
+    // Deep capture only: no additional actor-value reads in the shallow discovery scan.
+    core::ActorStats stats{};
+    if (include_details && actor_values) {
+        const std::array<const RE::ActorValueInfo*,7> definitions{actor_values->strength,actor_values->perception,
+            actor_values->endurance,actor_values->charisma,actor_values->intelligence,actor_values->agility,actor_values->luck};
+        for (std::size_t index=0;index<definitions.size();++index) if (definitions[index]) {
+            const core::ActorStatValue pair{actor.GetBaseActorValue(*definitions[index]),actor.GetActorValue(*definitions[index])};
+            if (pair.valid()) stats[index]=pair;
+        }
+    }
+    return captured.with_actor_stats(std::move(stats));
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.

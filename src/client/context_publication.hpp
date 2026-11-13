@@ -125,7 +125,7 @@ public:
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
             "profiles.dynamic.refresh", "diary.manual.npc", "diary.manual.narrator", "diary.manual.player", "diary.batch.status",
-            "context.actor_state", "context.actor_factions", "context.combat_targets", "context.world",
+            "context.actor_state", "context.actor_stats", "context.actor_factions", "context.combat_targets", "context.world",
             "context.loaded_plugins", "context.quests",
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
@@ -453,6 +453,7 @@ public:
                         actor.combat_target().actor->display_name}} : std::nullopt,
                     actor.combat_target().actor ? actor.combat_target().actor->race : std::string{}},
             };
+            if (client_.actor_stats_ready()) state.actor_stats=actor.actor_stats();
             if (actor.conversation_held()) state.conversation_held=true;
             if (snapshot.variant()==core::RuntimeVariant::flat && actor.wait_held().has_value()) state.wait_held=actor.wait_held();
             append_actor_combat_observations(state, actor, client_.combat_contacts_ready(), client_.enemy_awareness_ready());

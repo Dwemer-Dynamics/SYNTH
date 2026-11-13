@@ -598,6 +598,106 @@
     },
     "wait_held": {
       "type": "boolean"
+    },
+    "actor_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation"
+      ],
+      "properties": {
+        "observation": {
+          "type": "string",
+          "enum": [
+            "base_current",
+            "unavailable"
+          ]
+        },
+        "special": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strength",
+            "perception",
+            "endurance",
+            "charisma",
+            "intelligence",
+            "agility",
+            "luck"
+          ],
+          "properties": {
+            "strength": {
+              "$ref": "#/$defs/special_value"
+            },
+            "perception": {
+              "$ref": "#/$defs/special_value"
+            },
+            "endurance": {
+              "$ref": "#/$defs/special_value"
+            },
+            "charisma": {
+              "$ref": "#/$defs/special_value"
+            },
+            "intelligence": {
+              "$ref": "#/$defs/special_value"
+            },
+            "agility": {
+              "$ref": "#/$defs/special_value"
+            },
+            "luck": {
+              "$ref": "#/$defs/special_value"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "observation": {
+            "const": "base_current"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "special"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "special"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "special_value": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "base",
+            "current"
+          ],
+          "properties": {
+            "base": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "current": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        }
+      ]
     }
   }
 }

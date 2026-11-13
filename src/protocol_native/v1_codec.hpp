@@ -1,5 +1,6 @@
 #pragma once
 #include "core/save_context.hpp"
+#include "core/snapshot.hpp"
 #include "core/combat_contacts.hpp"
 #include "core/enemy_awareness.hpp"
 #include "core/quest_event_mailbox.hpp"
@@ -85,6 +86,7 @@ struct ActorState {
     std::optional<EnemyAwarenessState> enemy_awareness;
     std::optional<bool> conversation_held;
     std::optional<bool> wait_held;
+    std::optional<core::ActorStats> actor_stats;
 };
 struct WorldState {
     std::string location, cell, worldspace, weather;
@@ -173,7 +175,7 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
@@ -363,7 +365,7 @@ inline Line decode_line(std::string_view wire) {
         line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -372,7 +374,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
             payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
             payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false,
-            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false};
+            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false,
+            payload.find("actor_stats") ? required(payload,"actor_stats").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -543,6 +546,16 @@ inline json::Value actor_state_value(const ActorState& value) {
             {"editor_id", value.current_package.editor_id},
         })}},
     });
+    if (value.actor_stats) {
+        constexpr std::array names{"strength","perception","endurance","charisma","intelligence","agility","luck"};
+        json::Value::Object special;
+        for (std::size_t index=0;index<names.size();++index) {
+            const auto& pair=(*value.actor_stats)[index];
+            if (pair && !pair->valid()) throw std::invalid_argument{"invalid actor stats"};
+            special.emplace_back(names[index],pair ? json::Value{object({{"base",pair->base},{"current",pair->current}})} : json::Value{});
+        }
+        result.emplace_back("actor_stats",object({{"observation","base_current"},{"special",std::move(special)}}));
+    }
     if (value.combat_target) result.emplace_back("combat_target", combat_target_value(*value.combat_target, value));
     if (value.combat_contacts) {
         if (!value.alive || value.disabled || value.actor.form_id=="0x00000014")
@@ -1056,6 +1069,9 @@ inline std::string encode_context(const EventContext& context, std::string playt
             if (state.combat_target && (context.protocol_version != 2 ||
                 std::ranges::find(context.capabilities, "context.combat_targets") == context.capabilities.end()))
                 throw std::invalid_argument{"combat target capability was not negotiated"};
+            if (state.actor_stats && (context.protocol_version!=2 ||
+                std::ranges::find(context.capabilities,"context.actor_stats")==context.capabilities.end()))
+                throw std::invalid_argument{"actor stats require negotiated v2 capability"};
             if (state.combat_contacts && (context.protocol_version!=2 || context.runtime_variant!="flat" ||
                 std::ranges::find(context.capabilities,"context.combat_contacts")==context.capabilities.end() ||
                 std::ranges::find(context.capabilities,"context.combat_targets")==context.capabilities.end() ||

@@ -138,6 +138,9 @@ public:
     [[nodiscard]] bool native_turn_ready() const noexcept {
         return native_turn_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool actor_stats_ready() const noexcept {
+        return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool social_tasks_ready() const noexcept {
         return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -277,6 +280,7 @@ public:
             rechat_scene_negotiated_.store(false, std::memory_order_release);
             social_tasks_negotiated_.store(false, std::memory_order_release);
             native_turn_negotiated_.store(false, std::memory_order_release);
+            actor_stats_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -313,6 +317,8 @@ public:
                 std::holds_alternative<protocol_native::Start>(outcome.lines.front().payload) &&
                 std::holds_alternative<protocol_native::End>(outcome.lines.back().payload);
             const bool supported_init = framed_init && options_.runtime_variant == "flat";
+            actor_stats_negotiated_.store(framed_init && status->code=="init_accepted" && status->actor_stats &&
+                std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
                 std::memory_order_release);
@@ -424,6 +430,7 @@ public:
         bool combat_targets_supported{};
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
+        bool actor_stats_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
@@ -450,6 +457,7 @@ public:
             combat_targets_supported = combat_targets_ready();
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
+            actor_stats_supported = actor_stats_ready();
         }
         // Game-thread readiness/interruption shares state_mutex_: do not hold it for snapshot copies or encoding.
         // request_mutex_ still serializes publication and initialization; send_event rechecks cancellation/retirement.
@@ -461,6 +469,7 @@ public:
             if (!combat_targets_supported) state.combat_target.reset();
             if (!combat_contacts_supported) state.combat_contacts.reset();
             if (!enemy_awareness_supported) state.enemy_awareness.reset();
+            if (!actor_stats_supported) state.actor_stats.reset();
             if (state.inventory.size() <= inventory_limit) continue;
             state.inventory.resize(inventory_limit);
             state.inventory_observation = "partial";
@@ -1331,6 +1340,7 @@ private:
     std::atomic_bool rechat_scene_negotiated_{};
     std::atomic_bool social_tasks_negotiated_{};
     std::atomic_bool native_turn_negotiated_{};
+    std::atomic_bool actor_stats_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};
