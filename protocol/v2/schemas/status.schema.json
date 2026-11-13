@@ -45,6 +45,9 @@
     },
     "location_ancestry": {
       "type": "boolean"
+    },
+    "private_narrator": {
+      "type": "boolean"
     }
   }
 }

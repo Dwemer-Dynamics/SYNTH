@@ -20,6 +20,13 @@ so older servers never see it. It lives only in the existing context snapshot; t
 database schema or bulk export. VR skips the ancestry walk and does not offer it. The server
 projects it into the native prompt. Native tests, fixtures and builds only; see LOCATION-ANCESTRY.md.
 
+## Private narrator candidate
+
+The optional private narrator contract adds immutable named definitions, saved selection and transcript branches,
+and receipt-gated replies using the existing SCTX checkpoint. Legacy Narrator mode remains separate.
+See [PRIVATE-NARRATOR.md](PRIVATE-NARRATOR.md) for controls and limits. Source builds and disposable tests do not
+establish flat gameplay, VR headset presentation or live microphone/provider acceptance. No deployment is included.
+
 ## Installed gift screen and shared wording
 
 The user approved general gifts opening the normal inventory exchange, while

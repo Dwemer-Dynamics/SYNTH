@@ -31,7 +31,9 @@
         "action",
         "status",
         "response_end",
-        "social_task"
+        "social_task",
+        "narrator_reply",
+        "narrator_state"
       ]
     },
     "line_id": {
@@ -85,6 +87,9 @@
           "type": "boolean"
         },
         "companion_combat_comments": {
+          "type": "boolean"
+        },
+        "private_narrator": {
           "type": "boolean"
         }
       },

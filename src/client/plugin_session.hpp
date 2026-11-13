@@ -23,6 +23,7 @@
 #include "client/diary_requests.hpp"
 #include "client/visual_capture.hpp"
 #include "client/server_control.hpp"
+#include "client/private_narrator.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/companion_combat_comment.hpp"
@@ -130,6 +131,22 @@ public:
                     },
                     [this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); },
                     [this](std::string message) { push_notification(std::move(message)); }}},
+          narrator_{{client_, network_, requests_, terminal_, cancellation_.token(),
+                     [this](const Snapshot& snapshot, core::CancellationToken token) {
+                         return publish_snapshot(snapshot, std::nullopt, std::move(token));
+                     },
+                     [this](const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
+                            const Snapshot& snapshot, const core::CancellationToken& token, PrivateNarrator::TerminalHook hook) {
+                         if (token.is_cancelled() || terminal_.load()) return;
+                         const auto caption = speech_.make_caption(line, dialogue, token, snapshot, false,
+                                                                  conversation_holds_, std::nullopt, std::move(hook));
+                         speech_.deliver(line, dialogue, snapshot, token, caption);
+                     },
+                     [this](std::uint64_t generation, const core::CancellationToken& token) {
+                         context_.note_private_narrator(generation, token);
+                     },
+                     [this](std::string message) { push_notification(std::move(message)); },
+                     configuration_.behavior.ai_response_timeout_seconds * 1000U}},
           social_{{configuration_, client_, network_, requests_, context_, terminal_, cancellation_.token(),
                    [this] {
                        return runtime_paused() || composing_.load(std::memory_order_acquire) || dialogue_.recording() ||
@@ -636,6 +653,7 @@ public:
         const bool holding = !external_ready() || !speech_.captions_idle();
         runtime.update_conversation_holds(conversation_holds_.frame(holding,runtime.generation()));
         speech_.pump(generation, runtime);
+        narrator_.pump(generation);
         if (rechat_.pump_prefetched()) return;
         if (runtime_paused_.load(std::memory_order_acquire) || player_voice_active()) return;
         // Only the completed response's final currently playing line may authorize one speculative child.
@@ -680,6 +698,7 @@ public:
     }
 
     [[nodiscard]] bool begin_voice_capture(const Snapshot& snapshot) {
+        private_voice_state_ = narrator_.talking() ? std::optional{narrator_.view().state.state_id} : std::nullopt;
         return dialogue_.begin_voice_capture(snapshot,
             terminal_.load(std::memory_order_acquire) || runtime_paused_.load(std::memory_order_acquire),
             [this] { return begin_player_turn(); }, [this] { mark_activity(); }, current_controls());
@@ -689,6 +708,7 @@ public:
 
     // Called once on the game thread at speech admission, never from the microphone worker.
     void bind_voice_target(const Snapshot& snapshot) {
+        private_voice_state_ = narrator_.talking() ? std::optional{narrator_.view().state.state_id} : std::nullopt;
         dialogue_.bind_voice_target(snapshot, current_controls());
     }
 
@@ -701,6 +721,14 @@ public:
             return runtime_paused_.load(std::memory_order_acquire) || terminal_.load(std::memory_order_acquire);
         });
         if (!voice) return false;
+        if (private_voice_state_) {
+            const auto expected = std::exchange(private_voice_state_, std::nullopt);
+            if (!narrator_.talking() || narrator_.view().state.state_id != *expected) {
+                push_notification("Private narrator changed during recording; try again");
+                return false;
+            }
+            return narrator_.say_voice(std::move(snapshot), std::move(voice->wave));
+        }
         const auto controls = voice->controls;
         const auto target = voice->target ? identity(*voice->target) : identity(snapshot->player());
         if (voice->target && !enrich_selected_actor(snapshot, target)) return false;
@@ -732,6 +760,19 @@ public:
         if (!client_.ready()) {
             push_notification("SYNTH is still connecting; try your message again when connected");
             return false;
+        }
+        if (const auto command = PrivateNarrator::parse(text); command || narrator_.talking()) {
+            // Only private speech and a scene request are new player turns. Viewing and routing controls leave live
+            // playback alone; select and cancel retire just the private lane themselves. A scene without a loaded
+            // selection only asks the player to select first, so it must not interrupt NPC speech either.
+            const auto scene_ready = [this] {
+                const auto view = narrator_.view();
+                return view.available && view.loaded && view.state.selected.has_value();
+            };
+            if (!command || (command->command == PrivateNarrator::Command::scene && scene_ready()))
+                (void)begin_player_turn();
+            mark_activity();
+            return narrator_.handle_text(std::move(snapshot), text);
         }
         auto turn = dialogue_.admit_text(*snapshot, std::move(text), retained, client_.native_turn_ready(),
                                          current_controls());
@@ -918,11 +959,12 @@ public:
             requests_.responses() != 0 ||
             actions_.active() != 0 || speech_.jobs_active() ||
             dialogue_.recording() || !speech_.playback_idle()) return false;
-        return diary_.checkpoint_due();
+        return narrator_.checkpoint_due() || diary_.checkpoint_due();
     }
 
     [[nodiscard]] bool checkpoint_diary(Snapshot snapshot) {
         if (!snapshot || snapshot->generation() != cancellation_.token().generation() || !diary_checkpoint_needed()) return false;
+        if (narrator_.checkpoint_due()) return narrator_.checkpoint(std::move(snapshot));
         const auto selected = dialogue_.selected_target(*snapshot, false);
         const auto target = selected ? std::optional{identity(*selected)} : std::nullopt;
         return diary_.checkpoint(std::move(snapshot), target);
@@ -944,11 +986,16 @@ private:
 
     // Per-call views of session state passed to the dialogue owner; never retained by it.
     [[nodiscard]] PlayerDialogue::Controls current_controls() {
-        return [this] { return server_control_.state().selection; };
+        return [this] {
+            auto selection = server_control_.state().selection;
+            if (narrator_.talking()) selection.mode = "NARRATOR";
+            return selection;
+        };
     }
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
     [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}) {
+        narrator_.cancel_local();
         if (configuration_.behavior.companion_combat_comments) observations_.discard_combat_reactions();
         cancel_companion_remark();
         // A walk survives unrelated player input; only an already-started exchange is interrupted.
@@ -1138,6 +1185,10 @@ private:
     // refresh) and the rollback closure in each ContextBinding capture it; ~PluginSession joins the
     // network lane first.
     ContextPublication context_;
+    // Borrows client, network lane and response accounting declared above; private work joins the same
+    // network and speech lanes before this owner is destroyed.
+    PrivateNarrator narrator_;
+    std::optional<std::uint64_t> private_voice_state_;
     // Borrows configuration, client, network lane, response accounting, context publication and the
     // terminal flag. Its network tasks and progress bindings capture it and its callbacks capture this
     // session; ~PluginSession joins the network lane first. Native visits run only in its game-thread

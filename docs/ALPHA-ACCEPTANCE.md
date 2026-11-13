@@ -6,6 +6,13 @@
 - [ ] VR in headset: independently verify the same capture and prompt behavior.
 - [ ] Existing installation: review the biography repair dry run and back up the database before an explicitly authorized apply.
 
+## Private narrator
+
+- [ ] Flat: create/select/edit definitions, hear and cancel replies, reload an older save and inspect its revisions,
+  selection and complete private transcript; verify the next NPC turn and diary contain no private lines.
+- [ ] VR: repeat independently in headset, including push-to-talk, centered audio and readable transcript controls.
+- [ ] Qualify configured live model, speech recognition and voice providers. Off-game synthetic audio is insufficient.
+
 ## Optional companion combat comments
 
 - [ ] Flat: verify participant selection, duplicate ends, dismissal, re-aggro by

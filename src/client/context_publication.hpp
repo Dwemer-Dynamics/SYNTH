@@ -131,7 +131,7 @@ public:
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
             "action.check_inventory", "action.read_quests", "action.end_conversation",
-            "action.sheathe_weapon"};
+            "action.sheathe_weapon", "narrator.private.v1"};
         append_wait_capabilities(result, variant);
         if (variant==core::RuntimeVariant::flat) result.push_back("action.attack");
         if (variant == core::RuntimeVariant::flat && quest_events_available) result.push_back("context.quest_events");
@@ -338,6 +338,9 @@ public:
     }
 
     void note_wait_outcome(const core::CancellationToken& cancellation) { checkpoint_.note_wait_outcome(cancellation); }
+    void note_private_narrator(std::uint64_t generation, const core::CancellationToken& cancellation) {
+        checkpoint_.note_private_narrator(generation, cancellation);
+    }
 
     // Game pump: true exactly once after a saved ACK covers the latest wait outcome.
     [[nodiscard]] bool take_wait_checkpoint_notice(std::uint64_t generation) { return checkpoint_.take_wait_notice(generation); }

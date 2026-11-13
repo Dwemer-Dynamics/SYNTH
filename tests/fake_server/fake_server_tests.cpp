@@ -1,5 +1,6 @@
 #include "client/fake_http.hpp"
 #include "client/synth_client.hpp"
+#include "client/private_narrator.hpp"
 #include "client/rechat_prefetch.hpp"
 
 #include <iostream>
@@ -8,10 +9,51 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <filesystem>
+#include <fstream>
 
 namespace {
 int checks{};
 #define CHECK(x) do { ++checks; if (!(x)) throw std::runtime_error{std::string{"check failed: "} + #x}; } while (false)
+
+// Rebind the published narrator fixtures to the real client's request IDs; no provider or playback is simulated here.
+class NarratorFixtureTransport final : public synth::client::IHttpTransport {
+public:
+    synth::client::HttpResult send(const synth::client::HttpRequest& request, const synth::client::Cancelled&) override {
+        using namespace synth;
+        const auto event = json::parse(request.body);
+        const auto type = protocol_native::text(event, "type");
+        const auto file = type == "init" || type == "context" ? "response-init-private-narrator.ndjson" :
+            type == "narrator_receipt" ? "response-narrator-receipt.ndjson" : "response-narrator-turn.ndjson";
+        std::ifstream input{std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "protocol/v2/fixtures/valid" / file};
+        if (!input) throw std::runtime_error{"missing narrator fixture"};
+        const auto replace = [](const json::Value& object, std::string_view key, json::Value replacement) {
+            auto fields = object.as_object();
+            for (auto& [name, value] : fields) if (name == key) value = replacement;
+            return json::Value{std::move(fields)};
+        };
+        std::string wire, row;
+        while (std::getline(input, row)) {
+            auto line = json::parse(row);
+            const auto line_type = protocol_native::text(line, "type");
+            if (type == "narrator_command" && line_type == "narrator_reply") continue;
+            const auto id = protocol_native::text(event, "request_id");
+            for (const auto key : {"request_id", "turn_id", "generation", "runtime_variant", "context_sequence"})
+                line = replace(line, key, protocol_native::required(event, key));
+            line = replace(line, "line_id", id + (line_type == "narrator_reply" ? ":narrator" : ":" + line_type));
+            if (type == "context" && line_type == "status")
+                line = replace(line, "payload", json::Value{protocol_native::object({{"code","context_accepted"}})});
+            if (line_type == "narrator_reply") {
+                auto payload = protocol_native::required(line, "payload");
+                payload = replace(payload, "speech", replace(protocol_native::required(payload, "speech"), "utterance_id", id + ":narrator"));
+                line = replace(line, "payload", std::move(payload));
+            }
+            wire += json::write(line) + "\n";
+        }
+        return {client::TransportFailure::none, {200, "application/x-ndjson", std::move(wire)}};
+    }
+    void cancel_all() noexcept override {}
+};
 
 // Echoes correlation fields so native v2 tests can corrupt a late line without hard-coded request counters.
 class BindingEchoTransport final : public synth::client::IHttpTransport {
@@ -189,6 +231,73 @@ int main() {
         (void)candidate.initialize(2,false);
         CHECK(!candidate.actor_stats_ready());
     }
+    try {
+        using namespace synth;
+        NarratorFixtureTransport wire;
+        client::SynthClient narrator{wire, client::SessionOptions{
+            .runtime_session_id="private-client-test", .runtime_variant="flat", .client_version="test", .runtime_version="1.10.163",
+            .capabilities={"narrator.private.v1","context.saved_anchor","dialogue.turn_ownership"}, .protocol_version=2}};
+        CHECK(narrator.initialize(1,false).status==client::RequestStatus::complete);
+        CHECK(narrator.private_narrator_ready());
+        core::CancellationSource owner{core::RuntimeGeneration::initial()};
+        const protocol_native::Identity player{"0x00000014","Fallout4.esm","save:private","Player"};
+        const auto scene=narrator.publish_context(0,"save:private",player,std::nullopt,{}, {},std::nullopt,{}, {},{});
+        CHECK(scene.status==client::RequestStatus::complete);
+        auto binding=scene.context_binding;
+        binding.cancellation=owner.token();
+        binding.turn_id="private-turn";
+        const auto selected=narrator.send_narrator("narrator_command",binding,[](const auto& event) {
+            return protocol_native::encode_narrator_command(event,protocol_native::NarratorAction::state);
+        });
+        CHECK(selected.status==client::RequestStatus::complete);
+        CHECK(std::holds_alternative<protocol_native::NarratorState>(selected.lines[1].payload));
+        const auto response=narrator.send_narrator("narrator_turn",binding,[](const auto& event) {
+            return protocol_native::encode_narrator_turn(event,{protocol_native::NarratorTurnKind::typed,
+                "nd-0123456789abcdef0123456789abcdef",12,"Private question",std::nullopt});
+        });
+        CHECK(response.status==client::RequestStatus::complete);
+        const auto& reply=std::get<protocol_native::NarratorReply>(response.lines[2].payload);
+        const auto received=narrator.send_narrator("narrator_receipt",binding,[&](const auto& event) {
+            return protocol_native::encode_narrator_receipt(event,{response.request_id,reply.narrator,reply.parent_state_id,
+                protocol_native::NarratorReceiptOutcome::audio_completed});
+        });
+        CHECK(received.status==client::RequestStatus::complete);
+        CHECK(std::get<protocol_native::Status>(received.lines[1].payload).code=="narrator_receipt_accepted");
+        owner.cancel();
+        const auto stale=narrator.send_narrator("narrator_command",binding,[](const auto& event) {
+            return protocol_native::encode_narrator_command(event,protocol_native::NarratorAction::state);
+        });
+        CHECK(stale.status!=client::RequestStatus::complete);
+        {
+            // Private narrator work holds the shared response count from admission until its task is destroyed.
+            tasks::TaskLanes lanes{{tasks::LaneConfig{"network", 4, 1, 3}}, 1};
+            std::atomic_bool terminal{};
+            client::ConversationHolds holds;
+            client::DialogueRequests requests{{narrator, lanes, terminal, holds,
+                [](const auto&, const auto&, core::CancellationToken, const auto&) { return client::RequestOutcome{}; },
+                [](const auto&, const auto&, const auto&) {}, [](const auto&) { return false; }, [](std::string) {}}};
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            std::promise<void> entered, release;
+            const auto gate = release.get_future().share();
+            client::PrivateNarrator private_narrator{{narrator, lanes, requests, terminal, session.token(),
+                [&](const auto&, core::CancellationToken) { entered.set_value(); gate.wait(); return client::RequestOutcome{}; },
+                [](const auto&, const auto&, const auto&, const auto&, auto) {}, [](std::uint64_t, const auto&) {},
+                [](std::string) {}}};
+            const auto snapshot = std::make_shared<const core::RuntimeSnapshot>(core::Game::fallout4, core::RuntimeVariant::flat,
+                session.token().generation(), 1, core::SnapshotClock::now(),
+                core::WorldPose{{}, core::UnitVector3::from({1, 0, 0}), core::UnitVector3::from({0, 0, 1})},
+                std::nullopt, std::nullopt, std::nullopt, core::ActorSnapshot{0x14, "Player", {}, "Fallout4.esm", "save:private"},
+                std::vector<core::ActorSnapshot>{});
+            CHECK(private_narrator.refresh(snapshot));
+            entered.get_future().wait();
+            CHECK(requests.responses() == 1);
+            release.set_value();
+            lanes.shutdown(tasks::ShutdownMode::drain);
+            CHECK(requests.responses() == 0);
+            CHECK(!private_narrator.refresh(snapshot));
+            CHECK(requests.responses() == 0);
+        }
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     {
         using namespace synth;
         const auto now = client::RechatPrefetch::Clock::now();
