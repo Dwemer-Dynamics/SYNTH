@@ -4,6 +4,12 @@
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).
 
+## Optional post-combat companion comments
+
+The paired source candidate adds participant-bound, default-off flat comments with
+owned cancellation and a latest-start deadline. See [the feature note](COMPANION-COMBAT-COMMENTS.md).
+No deployment or flat gameplay acceptance; VR remains unavailable.
+
 ## Plugin-local location ancestry
 
 Flat contexts can carry `world.location_ancestry` beside `location_ref`: the current

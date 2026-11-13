@@ -25,6 +25,7 @@
 #include "client/server_control.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
+#include "core/companion_combat_comment.hpp"
 #include "core/snapshot.hpp"
 #include "core/save_context.hpp"
 #include "integration/external_requests.hpp"
@@ -89,7 +90,8 @@ public:
                       .client_version = "0.1.0",
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
-                      .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available),
+                      .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
+                          configuration_.behavior.companion_combat_comments),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
@@ -165,8 +167,9 @@ public:
                        terminal_, runtime_paused_, composing_, cancellation_.token(),
                        [this] { return server_control_.ambient_mode_ready(); },
                        [this](const protocol_native::Line& line, const Snapshot& snapshot,
-                              const core::CancellationToken& cancellation, bool allow_followup, bool combat_bark) {
-                           handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark);
+                              const core::CancellationToken& cancellation, bool allow_followup, bool combat_bark,
+                              std::optional<core::SnapshotClock::time_point> companion_start_by) {
+                           handle_line(line, snapshot, cancellation, allow_followup, {}, combat_bark, companion_start_by);
                        },
                        [this](std::string message) { push_notification(std::move(message)); }}},
           diary_{{configuration_, client_, network_, context_, terminal_, runtime_paused_, halting_, cancellation_.token(),
@@ -282,7 +285,13 @@ public:
         observations_.observe_enemy_awareness(owner, captured, generation, now);
     }
 
-    void observe_player_events(std::optional<core::PlayerEventSample> sample) { observations_.observe_player_events(std::move(sample)); }
+    void observe_player_events(std::optional<core::PlayerEventSample> sample) {
+        if (configuration_.behavior.companion_combat_comments && (!sample || sample->in_combat)) {
+            observations_.discard_combat_reactions();
+            cancel_companion_remark();
+        }
+        observations_.observe_player_events(std::move(sample));
+    }
     [[nodiscard]] std::array<std::uint64_t, 2> player_event_health() const noexcept { return observations_.player_event_health(); }
     [[nodiscard]] bool publish_player_event(Snapshot snapshot) { return observations_.publish_player_event(std::move(snapshot)); }
 
@@ -388,6 +397,10 @@ public:
     }
 
     void set_composing(bool composing) {
+        if (composing && configuration_.behavior.companion_combat_comments) {
+            observations_.discard_combat_reactions();
+            cancel_companion_remark();
+        }
         composing_.store(composing, std::memory_order_release);
         speech_.set_paused(composing || runtime_paused());
     }
@@ -404,6 +417,10 @@ public:
     }
 
     void set_runtime_paused(bool paused) {
+        if (paused && configuration_.behavior.companion_combat_comments) {
+            observations_.discard_combat_reactions();
+            cancel_companion_remark();
+        }
         const auto previous = runtime_paused_.exchange(paused, std::memory_order_acq_rel);
         speech_.set_paused(paused || composing_.load(std::memory_order_acquire));
         if (previous == paused) return;
@@ -434,7 +451,9 @@ public:
 
     // Only acknowledged, recent transitions can request one comment; lack of a speaker never blocks history delivery.
     [[nodiscard]] bool maybe_trigger_player_reaction(Snapshot snapshot, core::SnapshotClock::time_point now) {
-        const auto* event = observations_.player_reaction(now);
+        // The companion opt-in owns combat ends, so the generic path cannot bypass participation evidence.
+        const auto* event = configuration_.behavior.companion_combat_comments
+            ? observations_.player_reaction_without_combat_end(now) : observations_.player_reaction(now);
         if (!event || !snapshot || !client_.player_reactions_ready() || snapshot->variant() != core::RuntimeVariant::flat ||
             snapshot->player().in_combat() ||
             dialogue_.recording() || runtime_paused() || terminal_.load(std::memory_order_acquire) ||
@@ -454,8 +473,78 @@ public:
         return true;
     }
 
+    // Opt-in flat postcombat remark; see core/companion_combat_comment.hpp. Every captured scene adds
+    // encounter evidence and revalidates the owned remark. Only that child source is cancelled here.
+    void observe_companion_encounter(const Snapshot& snapshot) {
+        if (!snapshot || !configuration_.behavior.companion_combat_comments || snapshot->variant() != core::RuntimeVariant::flat ||
+            snapshot->generation() != cancellation_.token().generation()) return;
+        observations_.observe_combat_participants(*snapshot);
+        if (!companion_remark_) return;
+        if (companion_remark_->source.is_cancelled() || (requests_.responses() == 0 && !speech_.jobs_active() &&
+            speech_.playback_idle() && speech_.captions_idle())) {
+            companion_remark_.reset();
+            return;
+        }
+        if (std::ranges::any_of(snapshot->actors(), [&](const auto& actor) {
+                return actor.in_combat() && std::ranges::any_of(companion_remark_->participants,
+                    [&](const auto& participant) { return core::same_participant(participant, actor); });
+            })) {
+            cancel_companion_remark();
+            return;
+        }
+        const auto found = std::ranges::find_if(snapshot->actors(), [&](const auto& actor) {
+            return actor.form_id() == companion_remark_->form_id; });
+        if (found == snapshot->actors().end() || actor_key(identity(*found)) != companion_remark_->actor_key ||
+            !targeting::dialogue_actor_available(*found) ||
+            !core::companion_still_following(*found, *snapshot, configuration_.activation.automatic_hearing_distance))
+            cancel_companion_remark();
+    }
+
+    // The newest acknowledged end is decided once after continuous quiet: admitted, or dropped when busy or unproven.
+    [[nodiscard]] bool maybe_trigger_companion_comment(Snapshot snapshot, core::SnapshotClock::time_point now,
+                                                      bool admission_blocked = false) {
+        if (!snapshot || !configuration_.behavior.companion_combat_comments || snapshot->variant() != core::RuntimeVariant::flat ||
+            !client_.companion_comments_ready()) return false;
+        const auto* end = observations_.latest_combat_end(now);
+        if (!end || snapshot->generation() != end->after.generation || snapshot->player().form_id() != end->after.form_id ||
+            snapshot->player().origin_plugin() != end->after.origin_plugin ||
+            snapshot->player().playthrough_id() != end->after.playthrough_id) return false;
+        const auto step = core::companion_comment_step(companion_quiet_, *end, *snapshot, observations_.sampled_player_in_combat(), now);
+        if (step == core::CompanionCommentStep::wait) return false;
+        const auto evidence = *end;
+        observations_.consume_combat_ends_through(evidence.serial);
+        if (step == core::CompanionCommentStep::drop || admission_blocked || (companion_remark_ && !companion_remark_->source.is_cancelled()) ||
+            dialogue_.recording() || player_voice_active() ||
+            composing_.load(std::memory_order_acquire) || runtime_paused() || terminal_.load(std::memory_order_acquire) ||
+            !client_.ready() || !speech_.playback_idle() || !speech_.captions_idle() || speech_.jobs_active() ||
+            requests_.responses() != 0 || actions_.active() != 0 || !rechat_.idle() ||
+            observations_.player_event_tasks() != 0 || !server_control_.ambient_mode_ready()) return false;
+        const auto selected = activation_.select_companion_speaker(*snapshot, evidence, now);
+        if (!selected || !activation_.claim_companion_comment(now)) return false;
+        companion_remark_.emplace(current_turn_token(), actor_key(selected->first), selected->second);
+        companion_remark_->participants = evidence.participants;
+        if (!activation_.queue_context_trigger("companion_combat_comment", selected->first, std::move(snapshot),
+                "companion comment stopped", std::nullopt, std::nullopt, evidence.serial,
+                now + core::companion_comment_start_budget, companion_remark_->source.token())) {
+            companion_remark_.reset();
+            activation_.release_companion_comment_claim();
+            return false;
+        }
+        return true;
+    }
+
 private:
     [[nodiscard]] bool player_voice_active() const { return dialogue_.voice_active(); }
+
+    // Renewed combat, departure, dismissal or its own rejected presentation; unrelated dialogue is untouched.
+    void cancel_companion_remark(const std::optional<core::CancellationToken>& presented = std::nullopt) {
+        if (!companion_remark_ || (presented && !companion_remark_->source.cancel_if_owner(*presented))) return;
+        companion_remark_->source.cancel();
+        companion_remark_.reset();
+        (void)network_.discard_cancelled();
+        (void)speech_.discard_cancelled_jobs();
+        dialogue_.cancel_interrupted_turn();
+    }
 
 public:
     [[nodiscard]] bool maybe_trigger_bored(Snapshot snapshot, core::SnapshotClock::time_point now) {
@@ -577,6 +666,7 @@ public:
         switch (speech_.validate_presentation(caption, snapshot)) {
         case SpeechDelivery::PresentationCheck::rejected_combat: invalidate_response(caption->cancellation); break;
         case SpeechDelivery::PresentationCheck::rejected: stop_dialogue(); break;
+        case SpeechDelivery::PresentationCheck::rejected_owned: cancel_companion_remark(caption->cancellation); break;
         case SpeechDelivery::PresentationCheck::ignored:
         case SpeechDelivery::PresentationCheck::accepted: break;
         }
@@ -859,6 +949,8 @@ private:
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
     [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}) {
+        if (configuration_.behavior.companion_combat_comments) observations_.discard_combat_reactions();
+        cancel_companion_remark();
         // A walk survives unrelated player input; only an already-started exchange is interrupted.
         social_.interrupt_dialogue();
         conversation_holds_.clear();
@@ -914,7 +1006,8 @@ private:
 
     void handle_line(const protocol_native::Line& line, const Snapshot& snapshot,
                      const core::CancellationToken& cancellation, bool allow_followup = true,
-                     const std::shared_ptr<RechatPrefetch>& prefetch = {}, bool combat_bark = false) {
+                     const std::shared_ptr<RechatPrefetch>& prefetch = {}, bool combat_bark = false,
+                     std::optional<core::SnapshotClock::time_point> companion_start_by = std::nullopt) {
         if (cancellation.is_cancelled() || !snapshot || line.generation != snapshot->generation().value() || line.context_sequence == 0
             || terminal_.load(std::memory_order_acquire)) return;
         trace_->record(diagnostics::ConversationStage::line_applied,line.generation,line.context_sequence,line.request_id,line.line_id);
@@ -940,7 +1033,8 @@ private:
             context_.note_dialogue_history(snapshot->variant(), cancellation);
             mark_activity();
             // VR shows this caption from its subtitle frame, so a cancelled or replaced turn never displays.
-            const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_);
+            const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_,
+                                                      companion_start_by);
             const bool social_reply=social_.track(line,caption);
             speech_.deliver(line, *dialogue, snapshot, cancellation, caption, prefetch);
             if (!allow_followup||social_reply) return;
@@ -991,6 +1085,7 @@ private:
             configuration_.behavior.end_conversation_cooldown_seconds});
         activation_.forget(key);
         rechat_.forget(key);
+        if (companion_remark_ && companion_remark_->actor_key == key) cancel_companion_remark();
     }
 
     void push_notification(std::string message) { notifications_.push(std::move(message)); }
@@ -1077,6 +1172,17 @@ private:
     // Its line callback captures this session. Its network task captures it, and ~PluginSession
     // joins the network lane first, so no task or counter guard outlives it.
     VisualCapture vision_;
+    // Game-thread-only postcombat remark: a child of the turn token, so input and load cancel it too.
+    struct CompanionRemark final {
+        CompanionRemark(const core::CancellationToken& turn, std::string key, std::uint32_t form)
+            : source{turn}, actor_key{std::move(key)}, form_id{form} {}
+        core::CancellationSource source;
+        std::string actor_key;
+        std::uint32_t form_id{};
+        std::vector<core::CombatParticipant> participants;
+    };
+    std::optional<CompanionRemark> companion_remark_;
+    core::CompanionCommentQuiet companion_quiet_;
 };
 
 }  // namespace synth::client

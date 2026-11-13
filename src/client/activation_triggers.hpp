@@ -9,6 +9,7 @@
 #include "client/synth_client.hpp"
 #include "config/config.hpp"
 #include "context/context.hpp"
+#include "core/companion_combat_comment.hpp"
 #include "core/snapshot.hpp"
 #include "targeting/targeting.hpp"
 #include "tasks/task_lanes.hpp"
@@ -62,7 +63,8 @@ public:
     using AmbientReady = std::function<bool()>;
     // Session response routing for a trigger's lines; one-shots disallow follow-up.
     using LineSink = std::function<void(const protocol_native::Line&, const Snapshot&, const core::CancellationToken&,
-                                        bool allow_followup, bool combat_bark)>;
+                                        bool allow_followup, bool combat_bark,
+                                        std::optional<core::SnapshotClock::time_point> companion_start_by)>;
 
     struct Dependencies final {
         const config::Config& configuration;
@@ -174,7 +176,7 @@ public:
                                 const auto greeting = client_.trigger(
                                     "auto_greeting", actor,
                                     [this, snapshot, cancellation](const protocol_native::Line& line) {
-                                        line_(line, snapshot, cancellation, true, false);
+                                        line_(line, snapshot, cancellation, true, false, std::nullopt);
                                     },
                                     snapshot->game_time_ticks(), std::nullopt, context_outcome.context_binding);
                                 if (greeting.status != RequestStatus::complete) {
@@ -239,6 +241,23 @@ public:
         return selected;
     }
 
+    // Registered recorded participant only; nearest wins, ties by reference ID, never owner or crosshair.
+    [[nodiscard]] std::optional<std::pair<protocol_native::Identity, std::uint32_t>> select_companion_speaker(
+        const core::RuntimeSnapshot& snapshot, const core::PlayerEventTransition& end, core::SnapshotClock::time_point now) {
+        const core::ActorSnapshot* selected{};
+        std::unique_lock lock{active_quest_actors_mutex_, std::try_to_lock};
+        if (!lock.owns_lock()) return std::nullopt;
+        if (!dialogue_.try_with_conversation([&](const std::optional<std::string>&, const auto& cooling) {
+            selected = core::select_companion_speaker(snapshot, end, configuration_.activation.automatic_hearing_distance,
+                [&](const core::ActorSnapshot& actor) {
+                    const auto key = actor_key(identity(actor));
+                    return std::ranges::find(active_quest_actors_, key) != active_quest_actors_.end() && !cooling(key, now) &&
+                        targeting::dialogue_actor_available(actor);
+                });
+        }) || !selected) return std::nullopt;
+        return std::pair{identity(*selected), selected->form_id()};
+    }
+
     void mark_activity(core::SnapshotClock::time_point when) {
         std::scoped_lock lock{activity_mutex_};
         last_activity_at_ = when;
@@ -270,13 +289,26 @@ public:
         last_combat_bark_at_ = {};
     }
 
+    // One 30-second claim shared by every companion; released only when the request is not queued.
+    [[nodiscard]] bool claim_companion_comment(core::SnapshotClock::time_point now) {
+        std::scoped_lock lock{activity_mutex_};
+        if (last_companion_comment_at_ && now - *last_companion_comment_at_ < core::companion_comment_cooldown) return false;
+        last_companion_comment_at_ = now;
+        return true;
+    }
+    void release_companion_comment_claim() {
+        std::scoped_lock lock{activity_mutex_};
+        last_companion_comment_at_.reset();
+    }
+
     // Game thread. Publishes the captured frame before issuing an unsolicited dialogue trigger.
     [[nodiscard]] bool queue_context_trigger(std::string kind, protocol_native::Identity actor,
                                              Snapshot snapshot, std::string failure_label,
                                              std::optional<std::string> external_text = std::nullopt,
                                              std::optional<std::uint64_t> previous_sequence = std::nullopt,
                                              std::optional<std::uint64_t> player_event_serial = std::nullopt,
-                                             std::optional<core::SnapshotClock::time_point> event_deadline = std::nullopt) {
+                                             std::optional<core::SnapshotClock::time_point> event_deadline = std::nullopt,
+                                             std::optional<core::CancellationToken> owner_turn = std::nullopt) {
         if (!observations_.enrich_selected_actor(snapshot, actor)) return false;
         if (kind == "bored") {
             const auto captured_deadline = snapshot->captured_at() + std::chrono::seconds{2};
@@ -295,7 +327,7 @@ public:
             event_deadline.value_or(core::SnapshotClock::time_point::max()));
         if (deadline <= now) return false;
         const auto accepted = network_.try_submit(
-            "network", tasks::TaskClass::current_turn, deadline, dialogue_.current_turn(),
+            "network", tasks::TaskClass::current_turn, deadline, owner_turn ? *owner_turn : dialogue_.current_turn(),
             requests_.track_response(
             [this, kind = std::move(kind), actor = std::move(actor),
              snapshot = std::move(snapshot), failure_label = std::move(failure_label), external_text = std::move(external_text), previous_sequence,
@@ -318,10 +350,18 @@ public:
                     if (event_deadline && (core::SnapshotClock::now() > *event_deadline || cancellation.is_cancelled() ||
                         paused_.load(std::memory_order_acquire))) return;
                     if (kind == "bored" && (composing_.load(std::memory_order_acquire) || !ambient_ready_())) return;
-                    const auto one_shot=kind=="external_tts" || kind=="external_comment" || kind=="external_reaction" || kind=="quest_updated" || kind=="player_reaction" || kind=="combat_bark";
+                    const auto one_shot=kind=="external_tts" || kind=="external_comment" || kind=="external_reaction" || kind=="quest_updated" || kind=="player_reaction" || kind=="combat_bark" || kind=="companion_combat_comment";
+                    const auto start_by = kind == "companion_combat_comment" ? event_deadline : std::nullopt;
                     const auto outcome = client_.trigger(
-                        kind, actor, [this, snapshot, cancellation, one_shot, combat_bark = kind == "combat_bark"](const protocol_native::Line& line) {
-                            line_(line, snapshot, cancellation, !one_shot, combat_bark);
+                        kind, actor, [this, snapshot, cancellation, actor, one_shot, combat_bark = kind == "combat_bark", start_by](const protocol_native::Line& line) {
+                            if (start_by) {
+                                if (core::SnapshotClock::now() > *start_by || cancellation.is_cancelled()) return;
+                                if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload)) {
+                                    const auto* speaker = std::get_if<protocol_native::Identity>(&dialogue->speaker);
+                                    if (!speaker || actor_key(*speaker) != actor_key(actor)) return;
+                                }
+                            }
+                            line_(line, snapshot, cancellation, !one_shot, combat_bark, start_by);
                         }, std::nullopt, external_text, context_outcome.context_binding, std::nullopt, previous_sequence, player_event_serial);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
                         notify_("SYNTH " + failure_label + ": " + outcome.detail);
@@ -367,6 +407,7 @@ private:
     std::mutex activity_mutex_;
     core::SnapshotClock::time_point last_activity_at_{core::SnapshotClock::now()};
     core::SnapshotClock::time_point last_combat_bark_at_{};
+    std::optional<core::SnapshotClock::time_point> last_companion_comment_at_;
 };
 
 }  // namespace synth::client

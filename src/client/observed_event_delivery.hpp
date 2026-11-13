@@ -309,7 +309,21 @@ public:
     [[nodiscard]] const core::PlayerEventTransition* player_reaction(core::SnapshotClock::time_point now) {
         return player_events_.reaction(now);
     }
+    // Companion opt-in: combat ends belong to the participant-bound remark, never the generic reaction.
+    [[nodiscard]] const core::PlayerEventTransition* player_reaction_without_combat_end(core::SnapshotClock::time_point now) {
+        return player_events_.reaction(now, false);
+    }
     [[nodiscard]] bool consume_player_reaction(std::uint64_t serial) { return player_events_.consume_reaction(serial); }
+    // Game thread companion encounter evidence; see PlayerEventSampler::observe_participants.
+    void observe_combat_participants(const core::RuntimeSnapshot& scene) {
+        if (!terminal_.load(std::memory_order_acquire)) player_events_.observe_participants(scene);
+    }
+    [[nodiscard]] const core::PlayerEventTransition* latest_combat_end(core::SnapshotClock::time_point now) {
+        return player_events_.latest_combat_end(now);
+    }
+    void consume_combat_ends_through(std::uint64_t serial) { (void)player_events_.consume_combat_ends_through(serial); }
+    void discard_combat_reactions() { player_events_.discard_combat_reactions(); }
+    [[nodiscard]] bool sampled_player_in_combat() const noexcept { return player_events_.in_combat(); }
     [[nodiscard]] std::size_t player_event_tasks() const noexcept { return player_event_tasks_.load(std::memory_order_acquire); }
 
     // Call only before worker admission; continuations keep their original immutable enriched snapshot.
