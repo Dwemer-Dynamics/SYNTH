@@ -7,7 +7,7 @@ Flat contexts can carry `world.location_ancestry` beside `location_ref`: the cur
 through the loaded plugin manifest, with an explicit `root`, `unresolved`, `cycle` or
 `depth_limit` end. It needs `context.location_ancestry` and the server's init acknowledgement,
 so older servers never see it. It lives only in the existing context snapshot; there is no new
-database schema or bulk export. VR compiles the same capture but does not offer it. The server
+database schema or bulk export. VR skips the ancestry walk and does not offer it. The server
 projects it into the native prompt. Native tests, fixtures and builds only; see LOCATION-ANCESTRY.md.
 
 ## Installed gift screen and shared wording

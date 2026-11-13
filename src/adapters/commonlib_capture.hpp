@@ -263,7 +263,10 @@ private:
     core::LocationIdentity location_ref{current_location ? current_location->GetFormID() : 0,
         location_file ? std::string{location_file->GetFilename()} : std::string{}};
     // Ancestry exists only beside a valid runtime identity for the same first form.
-    auto ancestry = location_ref.valid() ? location_ancestry(*current_location, plugins) : std::nullopt;
+    std::optional<core::LocationAncestry> ancestry;
+#ifndef SYNTH_WITH_F4SEVR
+    if (location_ref.valid()) ancestry = location_ancestry(*current_location, plugins);
+#endif
     if (ancestry && !ancestry->valid_for(location_ref)) ancestry.reset();
     return core::WorldState{std::move(location), std::move(cell_name), std::move(worldspace),
                             std::move(weather), interior, ticks,

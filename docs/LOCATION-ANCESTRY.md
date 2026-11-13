@@ -50,7 +50,7 @@ entry is not the same form as `location_ref`, no ancestry is sent at all.
   object is closed, never receives it. Older clients send no ancestry and are unaffected.
 - The codec emits ancestry only with a negotiated `location_ref` and refuses an ancestry whose first
   entry, bounds, end or uniqueness are invalid, as it does for other identities.
-- VR compiles and runs the same capture but sends nothing new: it does not advertise
+- VR skips the ancestry walk and sends nothing new: it does not advertise
   `context.location_identity`, and the ancestry capability depends on it. Enabling both in VR
   needs in-headset evidence first.
 
