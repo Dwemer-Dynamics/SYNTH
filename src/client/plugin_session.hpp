@@ -671,8 +671,11 @@ public:
             push_notification("SYNTH is still connecting; try your message again when connected");
             return false;
         }
-        if (PrivateNarrator::parse(text) || narrator_.talking()) {
-            (void)begin_player_turn();
+        if (const auto command = PrivateNarrator::parse(text); command || narrator_.talking()) {
+            // Only private speech and a scene request are new player turns. Viewing and routing controls leave live
+            // playback alone; select and cancel retire just the private lane themselves.
+            if (!command || (command->command == PrivateNarrator::Command::scene && narrator_.ready()))
+                (void)begin_player_turn();
             mark_activity();
             return narrator_.handle_text(std::move(snapshot), text);
         }
