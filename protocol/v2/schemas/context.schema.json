@@ -25,6 +25,79 @@
           "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
         }
       }
+    },
+    "location_ancestry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "end",
+        "chain"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "end": {
+                "const": "depth_limit"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "chain": {
+                "minItems": 8
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "end": {
+          "enum": [
+            "root",
+            "unresolved",
+            "cycle",
+            "depth_limit"
+          ]
+        },
+        "chain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/local_location"
+          }
+        }
+      }
+    },
+    "local_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_plugin",
+        "local_form_id",
+        "display_name"
+      ],
+      "properties": {
+        "origin_plugin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+        },
+        "local_form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-F]{6}$",
+          "not": {
+            "const": "0x000000"
+          }
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 255
+        }
+      }
     }
   },
   "type": "object",
@@ -246,6 +319,18 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "location_ancestry"
+            ]
+          },
+          "then": {
+            "required": [
+              "location_ref"
+            ]
+          }
         }
       ],
       "required": [
@@ -306,6 +391,9 @@
         },
         "location_ref": {
           "$ref": "#/$defs/scene_reference"
+        },
+        "location_ancestry": {
+          "$ref": "#/$defs/location_ancestry"
         }
       }
     },

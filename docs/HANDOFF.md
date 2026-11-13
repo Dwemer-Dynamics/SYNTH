@@ -4,6 +4,16 @@
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).
 
+## Plugin-local location ancestry
+
+Flat contexts can carry `world.location_ancestry` beside `location_ref`: the current
+`BGSLocation` and its `parentLoc` chain, at most eight entries, as plugin-local IDs decoded
+through the loaded plugin manifest, with an explicit `root`, `unresolved`, `cycle` or
+`depth_limit` end. It needs `context.location_ancestry` and the server's init acknowledgement,
+so older servers never see it. It lives only in the existing context snapshot; there is no new
+database schema or bulk export. VR skips the ancestry walk and does not offer it. The server
+projects it into the native prompt. Native tests, fixtures and builds only; see LOCATION-ANCESTRY.md.
+
 ## Installed gift screen and shared wording
 
 The user approved general gifts opening the normal inventory exchange, while

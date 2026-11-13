@@ -1412,6 +1412,51 @@
       }
     },
     {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "world"
+            ],
+            "properties": {
+              "world": {
+                "required": [
+                  "location_ancestry"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "context.location_identity"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.location_ancestry"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "$comment": "wait-state-capability",
       "if": {
         "properties": {

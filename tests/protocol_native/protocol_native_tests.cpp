@@ -599,6 +599,56 @@ int main(int argc,char** argv){
       (void)synth::protocol_native::world_state_value(world,true);
     }
     {
+      using synth::core::LocationAncestryEnd;
+      const std::vector<synth::core::LoadedPlugin> plugins{{"Fallout4.esm",false,0,0,0,"00"},
+          {"Interiors.esp",false,0x21,0,0x21,"21"},{"Tiny.esl",true,0xFE,2,2,"FE002"}};
+      if(synth::core::plugin_local_form_id(0x2101F2A3,"Interiors.esp",plugins)!=0x01F2A3U ||
+         synth::core::plugin_local_form_id(0xFE002801,"Tiny.esl",plugins)!=0x801U ||
+         synth::core::plugin_local_form_id(0x2201F2A3,"Interiors.esp",plugins) ||
+         synth::core::plugin_local_form_id(0xFE003801,"Tiny.esl",plugins) ||
+         synth::core::plugin_local_form_id(0xFF000801,"Tiny.esl",plugins) ||
+         synth::core::plugin_local_form_id(0x0001F2A3,"Missing.esp",plugins))
+        throw std::runtime_error{"location FormID decoded outside its loaded plugin slot"};
+      const synth::core::LocalLocationIdentity basement{"Interiors.esp",0x000801,"Basement"};
+      if(basement.same_form({"Tiny.esl",0x000801,"Basement"}) || !basement.same_form({"interiors.ESP",0x000801,"Other"}))
+        throw std::runtime_error{"same display name collapsed distinct plugin-local locations"};
+      synth::protocol_native::WorldState world{"Basement","BasementCell","","",true,42,std::nullopt,
+          synth::core::LocationIdentity{0x21000801,"Interiors.esp"},
+          synth::core::LocationAncestry{{basement,{"Fallout4.esm",0x0001F2A3,"Diamond City"},{"Fallout4.esm",0x00000020,"Commonwealth"}},
+              LocationAncestryEnd::root}};
+      if(synth::json::write(synth::protocol_native::world_state_value(world,false,true)).find("location_ancestry")!=std::string::npos ||
+         synth::json::write(synth::protocol_native::world_state_value(world,false,false,true)).find("location_ancestry")!=std::string::npos)
+        throw std::runtime_error{"location ancestry leaked to an unnegotiated peer"};
+      const auto value=synth::protocol_native::world_state_value(world,false,true,true);
+      const auto& ancestry=synth::protocol_native::required(value,"location_ancestry");
+      const auto& chain=synth::protocol_native::required(ancestry,"chain").as_array();
+      if(synth::protocol_native::text(ancestry,"end")!="root" || chain.size()!=3 ||
+         synth::protocol_native::text(chain[0],"local_form_id")!="0x000801" ||
+         synth::protocol_native::text(chain[1],"local_form_id")!="0x01F2A3")
+        throw std::runtime_error{"plugin-local location ancestry lost"};
+      for(int bad=0;bad<5;++bad) {
+        auto invalid=world;auto& broken=*invalid.location_ancestry;
+        if(bad==0) broken.chain.push_back(broken.chain[1]);                     // repeated location is a cycle, never a parent
+        if(bad==1) invalid.location_ref->form_id=0x21000802;                    // first entry is another form
+        if(bad==2) broken.end=LocationAncestryEnd::depth_limit;                 // truncation claimed below the bound
+        if(bad==3) broken.chain.clear();
+        if(bad==4) for(std::uint32_t extra=1;broken.chain.size()<=synth::core::maximum_location_ancestry;++extra)
+            broken.chain.push_back({"Extra.esp",extra,""});
+        bool rejected=false;
+        try { (void)synth::protocol_native::world_state_value(invalid,false,true,true); } catch(const std::invalid_argument&) { rejected=true; }
+        if(!rejected) throw std::runtime_error{"invalid location ancestry accepted"};
+      }
+      world.location_ancestry->chain.pop_back();world.location_ancestry->end=LocationAncestryEnd::unresolved;
+      if(synth::protocol_native::text(synth::protocol_native::required(synth::protocol_native::world_state_value(world,false,true,true),
+          "location_ancestry"),"end")!="unresolved") throw std::runtime_error{"unresolved parent was presented as a root"};
+      for(std::uint32_t extra=1;world.location_ancestry->chain.size()<synth::core::maximum_location_ancestry;++extra)
+          world.location_ancestry->chain.push_back({"Extra.esp",extra,""});
+      for(const auto end:{LocationAncestryEnd::root,LocationAncestryEnd::unresolved,LocationAncestryEnd::cycle,LocationAncestryEnd::depth_limit}) {
+          world.location_ancestry->end=end;
+          if(!world.location_ancestry->valid()) throw std::runtime_error{"valid ancestry end at depth bound was dropped"};
+      }
+    }
+    {
       auto owner=owned_context; owner.capabilities.push_back("dialogue.rechat.scene");
       auto fresh=parent; fresh.scene_context_sequence=8;
       const auto wire=synth::json::parse(encode_rechat(owner,"rechat",fresh));
