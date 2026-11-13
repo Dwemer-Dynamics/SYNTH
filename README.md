@@ -124,6 +124,7 @@ them on a host with the compiled `out/wait-papyrus/` (see
 
 ## Documents
 
+- [Documentation index](docs/README.md): components, notes, source entry points and tests
 - [Developer handoff](docs/HANDOFF.md) and [alpha acceptance](docs/ALPHA-ACCEPTANCE.md)
 - [Native architecture](docs/ARCHITECTURE.md) and [client/server protocol](docs/PROTOCOL.md)
 - [Fallout 4/F4SE toolchain](docs/FALLOUT4-TOOLCHAIN.md) and [gameplay records](docs/ESP-DEFERRED-SETUP.md)

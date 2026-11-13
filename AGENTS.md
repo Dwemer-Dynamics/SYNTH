@@ -48,7 +48,9 @@ owns PHP, Apache, PostgreSQL, prompts, connectors, memory, TTS/STT services, and
 ## Workflow
 
 - Start from `docs/HANDOFF.md`. It records the current baseline, runtimes, deferred work and the
-  retired ledgers. Track open in-game items in `docs/ALPHA-ACCEPTANCE.md`.
+  retired ledgers. Track open in-game items in `docs/ALPHA-ACCEPTANCE.md`. Find component notes
+  and source entry points in `docs/README.md`; code and comment conventions are in
+  `CONTRIBUTING.md`.
 - Start all work from `origin/unstable` and target every draft topic PR at `unstable`.
   Promotions are only same-repository `unstable` -> `dev` and `dev` -> `synth`; `alpha` is a
   legacy lane and never a PR source or target. Follow `BRANCHES.md` and `CONTRIBUTING.md`.

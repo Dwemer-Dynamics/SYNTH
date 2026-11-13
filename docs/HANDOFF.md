@@ -307,6 +307,8 @@ through `SYNTH_custom.ini` alone.
 
 ## Where things live
 
+The [documentation index](README.md) maps each component to its notes, source and tests.
+
 - `src/core`, `src/client`, `src/tasks`, `src/protocol_native`, `src/json`, `src/actions` and the
   other engine-free folders hold the shared core: protocol, queues, media, conversation and
   typed actions.
