@@ -36,6 +36,9 @@
     },
     "native_turn": {
       "type": "boolean"
+    },
+    "location_ancestry": {
+      "type": "boolean"
     }
   }
 }

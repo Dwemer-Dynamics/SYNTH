@@ -30,6 +30,7 @@ public:
     bool player_reaction_support{};
     bool actor_support{};
     bool social_support{};
+    bool location_ancestry_support{};
     std::optional<synth::runtime::SocialTaskDescriptor> social_offer;
     bool inventory_support{};
     bool action_inventory_support{};
@@ -81,11 +82,12 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((social_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        if ((social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
             if(social_support)payload.emplace_back("social_tasks",true);
+            if(location_ancestry_support)payload.emplace_back("location_ancestry",true);
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
             if (combat_targets_support) payload.emplace_back("combat_targets",true);
             if (combat_contacts_ack) payload.emplace_back("combat_contacts",*combat_contacts_ack);
@@ -1351,6 +1353,25 @@ int main() {
             player_transport.fault=BindingEchoTransport::Fault::truncated;
             CHECK(player_client.initialize(2,false).status==RequestStatus::malformed_response);
             CHECK(!player_client.player_events_ready());
+        }
+        for(int mode=0;mode<4;++mode) {
+            // Ancestry reaches only a flat server that acknowledged it; others keep the runtime location_ref.
+            BindingEchoTransport wire;wire.location_ancestry_support=mode!=1;
+            SessionOptions options{.runtime_session_id="session:location",.runtime_variant=mode==3?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities={"context.location_identity","context.location_ancestry"},
+                .protocol_version=2};
+            if(mode==2)options.capabilities.pop_back();
+            SynthClient location_client{wire,options};
+            CHECK(location_client.initialize(1,false).status==RequestStatus::complete);
+            CHECK(location_client.location_ancestry_ready()==(mode==0));
+            const synth::protocol_native::WorldState world{"Basement","BasementCell","","",true,42,std::nullopt,
+                synth::core::LocationIdentity{0x21000801,"Interiors.esp"},synth::core::LocationAncestry{
+                    {{"Interiors.esp",0x000801,"Basement"},{"Fallout4.esm",0x0001F2A3,"Diamond City"}},synth::core::LocationAncestryEnd::root}};
+            CHECK(location_client.publish_context(0,"save:one",{"0x00000014","Fallout4.esm","save:one","Player"},
+                {},{},{},world,{},{},{}).status==RequestStatus::complete);
+            const auto& body=wire.requests.back().body;
+            CHECK((body.find("\"location_ancestry\"")!=std::string::npos)==(mode==0));
+            CHECK((body.find("\"location_ref\"")!=std::string::npos)==(mode!=3));
         }
         for(int mode=0;mode<4;++mode) {
             BindingEchoTransport wire;wire.player_support=true;wire.social_support=mode!=1;

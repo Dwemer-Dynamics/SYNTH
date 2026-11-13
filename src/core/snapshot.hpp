@@ -143,6 +143,62 @@ struct LocationIdentity final {
     bool operator==(const LocationIdentity&) const = default;
 };
 
+// A BGSLocation named by its defining plugin and the FormID local to that plugin, decoded through
+// the loaded plugin manifest. Unlike LocationIdentity it does not change with the load order.
+struct LocalLocationIdentity final {
+    std::string origin_plugin;
+    std::uint32_t local_form_id{};
+    std::string display_name;
+
+    [[nodiscard]] bool same_form(const LocalLocationIdentity& other) const noexcept {
+        return local_form_id == other.local_form_id && origin_plugin.size() == other.origin_plugin.size() &&
+            std::ranges::equal(origin_plugin, other.origin_plugin, [](unsigned char left, unsigned char right) {
+                return (left >= 'A' && left <= 'Z' ? left + 32 : left) == (right >= 'A' && right <= 'Z' ? right + 32 : right);
+            });
+    }
+    bool operator==(const LocalLocationIdentity&) const = default;
+};
+
+inline constexpr std::size_t maximum_location_ancestry = 8;
+
+// Why the parentLoc walk stopped. Only root proves the chain is complete; the other ends say that
+// the next parent exists but is not exported, so a reader must never guess past the last entry.
+enum class LocationAncestryEnd : unsigned char {
+    root,
+    unresolved,
+    cycle,
+    depth_limit,
+};
+
+// The player's current BGSLocation followed by its parentLoc chain, nearest first. Copied on the game
+// thread; it describes where the captured scene is, not what any NPC knows.
+struct LocationAncestry final {
+    std::vector<LocalLocationIdentity> chain;
+    LocationAncestryEnd end{LocationAncestryEnd::unresolved};
+
+    [[nodiscard]] bool valid() const noexcept {
+        if (chain.empty() || chain.size() > maximum_location_ancestry ||
+            (end == LocationAncestryEnd::depth_limit && chain.size() != maximum_location_ancestry)) return false;
+        for (std::size_t index = 0; index < chain.size(); ++index) {
+            const auto& entry = chain[index];
+            if (entry.local_form_id == 0 || entry.local_form_id > 0x00FFFFFFU || entry.origin_plugin.empty() ||
+                entry.origin_plugin.size() > 255 || entry.origin_plugin.find_first_of("/\\") != std::string::npos ||
+                entry.display_name.size() > 255) return false;
+            for (std::size_t prior = 0; prior < index; ++prior) {
+                if (chain[prior].same_form(entry)) return false;
+            }
+        }
+        return true;
+    }
+    // The first entry is the same form as the runtime location_ref sent beside it.
+    [[nodiscard]] bool valid_for(const LocationIdentity& current) const noexcept {
+        if (!valid() || !current.valid() || (current.form_id >> 24) == 0xFFU) return false;
+        const auto local = (current.form_id >> 24) == 0xFEU ? current.form_id & 0x0FFFU : current.form_id & 0x00FFFFFFU;
+        return chain.front().origin_plugin == current.origin_plugin && chain.front().local_form_id == local;
+    }
+    bool operator==(const LocationAncestry&) const = default;
+};
+
 struct WorldState final {
     std::string location;
     std::string cell;
@@ -152,6 +208,7 @@ struct WorldState final {
     std::uint64_t game_time_ticks{};
     std::optional<SceneIdentity> scene;
     std::optional<LocationIdentity> location_ref;
+    std::optional<LocationAncestry> location_ancestry;
 };
 
 struct LoadedPlugin final {
@@ -162,6 +219,26 @@ struct LoadedPlugin final {
     std::uint16_t partial_index{};
     std::string form_id_prefix;
 };
+
+// Decodes a runtime FormID only through the loaded plugin that defines it. A plugin missing from the
+// manifest, a prefix that is not that plugin's full or light slot, or a runtime-created form is unresolved.
+[[nodiscard]] inline std::optional<std::uint32_t> plugin_local_form_id(
+    std::uint32_t runtime_form_id, const std::string& origin_plugin, const std::vector<LoadedPlugin>& plugins) {
+    if (origin_plugin.empty()) return std::nullopt;
+    const auto plugin = std::ranges::find(plugins, origin_plugin, &LoadedPlugin::name);
+    if (plugin == plugins.end()) return std::nullopt;
+    std::uint32_t local{};
+    if (plugin->light) {
+        if (plugin->partial_index > 0x0FFFU || (runtime_form_id >> 12) != (0xFE000U | plugin->partial_index))
+            return std::nullopt;
+        local = runtime_form_id & 0x0FFFU;
+    } else {
+        if (plugin->compile_index >= 0xFEU || (runtime_form_id >> 24) != plugin->compile_index) return std::nullopt;
+        local = runtime_form_id & 0x00FFFFFFU;
+    }
+    if (local == 0) return std::nullopt;
+    return local;
+}
 
 struct InventoryItemSnapshot final {
     std::uint32_t form_id{};

@@ -138,6 +138,7 @@ public:
         if (variant == core::RuntimeVariant::flat) {
             result.push_back("social.tasks.v1");
             result.push_back("context.location_identity");
+            result.push_back("context.location_ancestry");
             result.push_back("context.combat_contacts");
             result.push_back("context.enemy_awareness");
             result.push_back("action.equip_item");
@@ -541,7 +542,8 @@ public:
                                                  snapshot.world()->worldspace, snapshot.world()->weather,
                                                  snapshot.world()->interior,
                                                  snapshot.world()->game_time_ticks, snapshot.world()->scene,
-                                                 snapshot.world()->location_ref}}
+                                                 snapshot.world()->location_ref,
+                                                 snapshot.world()->location_ancestry}}
                                            : std::nullopt,
                                        active_quests, nearby_items, points_of_interest,
                                        {}, cancellation, checkpoint_.binding().loaded_context, snapshot.active_quests_observation(),
