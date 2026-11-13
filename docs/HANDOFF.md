@@ -187,6 +187,20 @@ contexts. A disposable server HTTP probe for the same contract passed (2 tests, 
 exit 0). It models a lost reply by discarding a received response, not by losing the network.
 Neither replaces the flat and VR game checks in ALPHA-ACCEPTANCE.md.
 
+The opt-in loopback driver in `tests/loopback_dialogue/` is the first off-game slice that uses the
+compiled client instead of hand-built events. The real `SynthClient` and `SaveContextStore` talk
+over real HTTP to a disposable server: init, an explicit native /talk with streamed dialogue, an
+audio_completed receipt sent twice from the shipped delivery boundary, a checkpoint, and two
+sessions that load the older and the newer co-save. The Synthserver repository owns the harness.
+From any clean checkout pair, as root on Linux or WSL:
+`sudo bash SERVER/unittests/loopback/run-loopback-dialogue.sh CLIENT`. It builds the driver from
+the client `HEAD` and runs it against the server `HEAD`, a disposable PostgreSQL cluster and a
+loopback fake provider, all in private namespaces. It requires one heard row. The older anchor's
+prompt must omit the line, and the newer anchor's prompt must contain it exactly once. The driver
+uses a POSIX test transport, not WinHTTP, and copies the short ACK/receipt glue from
+`ContextPublication` and `SpeechDelivery`. It proves no audio, game thread, socket loss or
+flat/VR gameplay.
+
 ## Current handoff priorities
 
 Rangroo's handoff scope is bios, world knowledge, diaries, actions, and basic
