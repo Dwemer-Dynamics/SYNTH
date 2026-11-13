@@ -673,8 +673,13 @@ public:
         }
         if (const auto command = PrivateNarrator::parse(text); command || narrator_.talking()) {
             // Only private speech and a scene request are new player turns. Viewing and routing controls leave live
-            // playback alone; select and cancel retire just the private lane themselves.
-            if (!command || (command->command == PrivateNarrator::Command::scene && narrator_.ready()))
+            // playback alone; select and cancel retire just the private lane themselves. A scene without a loaded
+            // selection only asks the player to select first, so it must not interrupt NPC speech either.
+            const auto scene_ready = [this] {
+                const auto view = narrator_.view();
+                return view.available && view.loaded && view.state.selected.has_value();
+            };
+            if (!command || (command->command == PrivateNarrator::Command::scene && scene_ready()))
                 (void)begin_player_turn();
             mark_activity();
             return narrator_.handle_text(std::move(snapshot), text);
