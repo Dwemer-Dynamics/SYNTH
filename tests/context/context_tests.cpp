@@ -4,6 +4,7 @@
 #include "client/actor_event_delivery.hpp"
 #include "client/actor_state_combat.hpp"
 #include "core/player_event_sampler.hpp"
+#include "core/companion_combat_comment.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -491,6 +492,97 @@ int main() {
         CHECK(reactions.acknowledge(reactions.front()->serial,true,true));
         switched.observed_at+=std::chrono::seconds{1};--switched.game_time_ticks;
         CHECK(reactions.observe(switched)==0 && !reactions.reaction(switched.observed_at));
+
+        // Companion remark evidence: only teammates a scene shows fighting inside the owner's sampled encounter.
+        const auto companion_pose=core::WorldPose{{},core::UnitVector3::from({1,0,0}),core::UnitVector3::from({0,0,1})};
+        const auto fighter=[](std::uint32_t form,double x,bool combat,bool teammate=true,std::optional<bool> held=std::nullopt) {
+            return core::ActorSnapshot{form,"Companion",core::Vec3{x,0,0},"Fallout4.esm","save-a",true,false,combat,false,false,1,
+                {},{},{},teammate,100,100,{},std::nullopt,{},"unavailable","alive","normal",false,0,false,false,false,std::nullopt,
+                0,{},"unavailable",{},false,false,false,{},{},{},false,held};
+        };
+        const auto fight=[&](double tick,bool player_combat,std::vector<core::ActorSnapshot> actors) {
+            return core::RuntimeSnapshot{core::Game::fallout4,core::RuntimeVariant::flat,core::RuntimeGeneration::initial(),2,
+                epoch+std::chrono::milliseconds{static_cast<int>(tick*1000)},companion_pose,{},{},{},
+                core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a",true,false,player_combat},std::move(actors),
+                static_cast<std::uint64_t>(tick)+100};
+        };
+        Sampler encounter{core::RuntimeGeneration::initial(),core::RuntimeVariant::flat};
+        CHECK(encounter.observe(player_sample(0,5,false))==0);
+        encounter.observe_participants(fight(0,true,{fighter(0x400,1,true)})); // No open encounter yet.
+        CHECK(encounter.observe(player_sample(1,5,true))==0);
+        std::vector<core::ActorSnapshot> crowd{fighter(0x100,10,true),fighter(0xA0,10,true),fighter(0x200,5,false),
+            fighter(0x300,3,true,false)};
+        for (std::uint32_t extra=0x500;extra<0x50A;++extra) crowd.push_back(fighter(extra,50,true));
+        encounter.observe_participants(fight(1,true,crowd));
+        CHECK(encounter.observe(player_sample(2,6,false))==2); // Level-up, then the encounter's single combat end.
+        CHECK(encounter.acknowledge(encounter.front()->serial,true,true));
+        const auto ended=*encounter.front();
+        CHECK(ended.kind==Kind::combat_end && ended.participants.size()==Sampler::participant_capacity);
+        CHECK(ended.participants[0].form_id==0x100 && ended.participants[1].form_id==0xA0 &&
+              ended.participants[0].game_time_ticks==101 && ended.participants[0].playthrough_id=="save-a");
+        CHECK(std::ranges::none_of(ended.participants,[](const auto& value){return value.form_id==0x200 || value.form_id==0x300 ||
+            value.form_id==0x400;})); // Calm teammate, fighting non-teammate and pre-encounter scene are not participants.
+        CHECK(encounter.acknowledge(ended.serial,true,true));
+        CHECK(encounter.latest_combat_end(epoch+std::chrono::seconds{3})->serial==ended.serial);
+        CHECK(encounter.reaction(epoch+std::chrono::seconds{3},false)->kind==Kind::level_up);
+
+        // Duplicate ends collapse onto the newest; consumption keeps level-up reactions.
+        CHECK(encounter.observe(player_sample(3,6,true))==0);
+        encounter.observe_participants(fight(3,true,{fighter(0x100,4,true)}));
+        CHECK(encounter.observe(player_sample(4,6,false))==1);
+        const auto renewed=*encounter.front();
+        CHECK(renewed.participants.size()==1 && renewed.participants[0].form_id==0x100); // A new encounter starts empty.
+        CHECK(encounter.acknowledge(renewed.serial,true,true));
+        CHECK(encounter.latest_combat_end(epoch+std::chrono::seconds{5})->serial==renewed.serial);
+        CHECK(encounter.consume_combat_ends_through(renewed.serial)==2 && !encounter.latest_combat_end(epoch+std::chrono::seconds{5}));
+        CHECK(encounter.reaction(epoch+std::chrono::seconds{5})->kind==Kind::level_up);
+        CHECK(!encounter.reaction(epoch+std::chrono::seconds{63})); // Original 60-second lifetime still applies.
+
+        // Input, pause or newer combat consumes pending ACKs as well as already acknowledged ends.
+        Sampler delayed{core::RuntimeGeneration::initial(),core::RuntimeVariant::flat};
+        CHECK(delayed.observe(player_sample(0,5,true))==0);
+        CHECK(delayed.observe(player_sample(1,5,false))==1);
+        const auto stale_end=delayed.front()->serial;
+        delayed.discard_combat_reactions();
+        CHECK(delayed.acknowledge(stale_end,true,true));
+        CHECK(!delayed.latest_combat_end(epoch+std::chrono::seconds{2}));
+        CHECK(delayed.observe(player_sample(2,5,true))==0);
+        CHECK(delayed.observe(player_sample(3,5,false))==1);
+        CHECK(delayed.acknowledge(delayed.front()->serial,true,true));
+        CHECK(delayed.latest_combat_end(epoch+std::chrono::seconds{4})); // A genuinely newer end remains eligible.
+
+        // Three seconds of continuous quiet after the newest end; renewed combat or missing evidence drops it.
+        core::CompanionCommentQuiet quiet;
+        const auto quiet_scene=fight(2,false,{fighter(0x100,4,false)});
+        const auto at=[&](double seconds){return epoch+std::chrono::milliseconds{static_cast<int>(seconds*1000)};};
+        CHECK(core::companion_comment_step(quiet,ended,quiet_scene,false,at(4.9))==core::CompanionCommentStep::wait);
+        CHECK(core::companion_comment_step(quiet,ended,quiet_scene,false,at(5))==core::CompanionCommentStep::decide);
+        CHECK(core::companion_comment_step(quiet,ended,fight(4.5,false,{fighter(0xA0,4,true)}),false,at(5))==
+              core::CompanionCommentStep::wait); // A participant still fighting restarts quiet.
+        CHECK(core::companion_comment_step(quiet,ended,quiet_scene,false,at(7.4))==core::CompanionCommentStep::wait);
+        CHECK(core::companion_comment_step(quiet,ended,quiet_scene,false,at(7.5))==core::CompanionCommentStep::decide);
+        CHECK(core::companion_comment_step(quiet,renewed,quiet_scene,false,at(6.9))==core::CompanionCommentStep::wait); // Newer end.
+        CHECK(core::companion_comment_step(quiet,ended,quiet_scene,true,at(9))==core::CompanionCommentStep::drop);
+        CHECK(core::companion_comment_step(quiet,ended,fight(8,true,{}),false,at(9))==core::CompanionCommentStep::drop);
+        auto unproven=ended;unproven.participants.clear();
+        CHECK(core::companion_comment_step(quiet,unproven,quiet_scene,false,at(9))==core::CompanionCommentStep::drop);
+
+        // Nearest still-following participant, ties by reference ID; never a nonparticipant or departed companion.
+        const auto all=[](const core::ActorSnapshot&){return true;};
+        const auto pick=[&](std::vector<core::ActorSnapshot> actors) {
+            const auto scene=fight(6,false,std::move(actors));
+            const auto* chosen=core::select_companion_speaker(scene,ended,500,all);
+            return chosen ? chosen->form_id() : 0U;
+        };
+        CHECK(pick({fighter(0x100,5,false),fighter(0xA0,5,false)})==0xA0);
+        CHECK(pick({fighter(0x100,4,false),fighter(0xA0,5,false),fighter(0x200,1,false)})==0x100);
+        CHECK(pick({fighter(0x200,1,false)})==0); // Following teammate without encounter evidence.
+        CHECK(pick({fighter(0x100,4,false,false)})==0); // Dismissed: teammate bit gone.
+        CHECK(pick({fighter(0x100,4,false,true,true)})==0); // SYNTH-held wait.
+        CHECK(pick({fighter(0x100,4,true)})==0 && pick({fighter(0x100,501,false)})==0); // Renewed combat; out of hearing.
+        const auto registered_only=fight(6,false,{fighter(0x100,4,false),fighter(0xA0,5,false)});
+        CHECK(core::select_companion_speaker(registered_only,ended,500,[](const auto& actor){return actor.form_id()!=0x100;})
+              ->form_id()==0xA0);
         std::cout << "context tests passed (" << checks << " checks)\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

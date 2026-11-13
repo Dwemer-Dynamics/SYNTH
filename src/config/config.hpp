@@ -81,6 +81,7 @@ struct BehaviorConfig {
     bool cancel_dialogue_on_combat{true};
     bool combat_barks_enabled{true};
     std::uint32_t combat_bark_period_seconds{30};
+    bool companion_combat_comments{};
     std::uint32_t dynamic_profile_minutes{30};
     bool dynamic_profile_include_narrator{true};
     std::uint32_t bored_event_seconds{60};
@@ -370,6 +371,8 @@ inline void apply(Config& config,
         config.behavior.combat_barks_enabled = parse_bool(value, qualified);
     else if (section == "RpgEvents" && key == "CombatBarkPeriodSeconds")
         config.behavior.combat_bark_period_seconds = parse_range(value, 5, 120, qualified);
+    else if (section == "RpgEvents" && key == "CompanionCombatComments")
+        config.behavior.companion_combat_comments = parse_bool(value, qualified);
     else if (section == "DynamicProfile" && key == "TimerMinutes")
         config.behavior.dynamic_profile_minutes = parse_range(value, 5, 240, qualified);
     else if (section == "DynamicProfile" && key == "IncludeNarrator")

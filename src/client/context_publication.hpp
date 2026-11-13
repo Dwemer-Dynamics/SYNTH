@@ -118,7 +118,8 @@ public:
     ContextPublication& operator=(const ContextPublication&) = delete;
 
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
-                                                             bool quest_events_available, bool actor_events_available) {
+                                                             bool quest_events_available, bool actor_events_available,
+                                                             bool companion_comments = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
@@ -158,6 +159,8 @@ public:
             result.push_back("context.inventory_512");
             result.push_back("context.player_events");
             result.push_back("dialogue.player_reactions");
+            // Advertised only for the INI opt-in, so opt-out sessions keep the previous wire contract.
+            if (companion_comments) result.push_back("dialogue.companion_combat_comments");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
         }

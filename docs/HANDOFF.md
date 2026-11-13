@@ -1,5 +1,11 @@
 # SYNTH developer handoff
 
+## Optional post-combat companion comments
+
+The paired source candidate adds participant-bound, default-off flat comments with
+owned cancellation and a latest-start deadline. See [the feature note](COMPANION-COMBAT-COMMENTS.md).
+No deployment or flat gameplay acceptance; VR remains unavailable.
+
 ## Installed gift screen and shared wording
 
 The user approved general gifts opening the normal inventory exchange, while

@@ -173,7 +173,7 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, companion_combat_comments{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
@@ -363,7 +363,7 @@ inline Line decode_line(std::string_view wire) {
         line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "companion_combat_comments"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -372,7 +372,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
             payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
             payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false,
-            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false};
+            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false,
+            payload.find("companion_combat_comments") ? required(payload,"companion_combat_comments").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -954,10 +955,32 @@ inline json::Value player_event_value(const NativePlayerEvent& event, const Even
         return json::Value{object({{"game_time_ticks", sample.game_time_ticks},
             {"level", static_cast<std::uint64_t>(sample.level)}, {"in_combat", sample.in_combat}})};
     };
-    return json::Value{object({{"event_id", "player:" + std::to_string(value.serial)},
+    auto result = object({{"event_id", "player:" + std::to_string(value.serial)},
         {"kind", value.kind == core::PlayerEventKind::level_up ? "level_up" : "combat_end"},
         {"before", state(before)}, {"after", state(after)},
-        {"interval_ms", static_cast<std::uint64_t>(interval)}, {"age_ms", event.age_ms}})};
+        {"interval_ms", static_cast<std::uint64_t>(interval)}, {"age_ms", event.age_ms}});
+    // Participant evidence is copied encounter observation, only under the negotiated companion contract.
+    if (!value.participants.empty() &&
+        std::ranges::find(context.capabilities, "dialogue.companion_combat_comments") != context.capabilities.end()) {
+        if (value.kind != core::PlayerEventKind::combat_end || value.participants.size() > core::PlayerEventSampler::participant_capacity)
+            throw std::invalid_argument{"invalid combat participant evidence"};
+        json::Value::Array participants;
+        for (const auto& participant : value.participants) {
+            char participant_id[11]{};
+            std::snprintf(participant_id, sizeof(participant_id), "0x%08X", participant.form_id);
+            if (participant.form_id == 0 || participant.form_id == after.form_id || participant.origin_plugin.empty() ||
+                participant.origin_plugin.size() > 260 || participant.playthrough_id != after.playthrough_id ||
+                participant.game_time_ticks == 0 || participant.game_time_ticks > after.game_time_ticks ||
+                participant.observed_at > after.observed_at ||
+                std::ranges::count(value.participants, participant.form_id, &core::CombatParticipant::form_id) != 1)
+                throw std::invalid_argument{"invalid combat participant evidence"};
+            participants.emplace_back(object({{"form_id", std::string{participant_id}}, {"origin_plugin", participant.origin_plugin},
+                {"playthrough_id", participant.playthrough_id}, {"observed_game_time_ticks", participant.game_time_ticks},
+                {"in_combat", true}, {"teammate", true}}));
+        }
+        result.emplace_back("participants", std::move(participants));
+    }
+    return json::Value{std::move(result)};
 }
 
 // Encode immutable bound evidence; delivery age may advance, but original capture delays and identities cannot.
@@ -1143,11 +1166,13 @@ inline std::string encode_trigger(const EventContext& context, std::string kind,
             rechat_parent->request_id == context.request_id)
             throw std::invalid_argument{"rechat requires an exact native parent response"};
     }
-    if (kind == "player_reaction") {
+    if (kind == "player_reaction" || kind == "companion_combat_comment") {
         if (context.protocol_version != 2 || context.runtime_variant != "flat" || instruction || text || capture_id || game_time_ticks ||
             !player_event_serial || *player_event_serial == 0 || *player_event_serial > core::RuntimeGeneration::maximum_wire_value ||
             std::ranges::find(context.capabilities, "context.player_events") == context.capabilities.end() ||
-            std::ranges::find(context.capabilities, "dialogue.player_reactions") == context.capabilities.end())
+            std::ranges::find(context.capabilities, "dialogue.player_reactions") == context.capabilities.end() ||
+            (kind == "companion_combat_comment" &&
+             std::ranges::find(context.capabilities, "dialogue.companion_combat_comments") == context.capabilities.end()))
             throw std::invalid_argument{"player reaction requires owned flat event evidence"};
     } else if (player_event_serial) throw std::invalid_argument{"unexpected player event identity"};
     if (kind == "quest_updated") {

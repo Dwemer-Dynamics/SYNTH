@@ -205,6 +205,8 @@ inline constexpr Setting auto_activate_page[] = {
      "RpgEvents", "CombatBarksEnabled", SettingKind::toggle},
     {"Combat Bark Cooldown", "Seconds between combat bark attempts during combat.",
      "RpgEvents", "CombatBarkPeriodSeconds", SettingKind::integer, 5, 120, 5},
+    {"Companion Combat Comments", "After combat, let one following companion who fought nearby comment (flat).",
+     "RpgEvents", "CompanionCombatComments", SettingKind::toggle},
 };
 
 inline constexpr Setting behavior_page[] = {
@@ -348,6 +350,7 @@ inline constexpr std::array<Page, 5> pages{{
         if (key == "CombatBarksEnabled") return boolean(configuration.behavior.combat_barks_enabled);
         if (key == "CombatBarkPeriodSeconds")
             return configuration.behavior.combat_bark_period_seconds;
+        if (key == "CompanionCombatComments") return boolean(configuration.behavior.companion_combat_comments);
     } else if (section == "DynamicProfile") {
         if (key == "TimerMinutes") return configuration.behavior.dynamic_profile_minutes;
         if (key == "IncludeNarrator")

@@ -1164,22 +1164,25 @@ void pump_runtime_impl() {
             if (trace_background) {
                 REX::INFO("SYNTH runtime: first background shallow capture returned");
             }
+            session->observe_companion_encounter(snapshot);
             const auto player_history = periodic && !manual && session->publish_player_event(snapshot);
             const auto combat_bark = periodic && !manual && !player_history &&
                                      session->maybe_trigger_combat_bark(snapshot, now);
             if (trace_background) {
                 REX::INFO("SYNTH runtime: first background combat gate complete");
             }
+            const auto companion_comment = periodic && session->maybe_trigger_companion_comment(snapshot, now,
+                regular_dialogue_blocked || manual || player_history || combat_bark);
             const auto player_reaction = periodic && !regular_dialogue_blocked && !manual && !player_history && !combat_bark &&
-                                         session->maybe_trigger_player_reaction(snapshot, now);
-            const auto quest_reaction = periodic && !regular_dialogue_blocked && !manual && !player_history && !combat_bark && !player_reaction &&
-                                        session->maybe_trigger_quest_reaction(snapshot, now);
-            const auto bored = periodic && !regular_dialogue_blocked && !manual && !player_history && !combat_bark && !player_reaction && !quest_reaction &&
-                               session->maybe_trigger_bored(snapshot, now);
+                                         !companion_comment && session->maybe_trigger_player_reaction(snapshot, now);
+            const auto quest_reaction = periodic && !regular_dialogue_blocked && !manual && !player_history && !combat_bark && !companion_comment &&
+                                        !player_reaction && session->maybe_trigger_quest_reaction(snapshot, now);
+            const auto bored = periodic && !regular_dialogue_blocked && !manual && !player_history && !combat_bark && !companion_comment &&
+                               !player_reaction && !quest_reaction && session->maybe_trigger_bored(snapshot, now);
             if (trace_background) {
                 REX::INFO("SYNTH runtime: first background boredom gate complete");
             }
-            if (manual || (automatic && !player_history && !combat_bark && !bored && !quest_reaction && !player_reaction)) {
+            if (manual || (automatic && !player_history && !combat_bark && !companion_comment && !bored && !quest_reaction && !player_reaction)) {
                 (void)session->activate_target(snapshot, manual);
             }
             if (periodic && !manual && !player_history)

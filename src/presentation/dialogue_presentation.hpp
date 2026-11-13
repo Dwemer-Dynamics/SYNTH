@@ -55,6 +55,7 @@ struct DialogueCaption final {
     }
 
     void mark_delivery(DialogueDelivery state) const noexcept {
+        if (admission && state == DialogueDelivery::playing) admission->started.store(true, std::memory_order_release);
         const auto previous = delivery->exchange(state, std::memory_order_acq_rel);
         if (trace && previous != state && state != DialogueDelivery::pending) {
             try {
@@ -184,7 +185,10 @@ template <class Sink>
 bool present_caption_once(const DialogueCaptions::Caption& caption, std::uint64_t generation, Sink&& sink) {
     if (!caption || caption->generation != generation || caption->text.empty() ||
         caption->cancellation.is_cancelled() || caption->scene_rejected() ||
+          (caption->admission && caption->admission->companion_speaker_form_id != 0 &&
+              !caption->scene_ready(core::SnapshotClock::now())) ||
         caption->posted->exchange(true, std::memory_order_acq_rel)) return false;
+    if (caption->admission) caption->admission->started.store(true, std::memory_order_release);
     sink(*caption);
     return true;
 }

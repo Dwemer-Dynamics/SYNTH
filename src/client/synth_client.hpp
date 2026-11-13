@@ -242,6 +242,9 @@ public:
     [[nodiscard]] bool player_reactions_ready() const noexcept {
         return player_reactions_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool companion_comments_ready() const noexcept {
+        return companion_comments_negotiated_.load(std::memory_order_acquire) && player_reactions_ready();
+    }
     [[nodiscard]] bool quest_tracking_ready() const noexcept {
         return quest_tracking_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -293,6 +296,7 @@ public:
             player_item_negotiated_.store(false, std::memory_order_release);
             gift_menu_negotiated_.store(false,std::memory_order_release);
             player_reactions_negotiated_.store(false, std::memory_order_release);
+            companion_comments_negotiated_.store(false, std::memory_order_release);
             quest_tracking_negotiated_.store(false, std::memory_order_release);
             quest_reactions_negotiated_.store(false, std::memory_order_release);
             halted_.store(false, std::memory_order_release);
@@ -382,6 +386,11 @@ public:
                 player_events_negotiated_.load(std::memory_order_acquire) &&
                 std::ranges::find(options_.capabilities, "dialogue.player_reactions") != options_.capabilities.end(),
                 std::memory_order_release);
+            companion_comments_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->companion_combat_comments &&
+                player_reactions_negotiated_.load(std::memory_order_acquire) &&
+                std::ranges::find(options_.capabilities, "dialogue.companion_combat_comments") != options_.capabilities.end(),
+                std::memory_order_release);
         }
         // Capabilities must match init: an unacknowledged scene contract cannot silently downgrade.
         if (outcome.status == RequestStatus::complete && uses_rechat_scene_contract() && !rechat_scene_ready()) {
@@ -422,6 +431,7 @@ public:
         bool tracking_supported{};
         bool inventory_supported{};
         bool combat_targets_supported{};
+        bool companion_supported{};
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
         {
@@ -450,7 +460,11 @@ public:
             combat_targets_supported = combat_targets_ready();
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
+            companion_supported = companion_comments_ready();
         }
+        // Participant evidence goes only to a server that acknowledged the companion contract.
+        auto negotiated_player_event = player_event;
+        if (negotiated_player_event && !companion_supported) negotiated_player_event->transition.participants.clear();
         // Game-thread readiness/interruption shares state_mutex_: do not hold it for snapshot copies or encoding.
         // request_mutex_ still serializes publication and initialization; send_event rechecks cancellation/retirement.
         auto negotiated_quests = active_quests;
@@ -473,7 +487,7 @@ public:
                     publication_context, playthrough_id, sequence, player, target,
                     audience, negotiated_states, world, negotiated_quests, nearby_items, points_of_interest, loaded_context,
                     active_quests_observation, nearby_items_observation,
-                    points_of_interest_observation, audience_observation, quest_events, player_event, actor_events);
+                    points_of_interest_observation, audience_observation, quest_events, negotiated_player_event, actor_events);
                 if (body.size() <= 1'048'576) break;
             } catch (const json::ByteLimitError&) {
                 // The bounded writer stops before allocating an oversized body. Other errors propagate.
@@ -600,9 +614,12 @@ public:
             require_ready();
             if (kind != "auto_greeting" && kind != "bored" && kind != "combat_bark" &&
                 kind != "rechat" && kind != "external_comment" && kind != "external_reaction" &&
-                kind != "external_tts" && kind != "quest_updated" && kind != "player_reaction") {
+                kind != "external_tts" && kind != "quest_updated" && kind != "player_reaction" &&
+                kind != "companion_combat_comment") {
                 throw std::invalid_argument{"invalid dialogue trigger"};
             }
+            if (kind == "companion_combat_comment" && !companion_comments_ready())
+                throw std::invalid_argument{"companion combat comments were not negotiated"};
             if (kind == "quest_updated" && !quest_reactions_ready())
                 throw std::invalid_argument{"quest reactions were not negotiated"};
             if (kind == "player_reaction" && !player_reactions_ready())
@@ -1326,6 +1343,7 @@ private:
     std::atomic_bool player_item_negotiated_{};
     std::atomic_bool gift_menu_negotiated_{};
     std::atomic_bool player_reactions_negotiated_{};
+    std::atomic_bool companion_comments_negotiated_{};
     std::atomic_bool quest_tracking_negotiated_{};
     std::atomic_bool quest_reactions_negotiated_{};
     std::atomic_bool rechat_scene_negotiated_{};
