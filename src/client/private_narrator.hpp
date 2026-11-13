@@ -1,5 +1,6 @@
 #pragma once
 
+#include "client/dialogue_requests.hpp"
 #include "client/synth_client.hpp"
 #include "core/cancellation.hpp"
 #include "core/snapshot.hpp"
@@ -34,8 +35,9 @@ namespace synth::client {
 // revisions, the transcript and its save branching; this object only mirrors the latest acknowledged view.
 //
 // Threads: entry points run on the game thread and copy their snapshot; requests, receipts and checkpoints run on
-// the session's network lane, which the session joins before this object is destroyed. The reply's terminal hook runs
-// in playback/presentation teardown and only enqueues a copy. A new runtime generation is a new session and object.
+// the session's network lane, which the session joins before this object is destroyed. Each of those tasks is
+// counted by the session's borrowed DialogueRequests response accounting from admission until it is destroyed. The
+// reply's terminal hook runs in playback/presentation teardown and only enqueues a copy. A new runtime generation is a new session and object.
 class PrivateNarrator final {
 public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
@@ -52,6 +54,7 @@ public:
     struct Dependencies final {
         SynthClient& client;
         tasks::TaskLanes& network;
+        DialogueRequests& requests;
         const std::atomic_bool& terminal;
         core::CancellationToken session;
         Publish publish;
@@ -76,7 +79,8 @@ public:
     };
 
     explicit PrivateNarrator(Dependencies dependencies)
-        : client_{dependencies.client}, network_{dependencies.network}, terminal_{dependencies.terminal},
+        : client_{dependencies.client}, network_{dependencies.network}, requests_{dependencies.requests},
+          terminal_{dependencies.terminal},
           session_{std::move(dependencies.session)}, publish_{std::move(dependencies.publish)},
           present_{std::move(dependencies.present)}, changed_{std::move(dependencies.changed)},
           notify_{std::move(dependencies.notify)}, timeout_ms_{dependencies.timeout_ms}, transcript_lease_{ui::narrator_transcript.claim()} {
@@ -252,12 +256,12 @@ public:
         auto release = std::make_shared<Release>(this);
         const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
             tasks::TaskLanes::Clock::now() + std::chrono::seconds{10}, session_,
-            [this, release, pending = std::move(pending)](const core::CancellationToken& cancellation) {
+            requests_.track_response([this, release, pending = std::move(pending)](const core::CancellationToken& cancellation) {
                 for (const auto& value : pending) {
                     if (stopped(cancellation) || value.generation != cancellation.generation().value()) break;
                     try { send_receipt(value, cancellation); } catch (const std::exception&) {}
                 }
-            });
+            }));
         (void)accepted;
     }
 
@@ -284,7 +288,7 @@ public:
         auto release = std::make_shared<Release>(this);
         const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
             tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{timeout_ms_}, session_,
-            [this, release, serial, snapshot = std::move(snapshot)](const core::CancellationToken& cancellation) {
+            requests_.track_response([this, release, serial, snapshot = std::move(snapshot)](const core::CancellationToken& cancellation) {
                 bool saved{};
                 try {
                     if (!stopped(cancellation)) {
@@ -294,7 +298,7 @@ public:
                 } catch (const std::exception&) {}
                 std::scoped_lock lock{mutex_};
                 if (saved && !stopped(cancellation)) covered_serial_ = std::max(covered_serial_, serial);
-            });
+            }));
         if (accepted != tasks::SubmitResult::accepted) {
             return false;
         }
@@ -323,8 +327,8 @@ private:
         if (!admissible(snapshot)) return false;
         const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
             tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{timeout_ms_}, session_,
-            [this, snapshot = std::move(snapshot), action, definition_id = std::move(definition_id), announce, cursor = std::move(cursor)](
-                const core::CancellationToken& cancellation) {
+            requests_.track_response([this, snapshot = std::move(snapshot), action, definition_id = std::move(definition_id), announce,
+                                      cursor = std::move(cursor)](const core::CancellationToken& cancellation) {
                 if (stopped(cancellation)) return;
                 try {
                     const auto context_turn = client_.begin_context_turn();
@@ -348,7 +352,7 @@ private:
                 } catch (const std::exception& error) {
                     if (!stopped(cancellation)) notify_(std::string{"SYNTH private narrator: "} + error.what());
                 }
-            });
+            }));
         if (accepted != tasks::SubmitResult::accepted) { notify_("SYNTH network queue is full; narrator request discarded"); return false; }
         return true;
     }
@@ -377,14 +381,14 @@ private:
         }
         const auto accepted = network_.try_submit("network", tasks::TaskClass::current_turn,
             tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{timeout_ms_ * 2ULL}, *owner,
-            [this, snapshot = std::move(snapshot), turn = std::move(turn), wave = std::move(wave)](
+            requests_.track_response([this, snapshot = std::move(snapshot), turn = std::move(turn), wave = std::move(wave)](
                 const core::CancellationToken& cancellation) mutable {
                 if (stopped(cancellation)) return;
                 try { run_turn(snapshot, std::move(turn), std::move(wave), cancellation); }
                 catch (const std::exception& error) {
                     if (!stopped(cancellation)) notify_(std::string{"SYNTH private narrator: "} + error.what());
                 }
-            });
+            }));
         if (accepted != tasks::SubmitResult::accepted) { notify_("SYNTH network queue is full; narrator input discarded"); return false; }
         return true;
     }
@@ -538,6 +542,7 @@ private:
 
     SynthClient& client_;
     tasks::TaskLanes& network_;
+    DialogueRequests& requests_;
     const std::atomic_bool& terminal_;
     const core::CancellationToken session_;
     const Publish publish_;

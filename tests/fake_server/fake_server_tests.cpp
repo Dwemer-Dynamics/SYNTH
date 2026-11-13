@@ -1,5 +1,6 @@
 #include "client/fake_http.hpp"
 #include "client/synth_client.hpp"
+#include "client/private_narrator.hpp"
 #include "client/rechat_prefetch.hpp"
 
 #include <iostream>
@@ -249,6 +250,35 @@ int main() {
             return protocol_native::encode_narrator_command(event,protocol_native::NarratorAction::state);
         });
         CHECK(stale.status!=client::RequestStatus::complete);
+        {
+            // Private narrator work holds the shared response count from admission until its task is destroyed.
+            tasks::TaskLanes lanes{{tasks::LaneConfig{"network", 4, 1, 3}}, 1};
+            std::atomic_bool terminal{};
+            client::ConversationHolds holds;
+            client::DialogueRequests requests{{narrator, lanes, terminal, holds,
+                [](const auto&, const auto&, core::CancellationToken, const auto&) { return client::RequestOutcome{}; },
+                [](const auto&, const auto&, const auto&) {}, [](const auto&) { return false; }, [](std::string) {}}};
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            std::promise<void> entered, release;
+            const auto gate = release.get_future().share();
+            client::PrivateNarrator private_narrator{{narrator, lanes, requests, terminal, session.token(),
+                [&](const auto&, core::CancellationToken) { entered.set_value(); gate.wait(); return client::RequestOutcome{}; },
+                [](const auto&, const auto&, const auto&, const auto&, auto) {}, [](std::uint64_t, const auto&) {},
+                [](std::string) {}}};
+            const auto snapshot = std::make_shared<const core::RuntimeSnapshot>(core::Game::fallout4, core::RuntimeVariant::flat,
+                session.token().generation(), 1, core::SnapshotClock::now(),
+                core::WorldPose{{}, core::UnitVector3::from({1, 0, 0}), core::UnitVector3::from({0, 0, 1})},
+                std::nullopt, std::nullopt, std::nullopt, core::ActorSnapshot{0x14, "Player", {}, "Fallout4.esm", "save:private"},
+                std::vector<core::ActorSnapshot>{});
+            CHECK(private_narrator.refresh(snapshot));
+            entered.get_future().wait();
+            CHECK(requests.responses() == 1);
+            release.set_value();
+            lanes.shutdown(tasks::ShutdownMode::drain);
+            CHECK(requests.responses() == 0);
+            CHECK(!private_narrator.refresh(snapshot));
+            CHECK(requests.responses() == 0);
+        }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     {
         using namespace synth;

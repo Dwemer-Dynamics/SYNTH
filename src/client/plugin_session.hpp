@@ -131,7 +131,7 @@ public:
                     },
                     [this](core::CancellationToken cancellation) { invalidate_response(std::move(cancellation)); },
                     [this](std::string message) { push_notification(std::move(message)); }}},
-          narrator_{{client_, network_, terminal_, cancellation_.token(),
+          narrator_{{client_, network_, requests_, terminal_, cancellation_.token(),
                      [this](const Snapshot& snapshot, core::CancellationToken token) {
                          return publish_snapshot(snapshot, std::nullopt, std::move(token));
                      },
@@ -1185,7 +1185,8 @@ private:
     // refresh) and the rollback closure in each ContextBinding capture it; ~PluginSession joins the
     // network lane first.
     ContextPublication context_;
-    // Private work joins the same network and speech lanes before this owner is destroyed.
+    // Borrows client, network lane and response accounting declared above; private work joins the same
+    // network and speech lanes before this owner is destroyed.
     PrivateNarrator narrator_;
     std::optional<std::uint64_t> private_voice_state_;
     // Borrows configuration, client, network lane, response accounting, context publication and the
