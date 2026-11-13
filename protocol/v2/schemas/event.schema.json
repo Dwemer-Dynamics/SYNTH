@@ -543,6 +543,81 @@
       "if": {
         "properties": {
           "type": {
+            "const": "trigger"
+          },
+          "payload": {
+            "properties": {
+              "kind": {
+                "const": "companion_combat_comment"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "dialogue.companion_combat_comments"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.player_reactions"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.player_events"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "player_event"
+            ],
+            "properties": {
+              "player_event": {
+                "required": [
+                  "participants"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "dialogue.companion_combat_comments"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "context"
           },
           "payload": {

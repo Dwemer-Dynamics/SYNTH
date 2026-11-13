@@ -107,7 +107,7 @@ public:
         return candidate ? candidate : captions_.validation_candidate(now);
     }
 
-    enum class PresentationCheck { ignored, accepted, rejected, rejected_combat };
+    enum class PresentationCheck { ignored, accepted, rejected, rejected_combat, rejected_owned };
 
     // Game thread: validate a candidate's copied scene admission against the fresh capture. A rejected
     // caption is discarded here; the session routes the response invalidation or dialogue Stop.
@@ -122,7 +122,9 @@ public:
             trace_->record(*reason,caption->generation,caption->context_sequence,caption->request_id,caption->line_id);
             caption->admission->rejected.store(true,std::memory_order_release);
             caption->mark_delivery(presentation::DialogueDelivery::discarded);
-            return admission.combat_speaker_form_id != 0 ? PresentationCheck::rejected_combat : PresentationCheck::rejected;
+            if (admission.combat_speaker_form_id != 0) return PresentationCheck::rejected_combat;
+            if (admission.companion_speaker_form_id != 0) return PresentationCheck::rejected_owned;
+            return PresentationCheck::rejected;
         }
         caption->admission->accept(snapshot->captured_at());
         return PresentationCheck::accepted;
@@ -133,7 +135,8 @@ public:
     [[nodiscard]] presentation::DialogueCaptions::Caption make_caption(
         const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
         const core::CancellationToken& cancellation, const Snapshot& snapshot, bool combat_bark,
-        ConversationHolds& holds, std::function<void(presentation::DialogueDelivery, bool)> private_terminal = {}) {
+        ConversationHolds& holds, std::optional<core::SnapshotClock::time_point> companion_start_by = std::nullopt,
+        std::function<void(presentation::DialogueDelivery, bool)> private_terminal = {}) {
         auto admission = std::make_shared<presentation::SceneAdmission>();
         admission->original = snapshot;
         const auto retain = [&](const protocol_native::Identity& actor) {
@@ -150,6 +153,12 @@ public:
             retain(*actor);
             if (combat_bark && !admission->actors.empty())
                 admission->combat_speaker_form_id = admission->actors.front().form_id;
+            if (companion_start_by) {
+                // An owned companion remark without its retained speaker is never presented.
+                if (admission->actors.empty()) admission->rejected.store(true);
+                else admission->companion_speaker_form_id = admission->actors.front().form_id;
+                admission->start_by = companion_start_by;
+            }
         }
         if (dialogue.listener) retain(*dialogue.listener);
         const auto facing=snapshot ? bind_speech_facing(line,dialogue,*snapshot,cancellation) : nullptr;
@@ -275,8 +284,10 @@ private:
             terminal_.load(std::memory_order_acquire)) {
             return;
         }
-        const auto deadline = tasks::TaskLanes::Clock::now() +
-                              std::chrono::milliseconds{speech.deadline_ms};
+        const auto deadline = std::min(tasks::TaskLanes::Clock::now() +
+                              std::chrono::milliseconds{speech.deadline_ms},
+            caption && caption->admission && caption->admission->start_by
+                ? *caption->admission->start_by : tasks::TaskLanes::Clock::time_point::max());
         const auto accepted = speech_.try_submit(
             "speech", tasks::TaskClass::current_turn, deadline, cancellation,
             tasks::TaskLanes::track_activity(speech_jobs_,
@@ -287,6 +298,11 @@ private:
                     auto bytes = prepared ? *prepared : prepare_speech_media(line, *dialogue.speech, cancellation, deadline);
                     if (stopped(cancellation)) return;
                     if (tasks::TaskLanes::Clock::now() >= deadline || !bytes) {
+                        if (caption && caption->admission && caption->admission->start_by &&
+                            tasks::TaskLanes::Clock::now() >= *caption->admission->start_by) {
+                            caption->mark_delivery(presentation::DialogueDelivery::discarded);
+                            return;
+                        }
                         trace_->record(diagnostics::ConversationStage::media_failed,
                             line.generation,line.context_sequence,line.request_id,line.line_id);
                         notify_("SYNTH voice failed; delivering text only");

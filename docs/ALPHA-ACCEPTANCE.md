@@ -7,6 +7,16 @@
 - [ ] VR: repeat independently in headset, including push-to-talk, centered audio and readable transcript controls.
 - [ ] Qualify configured live model, speech recognition and voice providers. Off-game synthetic audio is insufficient.
 
+## Optional companion combat comments
+
+- [ ] Flat: verify participant selection, duplicate ends, dismissal, re-aggro by
+  another participant, composing, menus, player input, load and delayed LLM/TTS.
+- [ ] Flat: verify native searching, vanilla/modded waiting and dismissal semantics,
+  plus the settings toggle and existing RPG/Control priorities.
+- [ ] VR: implement and separately verify capture/admission before enabling it.
+
+See [the feature note](COMPANION-COMBAT-COMMENTS.md). No gameplay or deployment proof.
+
 ## Stage 1 native typed turn
 
 - [x] Build, package and audit both DLLs with the paired server candidate: met locally by the

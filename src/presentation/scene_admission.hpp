@@ -5,6 +5,7 @@
 #include "diagnostics/conversation_trace.hpp"
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace synth::presentation {
@@ -26,6 +27,10 @@ struct SceneAdmission final {
     std::vector<integration::PromptTarget> actors;
     // A combat bark must still belong to active combat when its speech reaches presentation.
     std::uint32_t combat_speaker_form_id{};
+    // A companion remark must start by its admission budget, only while that speaker still follows out of combat.
+    std::uint32_t companion_speaker_form_id{};
+    std::optional<Clock::time_point> start_by;
+    std::atomic_bool started{};
     std::atomic_bool rejected{};
     std::atomic<std::int64_t> verified_until{};
 
@@ -38,6 +43,10 @@ struct SceneAdmission final {
             snapshot->variant() != original->variant()) return Stage::presentation_owner_changed;
         if (now < snapshot->captured_at() || now - snapshot->captured_at() >= std::chrono::milliseconds{250} ||
             snapshot->captured_at() < original->captured_at()) return Stage::presentation_stale_capture;
+        if (companion_speaker_form_id != 0 && (snapshot->player().in_combat() ||
+            std::ranges::any_of(snapshot->actors(), [](const auto& actor) { return actor.teammate() && actor.in_combat(); }) ||
+            (start_by && !started.load(std::memory_order_acquire) && now > *start_by)))
+            return Stage::presentation_actor_unavailable;
         if (!snapshot->world() || !original->world() ||
             !same_presentation_scene(*original->world(), *snapshot->world())) return Stage::presentation_scene_changed;
         const auto& player = original->player();
@@ -55,6 +64,9 @@ struct SceneAdmission final {
                 return Stage::presentation_actor_unavailable;
             if (found->form_id() == combat_speaker_form_id && !found->in_combat())
                 return Stage::presentation_actor_unavailable;
+            if (found->form_id() == companion_speaker_form_id &&
+                (!found->teammate() || found->in_combat() || found->wait_held() == true))
+                return Stage::presentation_actor_unavailable;
             if (targeting::distance(snapshot->player_pose().position(),found->position()) > targeting::SelectionBounds{}.maximum_distance)
                 return Stage::presentation_actor_out_of_range;
         }
@@ -67,6 +79,7 @@ struct SceneAdmission final {
 
     [[nodiscard]] bool ready(Clock::time_point now) const noexcept {
         return !rejected.load(std::memory_order_acquire) &&
+            (!start_by || started.load(std::memory_order_acquire) || now <= *start_by) &&
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() <
                 verified_until.load(std::memory_order_acquire);
     }

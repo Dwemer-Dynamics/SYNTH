@@ -1,5 +1,9 @@
 # SYNTH protocol v1
 
+Optional v2 post-combat companion comments use negotiated participant evidence and
+the `companion_combat_comment` trigger. See [the feature contract](COMPANION-COMBAT-COMMENTS.md).
+The v1 contract remains unchanged.
+
 ## Installed generic gift menu
 
 The shared wording check is installed for every NPC. Named offers such as

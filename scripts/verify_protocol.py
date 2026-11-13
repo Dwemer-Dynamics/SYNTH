@@ -302,7 +302,7 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if payload_type == "context" and any(len(state["inventory"]) > 32 for state in payload.get("actor_states", [])):
         if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.inventory_512" not in value.get("capabilities", []):
             raise ValidationError(f"{path}: extended inventory requires v2 flat capability")
-    if payload_type == "trigger" and payload.get("kind") == "player_reaction" and int(payload["event_id"][7:]) > 9007199254740991:
+    if payload_type == "trigger" and payload.get("kind") in {"player_reaction", "companion_combat_comment"} and int(payload["event_id"][7:]) > 9007199254740991:
         raise ValidationError(f"{path}: player reaction ID exceeds wire-safe integer")
     if payload_type == "context" and "actor_events" in payload:
         batch = payload["actor_events"]
@@ -323,6 +323,11 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
             raise ValidationError(f"{path}: invalid player transition ordering or ID")
         if event["kind"] == "level_up" and after["level"] <= before["level"]:
             raise ValidationError(f"{path}: level increase is unproven")
+        participants = event.get("participants", [])
+        if len({p["form_id"] for p in participants}) != len(participants) or any(
+                p["playthrough_id"] != payload["playthrough_id"] or p["observed_game_time_ticks"] > after["game_time_ticks"]
+                or p["form_id"] == payload["player"]["form_id"] for p in participants):
+            raise ValidationError(f"{path}: combat participant evidence is not bound to this encounter")
     if payload_type == "context" and "quest_events" in payload:
         if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.quest_events" not in value.get("capabilities", []):
             raise ValidationError(f"{path}: native quest batch requires v2 flat capability")

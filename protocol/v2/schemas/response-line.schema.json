@@ -86,6 +86,9 @@
         "native_turn": {
           "type": "boolean"
         },
+        "companion_combat_comments": {
+          "type": "boolean"
+        },
         "private_narrator": {
           "type": "boolean"
         }
