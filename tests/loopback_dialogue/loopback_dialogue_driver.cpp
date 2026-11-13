@@ -512,6 +512,8 @@ int run_companion(std::string_view base) {
     CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
     // The flat Wait capabilities come from the shipped helper; turn cancellation anchors the cancelled-work probe.
     auto capabilities = dialogue_capabilities();
+    // Exercise the specialized flat init acknowledgement used by the shipped capability set.
+    capabilities.emplace_back("action.inventory_observation");
     capabilities.emplace_back("dialogue.turn_cancel");
     client::append_wait_capabilities(capabilities, core::RuntimeVariant::flat);
 
