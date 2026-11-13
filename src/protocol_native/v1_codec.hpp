@@ -92,6 +92,7 @@ struct WorldState {
     std::uint64_t game_time_ticks{};
     std::optional<core::SceneIdentity> scene;
     std::optional<core::LocationIdentity> location_ref;
+    std::optional<core::LocationAncestry> location_ancestry;
 };
 struct LoadedPlugin {
     std::string plugin_name, form_id_prefix;
@@ -173,7 +174,7 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, location_ancestry{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer>;
@@ -363,7 +364,7 @@ inline Line decode_line(std::string_view wire) {
         line.payload=SocialTaskOffer{runtime::decode_social_task(required(payload,"task"))};
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "location_ancestry"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -372,7 +373,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("combat_contacts") ? required(payload,"combat_contacts").as_bool() : false,
             payload.find("enemy_awareness") ? required(payload,"enemy_awareness").as_bool() : false,
             payload.find("social_tasks") ? required(payload,"social_tasks").as_bool() : false,
-            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false};
+            payload.find("native_turn") ? required(payload,"native_turn").as_bool() : false,
+            payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -608,7 +610,8 @@ inline json::Value actor_state_value(const ActorState& value) {
     }
     return json::Value{std::move(result)};
 }
-inline json::Value world_state_value(const WorldState& value, bool include_scene = false, bool include_location = false) {
+inline json::Value world_state_value(const WorldState& value, bool include_scene = false, bool include_location = false,
+                                     bool include_ancestry = false) {
     auto result = object({
         {"location", value.location}, {"cell", value.cell},
         {"worldspace", value.worldspace}, {"weather", value.weather},
@@ -633,6 +636,24 @@ inline json::Value world_state_value(const WorldState& value, bool include_scene
         std::snprintf(form, sizeof(form), "0x%08X", value.location_ref->form_id);
         result.emplace_back("location_ref", json::Value{object({{"form_id", std::string{form}},
             {"origin_plugin", value.location_ref->origin_plugin}})});
+        // Plugin-local ancestry is sent only beside the runtime identity of its first entry.
+        if (include_ancestry && value.location_ancestry) {
+            const auto& ancestry = *value.location_ancestry;
+            if (!ancestry.valid_for(*value.location_ref)) throw std::invalid_argument{"invalid location ancestry"};
+            json::Value::Array chain;
+            for (const auto& entry : ancestry.chain) {
+                char local[9]{};
+                std::snprintf(local, sizeof(local), "0x%06X", entry.local_form_id);
+                chain.emplace_back(object({{"origin_plugin", entry.origin_plugin},
+                    {"local_form_id", std::string{local}}, {"display_name", entry.display_name}}));
+            }
+            const char* end = "root";
+            if (ancestry.end == core::LocationAncestryEnd::unresolved) end = "unresolved";
+            if (ancestry.end == core::LocationAncestryEnd::cycle) end = "cycle";
+            if (ancestry.end == core::LocationAncestryEnd::depth_limit) end = "depth_limit";
+            result.emplace_back("location_ancestry", json::Value{object({{"end", std::string{end}},
+                {"chain", std::move(chain)}})});
+        }
     }
     return json::Value{std::move(result)};
 }
@@ -1079,7 +1100,8 @@ inline std::string encode_context(const EventContext& context, std::string playt
     if(world) payload.emplace_back("world",world_state_value(*world, context.protocol_version == 2 &&
         std::ranges::find(context.capabilities, "dialogue.rechat.scene") != context.capabilities.end(),
         context.protocol_version == 2 && context.runtime_variant == "flat" &&
-        std::ranges::find(context.capabilities, "context.location_identity") != context.capabilities.end()));
+        std::ranges::find(context.capabilities, "context.location_identity") != context.capabilities.end(),
+        std::ranges::find(context.capabilities, "context.location_ancestry") != context.capabilities.end()));
     json::Value::Array quests;
     const bool tracking = context.protocol_version == 2 && context.runtime_variant == "flat" &&
         std::ranges::find(context.capabilities, "context.quest_tracking") != context.capabilities.end();
