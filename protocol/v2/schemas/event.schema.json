@@ -1466,6 +1466,108 @@
       "if": {
         "properties": {
           "type": {
+            "const": "control"
+          },
+          "payload": {
+            "required": [
+              "setting"
+            ],
+            "properties": {
+              "setting": {
+                "const": "audience"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "dialogue.everyone"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "input_text",
+              "input_audio"
+            ]
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "required": [
+                  "audience_intent"
+                ]
+              },
+              {
+                "required": [
+                  "audience_reset_epoch"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "dialogue.everyone"
+                }
+              },
+              {
+                "contains": {
+                  "const": "control.menu"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "required": [
+              "audience_intent",
+              "audience_reset_epoch",
+              "control"
+            ],
+            "properties": {
+              "audience_intent": {
+                "const": "everyone"
+              },
+              "audience_reset_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "control": {
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "STANDARD",
+                      "SHOUT"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "context"
           },
           "payload": {

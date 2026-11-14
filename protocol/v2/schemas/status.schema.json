@@ -48,6 +48,27 @@
     },
     "private_narrator": {
       "type": "boolean"
+    },
+    "control_audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent",
+        "reset_epoch"
+      ],
+      "properties": {
+        "intent": {
+          "enum": [
+            "normal",
+            "everyone"
+          ]
+        },
+        "reset_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
     }
   }
 }

@@ -6,7 +6,7 @@ Source: `codex/response-flow-parity`, preserving the response-flow, subtitle and
 
 In the flat lane the `Hotkeys.SYNTHControl` scan-code binding opens SYNTH's own F4SE Menu Framework window. Like every SYNTH hotkey it ships as 0 (unbound) in `config/SYNTH.ini`. It no longer launches a browser. An explicit Open Server Dashboard row remains available.
 
-The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
+The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Audience (see below), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
 
 Mode/model selectors wait for a validated server acknowledgement. Profile refresh waits until the menu closes. Wait Here and Release Wait close the menu automatically and execute on the next menu-free game pump, revalidating the originally displayed NPC. They cannot switch to a new target if that actor disappears.
 
@@ -30,6 +30,16 @@ SYNTH registers its hotkeys in the framework registry for conflict awareness onl
 The coordinator loads local configuration without accessing game objects. Valid settings remain visible without an AI connection. Hotkey-only edits use a game-thread snapshot without retiring the session. Other settings wait for an idle, menu-free reconnect. Input captured by the menu must not submit a microphone recording.
 
 `control.menu` adds a closed v2 control RPC with no dialogue context sequence. Mode/model preferences reuse `conf_opts`. Text/audio requests carry their copied selection. Old or malformed control requests are rejected by the initialized-session/generation checks. Existing dialogue cancellation and response envelopes remain authoritative.
+
+## Everyone audience
+
+The flat root menu has an Audience row: Normal is the existing automatic and targeted behavior; Everyone addresses eligible NPCs within Standard or Shout hearing range, and one NPC replies. VR has no in-game picker: choose the audience in the server dashboard, then press `SYNTHControl`; each completed refresh reports the acknowledged audience, and the `Server settings confirmed` status that opens VR dialogue is unchanged.
+
+- The client offers Everyone only after the init acknowledgement carries `control_audience` (`dialogue.everyone`). An older server, or Whisper, Close or an untargeted mode, is refused on the status line; nothing falls back to Normal silently.
+- Typed and voice input read one acknowledged `ServerControl` state. Push-to-talk keydown, open-microphone speech start and typed Send freeze the intent, reset epoch and anchor; later crosshair moves and menu changes do not alter that turn.
+- The anchor is the nearest eligible NPC by body distance, then form identity, using the existing nearby rules (availability, playthrough, conversation area, cooldown, race, hostility, combat, range); crosshair, ray and gaze are ignored. VR needs a fresh HMD pose and the anchor must also hear from the body pose. Zero hearers, an unconfirmed change or an anchor that leaves range is a visible refusal with no request.
+- Only Everyone adds top-level `audience_intent`/`audience_reset_epoch` beside the closed `control` object; Normal requests are byte-identical to before. The audience starts Normal with each session (load, new game, retirement). An incompatible-mode reset returns it to Normal; returning to Standard never restores Everyone. A missing, incoherent or timed-out acknowledgement does not fall back to Normal: the unconfirmed Everyone intent is kept and input is visibly refused until a valid acknowledgement (including a reset to Normal) arrives or Normal is chosen explicitly. Normal traffic that never touched the audience is unchanged.
+- External requests, diary/profile targets, ambient modes, rechat and native `/talk` routing are unchanged. Speech, history and witness behavior belong to the paired server.
 
 ## Limits requiring manual verification
 

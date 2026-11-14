@@ -2,6 +2,17 @@
 #include "client/synth_client.hpp"
 #include "client/private_narrator.hpp"
 #include "client/rechat_prefetch.hpp"
+#include "client/server_control.hpp"
+#if defined(_WIN32)
+// The real player-input owner holds a NativeMicrophone; these checks never open a device.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "client/player_dialogue.hpp"
+#if defined(_MSC_VER)
+#pragma comment(lib, "winmm.lib")
+#endif
+#endif
 
 #include <iostream>
 #include <array>
@@ -91,6 +102,9 @@ public:
     bool ambient_npc_support{};
     std::optional<synth::json::Value> ambient_npc_ack;
     std::optional<synth::protocol_native::Identity> dialogue_listener;
+    std::optional<synth::json::Value> everyone_ack;      // init control_audience
+    std::string control_detail{"STANDARD|1"};            // control_state MODE|SLOT
+    std::optional<synth::json::Value> control_audience;  // control_state control_audience
     std::string player_ack{"context_accepted"};
     std::vector<synth::client::HttpRequest> requests;
     synth::client::HttpResult send(const synth::client::HttpRequest& request,
@@ -126,7 +140,7 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        if ((everyone_ack || social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
@@ -140,6 +154,12 @@ public:
             if (ambient_npc_ack) payload.emplace_back("ambient_npc",*ambient_npc_ack);
             else if (ambient_npc_support) payload.emplace_back("ambient_npc",true);
             if (companion_support) payload.emplace_back("companion_combat_comments",true);
+            if (everyone_ack) payload.emplace_back("control_audience",*everyone_ack);
+            body += line("status", json::Value{std::move(payload)});
+        }
+        if (protocol_native::text(event, "type") == "control") {
+            auto payload=protocol_native::object({{"code","control_state"},{"detail",control_detail}});
+            if (control_audience) payload.emplace_back("control_audience",*control_audience);
             body += line("status", json::Value{std::move(payload)});
         }
         if (protocol_native::text(event, "type") == "input_text") {
@@ -2054,6 +2074,259 @@ int main() {
             CHECK(candidate.initialize(3,false).status!=RequestStatus::complete && !candidate.gift_menu_ready());
             wire.fault=BindingEchoTransport::Fault::none;
             CHECK(candidate.initialize(4,false).status==RequestStatus::complete && candidate.gift_menu_ready());
+        }
+        // Everyone audience: one acknowledged ServerControl state, the real client encoder and, on Windows, the real
+        // PlayerDialogue admission path for flat and VR scenes.
+        {
+            using namespace synth;
+            using protocol_native::AudienceIntent;
+            using namespace std::chrono_literals;
+            const auto audience = [](const char* intent, std::uint64_t epoch) {
+                return json::Value{protocol_native::object({{"intent", intent}, {"reset_epoch", epoch}})};
+            };
+            const auto options = [](std::string id) {
+                return client::SessionOptions{.runtime_session_id = std::move(id), .runtime_variant = "flat",
+                    .client_version = "test", .runtime_version = "1.10.163",
+                    .capabilities = {"control.menu", "dialogue.everyone", "dialogue.text", "dialogue.audio"}, .protocol_version = 2};
+            };
+            const config::Config configuration;
+            std::atomic_bool terminal{};
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            const protocol_native::Identity player{"0x00000014", "Fallout4.esm", "save-e", "Player"};
+            const auto payload_of = [](const client::HttpRequest& request) {
+                return protocol_native::required(json::parse(request.body), "payload");
+            };
+            // Old peer: no structured init acknowledgement, so Everyone is refused visibly and never encoded.
+            {
+                BindingEchoTransport wire;
+                client::SynthClient old_peer{wire, options("everyone-old-peer")};
+                CHECK(old_peer.initialize(1, false).status == RequestStatus::complete && !old_peer.everyone_ready());
+                tasks::TaskLanes lanes{{tasks::LaneConfig{"network", 4, 1, 3}}, 1};
+                client::ServerControl control{{configuration, old_peer, lanes, terminal, session.token()}};
+                const auto sent = wire.requests.size();
+                CHECK(control.audience_refusal("everyone") == "This server does not support the Everyone audience");
+                CHECK(control.dialogue_selection().audience == AudienceIntent::normal);
+                // The refused choice keeps new input refused, not directed; Normal is an explicit local escape.
+                CHECK(!control.request("audience", "everyone") && wire.requests.size() == sent);
+                CHECK(control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+                const auto scene = old_peer.publish_context(0, "save-e", player, std::nullopt, {}, {}, std::nullopt, {}, {}, {});
+                bool refused{};
+                try { (void)old_peer.send_text("hi", {}, scene.context_binding, {"STANDARD", 1, AudienceIntent::everyone, 0}); }
+                catch (const std::invalid_argument&) { refused = true; }
+                CHECK(refused && wire.requests.size() == sent + 1);
+                CHECK(control.request("status", ""));
+                for (int attempt = 0; attempt < 500 && control.state().pending; ++attempt) std::this_thread::sleep_for(10ms);
+                CHECK(control.state().status == "Server settings confirmed" &&
+                      control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+                const auto refreshed = wire.requests.size();
+                CHECK(!control.audience_refusal("normal") && control.request("audience", "normal") && wire.requests.size() == refreshed);
+                CHECK(control.state().status == "Audience set to Normal" && control.dialogue_selection().audience == AudienceIntent::normal);
+                lanes.shutdown();
+            }
+            BindingEchoTransport wire;
+            wire.everyone_ack = audience("normal", 0);
+            wire.control_audience = audience("normal", 0);
+            client::SynthClient synth_client{wire, options("everyone-client")};
+            CHECK(synth_client.initialize(1, false).status == RequestStatus::complete && synth_client.everyone_ready());
+            tasks::TaskLanes lanes{{tasks::LaneConfig{"network", 4, 1, 3}}, 1};
+            client::ServerControl control{{configuration, synth_client, lanes, terminal, session.token()}};
+            const auto settle = [&] {
+                for (int attempt = 0; attempt < 500 && control.state().pending; ++attempt) std::this_thread::sleep_for(10ms);
+                CHECK(!control.state().pending);
+            };
+            CHECK(control.request("status", "")); settle();
+            CHECK(control.state().status == "Server settings confirmed" && !control.state().everyone);
+            // Delayed acknowledgement: Everyone stays unconfirmed (refused, not Normal) until the matching reply.
+            std::promise<void> release;
+            const auto released = release.get_future().share();
+            wire.control_audience = audience("everyone", 3);
+            wire.before_reply = [released] { released.wait(); };
+            CHECK(control.request("audience", "everyone"));
+            CHECK(control.state().pending && control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+            release.set_value(); settle(); wire.before_reply = {};
+            const auto request = payload_of(wire.requests.back());
+            CHECK(protocol_native::text(request, "setting") == "audience" && protocol_native::text(request, "value") == "everyone");
+            auto selection = control.dialogue_selection();
+            CHECK(control.state().status == "Server settings confirmed" && control.state().everyone);
+            CHECK(selection.audience == AudienceIntent::everyone && selection.audience_reset_epoch == 3 && selection.mode == "STANDARD");
+            // External and untargeted callers read State::selection, which never carries the audience.
+            CHECK(control.state().selection.audience == AudienceIntent::normal);
+            // Typed and voice share one encoder rule: Everyone adds its paired fields; Normal bytes stay unchanged.
+            const auto scene = synth_client.publish_context(0, "save-e", player, std::nullopt, {}, {}, std::nullopt, {}, {}, {});
+            CHECK(synth_client.send_text("hello all", {}, scene.context_binding, selection).status == RequestStatus::complete);
+            const auto everyone_text = payload_of(wire.requests.back());
+            CHECK(protocol_native::text(everyone_text, "audience_intent") == "everyone" &&
+                  protocol_native::integer(everyone_text, "audience_reset_epoch") == 3);
+            protocol_native::closed_object(protocol_native::required(everyone_text, "control"), {"mode", "model_slot"});
+            CHECK(synth_client.send_audio({"media/" + std::string(64, 'a'), "audio/wav", std::string(64, 'a'), 4}, {},
+                scene.context_binding, selection).status == RequestStatus::complete);
+            CHECK(protocol_native::integer(payload_of(wire.requests.back()), "audience_reset_epoch") == 3);
+            CHECK(synth_client.send_text("hello one", {}, scene.context_binding, {"STANDARD", 1}).status == RequestStatus::complete);
+            const auto normal_text = payload_of(wire.requests.back());
+            CHECK(!normal_text.find("audience_intent") && !normal_text.find("audience_reset_epoch"));
+#if defined(_WIN32)
+            {
+                tasks::TaskLanes control_lane{{tasks::LaneConfig{"control", 4, 4, 4}}, 1};
+                std::vector<std::string> notices;
+                client::PlayerDialogue dialogue{configuration, synth_client, control_lane, session.token(),
+                    std::make_shared<diagnostics::ConversationTrace>(), [&](std::string message) { notices.push_back(std::move(message)); }};
+                const client::PlayerDialogue::Controls controls = [&] { return control.dialogue_selection(); };
+                const auto npc = [](std::uint32_t id, core::Vec3 at, bool hostile = false) {
+                    return core::ActorSnapshot{id, "NPC", at, "Fallout4.esm", "save-e", true, false, false, hostile, false, 1,
+                        "HumanRace", "male", "Voice", false, 100, 100, {}, std::nullopt, {}, "unavailable", "alive", "normal",
+                        false, 0, false, false, false, {}, id, "Fallout4.esm", "unavailable", "unavailable", true, true, true};
+                };
+                const auto pose = [](core::Vec3 at) {
+                    return core::WorldPose{at, core::UnitVector3::from({1, 0, 0}), core::UnitVector3::from({0, 0, 1})};
+                };
+                const auto scene_of = [&](std::vector<core::ActorSnapshot> actors, std::optional<core::ActorSnapshot> picked,
+                                          core::RuntimeVariant lane = core::RuntimeVariant::flat,
+                                          std::optional<core::TimedPose> hmd = std::nullopt) {
+                    const core::RuntimeSnapshot built{core::Game::fallout4, lane, core::RuntimeGeneration::initial(), 4,
+                        core::SnapshotClock::now(), pose({}), std::move(hmd), {}, {},
+                        core::ActorSnapshot{0x14, "Player", {}, "Fallout4.esm", "save-e"}, std::move(actors)};
+                    return picked ? built.with_picked_actor(picked) : built;
+                };
+                const auto distant = npc(0xA1, {1200, 0, 0}), nearest = npc(0xA2, {400, 0, 0});
+                const auto beyond = npc(0xA3, {1800, 0, 0}), hostile = npc(0xA4, {100, 0, 0}, true);
+                const auto form = [](const std::optional<context::TargetContext>& target) {
+                    return target ? target->identity().form().form_id() : 0U;
+                };
+                const auto prompt = [](const std::optional<integration::PromptTarget>& target) { return target ? target->form_id : 0U; };
+                // Normal keeps the existing crosshair choice; Everyone ignores the crosshair and every later crosshair
+                // move: nearest eligible hearer, hostile and out-of-range actors excluded.
+                const protocol_native::ControlSelection normal{"STANDARD", 1};
+                CHECK(prompt(dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(
+                    scene_of({distant, nearest}, distant)), [normal] { return normal; })) == 0xA1);
+                for (const auto& pointed : {distant, nearest, beyond, hostile})
+                    CHECK(prompt(dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(
+                        scene_of({distant, nearest, beyond, hostile}, pointed)), controls)) == 0xA2);
+                // Typed Send freezes Everyone at submission, not from the paused draft's crosshair actor.
+                const auto draft = integration::PromptTarget{session.token(), 0xA1, 0xA1, "Fallout4.esm", "Fallout4.esm",
+                    "save-e", "NPC", true, "STANDARD", 1, false};
+                const auto typed = dialogue.admit_text(scene_of({distant, nearest}, distant), "hello all", &draft, false, controls);
+                CHECK(typed && form(typed->target) == 0xA2 && typed->controls.audience == AudienceIntent::everyone &&
+                      typed->controls.audience_reset_epoch == 3);
+                // Voice freezes intent, epoch and anchor at speech admission; later crosshair and control changes do not
+                // move it, and an anchor that leaves hearing range fails instead of retargeting.
+                const auto frozen = controls();
+                const auto anchor = dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(
+                    scene_of({distant, nearest}, distant)), [frozen] { return frozen; });
+                CHECK(prompt(anchor) == 0xA2 && anchor->nearby_conversation);
+                CHECK(form(dialogue.revalidate_target(scene_of({distant, nearest}, nearest), frozen, *anchor)) == 0xA2);
+                CHECK(!dialogue.revalidate_target(scene_of({distant, npc(0xA2, {1900, 0, 0})}, distant), frozen, *anchor));
+                // Zero eligible hearers: visible refusal and no request.
+                const auto sent = wire.requests.size();
+                notices.clear();
+                CHECK(!dialogue.admit_text(scene_of({beyond, hostile}, beyond), "anyone?", nullptr, false, controls));
+                CHECK(notices.size() == 1 && notices[0].find("no eligible NPC") != std::string::npos && wire.requests.size() == sent);
+                // VR: gaze does not choose the anchor; a stale HMD admits nothing; the anchor must hear from the body pose.
+                const auto vr = [&](std::vector<core::ActorSnapshot> actors, core::Vec3 head, std::uint64_t frame = 4) {
+                    return scene_of(std::move(actors), std::nullopt, core::RuntimeVariant::vr,
+                        core::TimedPose{pose(head), core::SnapshotClock::now(), 50ms, frame});
+                };
+                const auto side = npc(0xA5, {0, 400, 0});
+                CHECK(prompt(dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(vr({distant, side}, {})),
+                    [normal] { return normal; })) == 0xA1);
+                CHECK(prompt(dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(vr({distant, side}, {})), controls)) == 0xA5);
+                CHECK(!dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(vr({distant, side}, {}, 3)), controls));
+                CHECK(!dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(
+                    vr({npc(0xA6, {1900, 0, 0})}, {1000, 0, 0})), controls));
+                // While a refresh is pending over Everyone, admission refuses visibly instead of sending Normal.
+                std::promise<void> hold;
+                const auto held = hold.get_future().share();
+                wire.before_reply = [held] { held.wait(); };
+                CHECK(control.request("status", ""));
+                notices.clear();
+                CHECK(!dialogue.admit_text(scene_of({nearest}, nearest), "hello", nullptr, false, controls));
+                CHECK(notices.size() == 1 && notices[0].find("not confirmed") != std::string::npos);
+                hold.set_value(); settle(); wire.before_reply = {};
+                CHECK(control.dialogue_selection().audience == AudienceIntent::everyone);
+                // A lost acknowledgement never turns Everyone into directed input: admission stays refused, with no
+                // request, until a valid reply or an explicit Normal choice.
+                const auto refused = [&] {
+                    const auto before = wire.requests.size();
+                    notices.clear();
+                    const bool admitted = dialogue.admit_text(scene_of({nearest}, nearest), "hello", nullptr, false, controls).has_value();
+                    return !admitted && notices.size() == 1 && notices[0].find("not confirmed") != std::string::npos &&
+                        wire.requests.size() == before && control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed;
+                };
+                wire.fault = BindingEchoTransport::Fault::failed;
+                CHECK(control.request("status", "")); settle();
+                CHECK(control.state().everyone && refused());
+                wire.fault = BindingEchoTransport::Fault::none;
+                CHECK(control.request("status", "")); settle();
+                CHECK(control.dialogue_selection().audience == AudienceIntent::everyone);
+                wire.control_audience = audience("normal", 3);
+                CHECK(control.request("audience", "normal")); settle();
+                CHECK(control.dialogue_selection().audience == AudienceIntent::normal);
+                // A failed first Everyone choice keeps the requested intent, refused rather than Normal.
+                wire.fault = BindingEchoTransport::Fault::failed;
+                CHECK(control.request("audience", "everyone")); settle();
+                CHECK(refused());
+                wire.fault = BindingEchoTransport::Fault::none;
+                // Real 15 s deadline: the timed-out Everyone request stays refused. Its late Normal reply, arriving
+                // while a newer request is pending, neither clears the refusal nor overwrites the newer reply.
+                std::promise<void> late_hold, newer_hold;
+                const auto late_held = late_hold.get_future().share(), newer_held = newer_hold.get_future().share();
+                std::atomic_int replies{};
+                wire.before_reply = [&, late_held, newer_held] { (replies++ == 0 ? late_held : newer_held).wait(); };
+                const auto executed = [&] { return lanes.health().lanes.front().executed; };
+                const auto executed_before = executed();
+                const auto started = std::chrono::steady_clock::now();
+                CHECK(control.request("audience", "everyone"));
+                while (control.state().pending && std::chrono::steady_clock::now() - started < 17s) std::this_thread::sleep_for(50ms);
+                CHECK(std::chrono::steady_clock::now() - started >= 15s && !control.state().pending);
+                CHECK(control.state().status == "Settings request timed out; reopen the menu to refresh" && refused());
+                wire.control_audience = audience("everyone", 9);
+                CHECK(control.request("status", ""));
+                late_hold.set_value();
+                for (int attempt = 0; attempt < 500 && executed() == executed_before; ++attempt) std::this_thread::sleep_for(10ms);
+                CHECK(executed() == executed_before + 1 && control.state().pending &&
+                      control.state().status == "Waiting for server confirmation..." &&
+                      control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+                newer_hold.set_value(); settle(); wire.before_reply = {};
+                selection = control.dialogue_selection();
+                CHECK(selection.audience == AudienceIntent::everyone && selection.audience_reset_epoch == 9);
+                wire.control_audience = audience("everyone", 3);
+                control_lane.shutdown();
+            }
+#endif
+            // Incompatible mode resets the server audience; returning to Standard never resurrects Everyone.
+            wire.control_detail = "WHISPER|1"; wire.control_audience = audience("normal", 4);
+            CHECK(control.request("mode", "WHISPER")); settle();
+            CHECK(!control.state().everyone && control.state().audience_reset_epoch == 4);
+            CHECK(control.dialogue_selection().audience == AudienceIntent::normal);
+            CHECK(control.audience_refusal("everyone") == "Everyone needs Standard or Shout chat mode" &&
+                  !control.request("audience", "everyone"));
+            wire.control_detail = "STANDARD|1";
+            CHECK(control.request("mode", "STANDARD")); settle();
+            CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);
+            // A negotiated reply without a coherent audience confirms nothing and drops a stale Everyone visibly.
+            wire.control_audience = audience("everyone", 5);
+            CHECK(control.request("audience", "everyone")); settle();
+            CHECK(control.state().everyone && control.state().audience_reset_epoch == 5);
+            wire.control_audience.reset();
+            CHECK(control.request("status", "")); settle();
+            CHECK(control.state().everyone && control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+            CHECK(control.state().status.starts_with("Server settings unavailable; Everyone is unconfirmed"));
+            wire.control_audience = audience("everyone", 6);
+            CHECK(control.request("status", "")); settle();
+            CHECK(control.dialogue_selection().audience == AudienceIntent::everyone);
+            wire.control_detail = "CLOSE|1";
+            CHECK(control.request("status", "")); settle();
+            CHECK(control.dialogue_selection().audience == AudienceIntent::everyone_unconfirmed);
+            // A valid Close acknowledgement resets Normal; returning to Standard never resurrects Everyone.
+            wire.control_audience = audience("normal", 7);
+            CHECK(control.request("mode", "CLOSE")); settle();
+            CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);
+            wire.control_detail = "STANDARD|1";
+            CHECK(control.request("mode", "STANDARD")); settle();
+            CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);
+            // Load, new game and retirement replace the session; its replacement control starts Normal.
+            client::ServerControl replacement{{configuration, synth_client, lanes, terminal, session.token()}};
+            CHECK(!replacement.state().everyone && replacement.dialogue_selection().audience == AudienceIntent::normal);
+            lanes.shutdown();
         }
         std::cout << "fake server tests passed (" << checks << " checks)\n";
         return 0;

@@ -87,6 +87,12 @@ inline constexpr std::array<ControlOption, 4> llm_models{{
     {"Experimental", "experimental", "The server-configured Experimental model slot."},
 }};
 
+// Who player speech and typed text address. Everyone needs server support and Standard or Shout chat mode.
+inline constexpr std::array<ControlOption, 2> audiences{{
+    {"Normal", "normal", "Existing automatic and targeted conversation behavior."},
+    {"Everyone", "everyone", "Address eligible NPCs within Standard or Shout hearing range; one NPC replies."},
+}};
+
 // Who a dynamic profile refresh is asked for. The Control menu maps each of
 // these onto its own action, so the consumer never has to parse a scope string.
 inline constexpr std::array<ControlOption, 3> profile_scopes{{

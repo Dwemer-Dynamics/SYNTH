@@ -121,7 +121,7 @@ public:
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false) {
         std::vector<std::string> result{
-            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
+            "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
@@ -494,6 +494,17 @@ public:
             // Whisper and Close never publish without their addressed actor; the targeting helper rejects an
             // addressed actor outside the body-measured 200-unit radius instead of substituting a hearer.
             const bool narrow = controls.mode == "WHISPER" || controls.mode == "CLOSE";
+            // An Everyone anchor is only the transport for its hearers. Unlike an ordinary selected actor it may not
+            // bypass the body-measured Standard/Shout hearing range, so a departed anchor fails instead of retargeting.
+            if (controls.audience == protocol_native::AudienceIntent::everyone) {
+                const auto anchor = std::ranges::find_if(snapshot.actors(), [&](const auto& actor) {
+                    return !selected_actor_key.empty() && actor_key(identity(actor)) == selected_actor_key;
+                });
+                if (anchor == snapshot.actors().end() || !anchor->conversation_area_available() ||
+                    !targeting::player_speech_audible(hearing_distance,
+                        targeting::distance(snapshot.player_pose().position(), anchor->position())))
+                    throw std::invalid_argument{"Everyone anchor is no longer an eligible hearer"};
+            }
             for (const auto* actor : narrow && selected_actor_key.empty()
                      ? std::vector<const core::ActorSnapshot*>{}
                      : targeting::context_participants(snapshot, hearing_distance, selected, controls.mode)) {

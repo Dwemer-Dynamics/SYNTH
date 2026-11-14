@@ -397,6 +397,10 @@ public:
         return server_control_.request(std::move(setting), std::move(value));
     }
 
+    [[nodiscard]] std::optional<std::string> audience_refusal(std::string_view value) const {
+        return server_control_.audience_refusal(value);
+    }
+
     [[nodiscard]] std::optional<audio::PlaybackFrame> playback_frame() const noexcept {
         return speech_.playback_frame();
     }
@@ -987,8 +991,8 @@ private:
     // Per-call views of session state passed to the dialogue owner; never retained by it.
     [[nodiscard]] PlayerDialogue::Controls current_controls() {
         return [this] {
-            auto selection = server_control_.state().selection;
-            if (narrator_.talking()) selection.mode = "NARRATOR";
+            auto selection = server_control_.dialogue_selection();
+            if (narrator_.talking()) selection = {"NARRATOR", selection.model_slot}; // The private lane has no audience.
             return selection;
         };
     }
