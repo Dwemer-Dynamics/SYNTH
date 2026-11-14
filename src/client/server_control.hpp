@@ -15,16 +15,19 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
 namespace synth::client {
 
-// Owns one session's server control settings: the last confirmed mode/model-slot selection, the
-// single pending request with its revision and deadline, and the worker RPC that acknowledges it,
-// plus the control menu's retained target capture. Readers on the game/render thread copy the state
-// under a leaf mutex that is never held across HTTP; the worker task reacquires it only to publish a
-// result whose revision still matches. A timed-out request is retired by the next reader.
+// Owns one session's server control settings: the last confirmed mode/model-slot selection and
+// acknowledged audience, the single pending request with its revision and deadline, and the worker
+// RPC that acknowledges it, plus the control menu's retained target capture. The audience starts
+// Normal with each session, so load, new game and retirement reset it with the session. Readers on
+// the game/render thread copy the state under a leaf mutex that is never held across HTTP; the worker
+// task reacquires it only to publish a result whose revision still matches. A timed-out request is
+// retired by the next reader.
 //
 // Lifetimes: the borrowed configuration, client, network lane and terminal flag outlive this object.
 // The queued RPC captures this object; the session joins the network lane in its destructor body
@@ -34,11 +37,15 @@ public:
     using Snapshot = std::shared_ptr<const core::RuntimeSnapshot>;
 
     struct State final {
-        protocol_native::ControlSelection selection{"STANDARD", 1};
+        protocol_native::ControlSelection selection{"STANDARD", 1}; // Audience stays Normal; see dialogue_selection.
         std::string status;
         bool pending{};
         std::uint64_t revision{};
         tasks::TaskLanes::Clock::time_point deadline{};
+        bool everyone{};                     // Everyone intent for future player captures: acknowledged, or unconfirmed.
+        bool audience_unconfirmed{};         // Everyone was requested or held but its acknowledgement was lost.
+        std::uint64_t audience_reset_epoch{};
+        std::string pending_audience;        // Requested audience while that change is unconfirmed.
     };
 
     struct Dependencies final {
@@ -62,6 +69,8 @@ public:
     [[nodiscard]] State state() const {
         std::scoped_lock lock{mutex_};
         if (state_.pending && tasks::TaskLanes::Clock::now() >= state_.deadline) {
+            // An unanswered request may have changed the server audience; Everyone intent stays, unconfirmed.
+            retain_unconfirmed(state_);
             state_.pending = false;
             state_.status = "Settings request timed out; reopen the menu to refresh";
             ++state_.revision;
@@ -73,6 +82,32 @@ public:
     [[nodiscard]] bool ambient_mode_ready() const {
         const auto controls = state();
         return !controls.pending && controls.selection.mode == "STANDARD";
+    }
+
+    // Player typed/voice admission copies this once. Everyone needs its acknowledgement, a still-negotiated
+    // contract and a compatible confirmed mode; while a request is pending over Everyone, or toward it,
+    // admission sees everyone_unconfirmed and refuses visibly, as it does after a lost acknowledgement until a valid
+    // reply or an explicit Normal choice. Normal traffic never waits on the audience.
+    [[nodiscard]] protocol_native::ControlSelection dialogue_selection() const {
+        const auto controls = state();
+        auto selection = controls.selection;
+        if (!controls.everyone && !(controls.pending && controls.pending_audience == "everyone")) return selection;
+        if (controls.pending || controls.audience_unconfirmed || !client_.everyone_ready() || !protocol_native::everyone_audience_mode(selection.mode)) {
+            selection.audience = protocol_native::AudienceIntent::everyone_unconfirmed;
+        } else {
+            selection.audience = protocol_native::AudienceIntent::everyone;
+            selection.audience_reset_epoch = controls.audience_reset_epoch;
+        }
+        return selection;
+    }
+
+    // Visible reason an audience selection cannot be requested, checked before any network work.
+    [[nodiscard]] std::optional<std::string> audience_refusal(std::string_view value) const {
+        if (value != "normal" && value != "everyone") return "Unknown audience";
+        if (value == "everyone" && !client_.everyone_ready()) return "This server does not support the Everyone audience";
+        if (value == "everyone" && !protocol_native::everyone_audience_mode(state().selection.mode))
+            return "Everyone needs Standard or Shout chat mode";
+        return std::nullopt;
     }
 
     // Capture menu ownership once; a later selection never performs a fresh nearest-NPC fallback.
@@ -95,11 +130,22 @@ public:
     // A bounded worker RPC owns settings acknowledgements; render/game threads never wait on HTTP.
     [[nodiscard]] bool request(std::string setting, std::string value) {
         if (!client_.ready() || terminal_.load(std::memory_order_acquire)) return false;
+        const auto refusal = setting == "audience" ? audience_refusal(value) : std::nullopt;
         std::uint64_t revision{};
         {
             std::scoped_lock lock{mutex_};
             if (state_.pending) return false;
+            // Without the negotiated contract no audience RPC exists: a refused Everyone choice keeps new player
+            // input refused rather than directed, and Normal is chosen locally.
+            if (setting == "audience" && !client_.everyone_ready() && (value == "normal" || value == "everyone")) {
+                state_.everyone = state_.audience_unconfirmed = refusal.has_value();
+                state_.status = refusal ? *refusal + "; choose Normal to send" : "Audience set to Normal";
+                ++state_.revision;
+                return !refusal;
+            }
+            if (refusal) return false;
             state_.pending = true;
+            state_.pending_audience = setting == "audience" ? value : std::string{};
             state_.status = "Waiting for server confirmation...";
             ++state_.revision;
             revision = state_.revision;
@@ -111,6 +157,7 @@ public:
                 State updated = state();
                 if (!updated.pending || updated.revision != revision) return;
                 updated.status = "Server settings unavailable; selection unchanged";
+                bool confirmed{};
                 try {
                     const auto outcome = client_.control(setting, value);
                     if (outcome.status == RequestStatus::complete) {
@@ -122,11 +169,32 @@ public:
                             const auto mode = status->detail.substr(0, split);
                             const auto slot = status->detail.back();
                             if (!protocol_native::valid_control_mode(mode) || slot < '1' || slot > '4') continue;
+                            // A negotiated reply must carry a coherent audience; one without it confirms nothing.
+                            const bool negotiated = client_.everyone_ready();
+                            if (negotiated && (!status->control_audience ||
+                                (status->control_audience->everyone && !protocol_native::everyone_audience_mode(mode)))) continue;
                             updated.selection = {mode, static_cast<std::uint64_t>(slot - '0')};
+                            if (negotiated) {
+                                updated.everyone = status->control_audience->everyone;
+                                updated.audience_unconfirmed = false;
+                            }
+                            updated.audience_reset_epoch = negotiated ? status->control_audience->reset_epoch : 0;
                             updated.status = "Server settings confirmed";
+                            confirmed = true;
                         }
                     }
                 } catch (const std::exception&) {}
+                // A reply that confirmed nothing never turns Everyone into directed Normal input.
+                if (!confirmed) {
+                    const bool everyone = updated.everyone;
+                    retain_unconfirmed(updated);
+                    if (updated.everyone)
+                        updated.status = "Server settings unavailable; Everyone is unconfirmed and nothing is sent until "
+                                         "it is confirmed or Normal is chosen";
+                    else if (everyone)
+                        updated.status = "Server settings unavailable; audience returned to Normal";
+                }
+                updated.pending_audience.clear();
                 if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
                 std::scoped_lock lock{mutex_};
                 if (state_.revision != revision) return;
@@ -137,6 +205,7 @@ public:
         if (accepted != tasks::SubmitResult::accepted) {
             std::scoped_lock lock{mutex_};
             state_.pending = false;
+            state_.pending_audience.clear();
             state_.status = "Settings queue is busy; try again";
             ++state_.revision;
             return false;
@@ -145,6 +214,14 @@ public:
     }
 
 private:
+    // Lost acknowledgement: a requested or held Everyone stays as unconfirmed intent; only an explicit Normal
+    // choice drops it without a valid reply.
+    static void retain_unconfirmed(State& state) {
+        state.everyone = state.pending_audience == "everyone" || (state.everyone && state.pending_audience != "normal");
+        state.audience_unconfirmed = state.everyone;
+        state.pending_audience.clear();
+    }
+
     const config::Config& configuration_;
     SynthClient& client_;
     tasks::TaskLanes& network_;

@@ -833,13 +833,21 @@ void pump_runtime_impl() {
         const auto& model_names = synth::ui::llm_models;
         const std::string model{model_names[std::clamp<std::uint64_t>(
             controls.selection.model_slot, 1, model_names.size()) - 1].value};
+        const std::string audience{controls.everyone ? "everyone" : "normal"};
         if (controls.revision != control_status_revision && !controls.pending) {
-            synth::ui::ControlMenu::publish_status(controls.selection.mode, model, controls.status);
+            synth::ui::ControlMenu::publish_status(controls.selection.mode, model, controls.status, audience);
             control_status_revision = controls.revision;
         }
         if (const auto request = synth::ui::ControlMenu::take_request()) {
             if (request->generation != runtime->generation().value()) {
                 synth::ui::ControlMenu::invalidate();
+            } else if (request->action == synth::ui::ControlAction::audience) {
+                // Refuse an old server or an incompatible mode visibly; nothing falls back to Normal silently. The
+                // session records an old server's refused Everyone so new input stays refused until Normal is chosen.
+                const auto refusal = session->audience_refusal(request->value);
+                if (!session->request_control("audience", request->value))
+                    synth::ui::ControlMenu::publish_status(controls.selection.mode, model,
+                        refusal.value_or("Server settings are busy or unavailable; try again"), audience);
             } else if (request->action == synth::ui::ControlAction::chat_mode || request->action == synth::ui::ControlAction::model_slot) {
                 const bool mode_change = request->action == synth::ui::ControlAction::chat_mode;
                 std::string value = request->value;
@@ -975,12 +983,19 @@ void pump_runtime_impl() {
                 if (submission->target) {
                     const auto& target=*submission->target;
                     const auto valid=!target.session.is_cancelled() && target.session.generation()==runtime->generation();
-                    const auto snapshot = valid ? runtime->capture_actor_snapshot(now,target.form_id) : nullptr;
+                    // Everyone chooses its anchor from the scene at Send, not from the draft's actor; refusals are
+                    // explained by the session.
+                    const auto everyone = target.manual_chat && (controls.everyone || controls.pending_audience == "everyone");
+                    synth::client::PluginSession::Snapshot snapshot;
+                    if (valid && everyone) snapshot = runtime->capture_snapshot(now);
+                    else if (valid) snapshot = runtime->capture_actor_snapshot(now,target.form_id);
                     if (session.get() != owner || runtime->generation() != generation) return;
                     if (!valid || !(target.manual_chat
                         ? session->submit_text(snapshot, std::move(submission->text), &target)
-                        : session->submit_prompt(snapshot, target, std::move(submission->text))))
-                        present_notification("SYNTH targeted prompt is no longer valid; no message was sent");
+                        : session->submit_prompt(snapshot, target, std::move(submission->text)))) {
+                        if (!valid || !everyone || !snapshot)
+                            present_notification("SYNTH targeted prompt is no longer valid; no message was sent");
+                    }
                 } else {
                     auto snapshot = runtime->capture_snapshot(now);
                     if (session.get() != owner || runtime->generation() != generation) return;
@@ -1101,7 +1116,7 @@ void pump_runtime_impl() {
             if (session.get() != owner || runtime->generation() != generation) return;
             control_target = session->prepare_control_target(snapshot);
             if (synth::ui::ControlMenu::request_open(generation.value(),
-                    control_target ? control_target->display_name : "", controls.selection.mode, model)) {
+                    control_target ? control_target->display_name : "", controls.selection.mode, model, audience)) {
                 (void)session->request_control();
             } else present_notification("SYNTH control menu unavailable; check F4SE Menu Framework");
         }

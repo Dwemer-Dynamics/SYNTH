@@ -176,7 +176,10 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}; };
+// Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
+struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{};
+    std::optional<ControlAudience> control_audience; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -438,7 +441,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "control_audience"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -452,6 +455,14 @@ inline Line decode_line(std::string_view wire) {
             payload.find("companion_combat_comments") ? required(payload,"companion_combat_comments").as_bool() : false,
             payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false,
             payload.find("private_narrator") ? required(payload,"private_narrator").as_bool() : false};
+        if (const auto* audience = payload.find("control_audience")) {
+            closed_object(*audience, {"intent", "reset_epoch"});
+            const auto intent = text(*audience, "intent");
+            const auto epoch = integer(*audience, "reset_epoch");
+            if ((intent != "normal" && intent != "everyone") || epoch > 9'007'199'254'740'991ULL)
+                throw std::invalid_argument{"invalid control audience"};
+            std::get<Status>(line.payload).control_audience = ControlAudience{intent == "everyone", epoch};
+        }
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -982,9 +993,16 @@ inline std::string encode_init(const EventContext& context, std::string locale, 
     }
     return encode_event(context,"init",json::Value{std::move(payload)});
 }
+// Normal is the existing automatic/directed behavior and adds no wire fields. Everyone is admitted only from an
+// acknowledged selection; everyone_unconfirmed records a pending or lost acknowledgement so admission can refuse it
+// visibly, and it is never encoded.
+enum class AudienceIntent : unsigned char { normal, everyone, everyone_unconfirmed };
+
 struct ControlSelection final {
     std::string mode;
     std::uint64_t model_slot{1};
+    AudienceIntent audience{AudienceIntent::normal};
+    std::uint64_t audience_reset_epoch{};
 };
 
 inline bool valid_control_mode(std::string_view mode) {
@@ -992,20 +1010,34 @@ inline bool valid_control_mode(std::string_view mode) {
     return std::ranges::find(modes, mode) != std::end(modes);
 }
 
+// Everyone addresses ordinary hearing range only; Whisper/Close privacy and untargeted modes never combine with it.
+inline bool everyone_audience_mode(std::string_view mode) { return mode == "STANDARD" || mode == "SHOUT"; }
+
 // Optional negotiated settings are copied at turn admission, never read from a later menu selection.
 inline void append_control_selection(json::Value::Object& payload, const EventContext& context, const ControlSelection& selection) {
-    if (selection.mode.empty()) return;
+    if (selection.mode.empty() && selection.audience == AudienceIntent::normal && selection.audience_reset_epoch == 0) return;
     if (context.protocol_version != 2 || !valid_control_mode(selection.mode) || selection.model_slot < 1 || selection.model_slot > 4 ||
         std::ranges::find(context.capabilities, "control.menu") == context.capabilities.end())
         throw std::invalid_argument{"invalid or unnegotiated control selection"};
     payload.emplace_back("control", json::Value{object({{"mode", selection.mode}, {"model_slot", selection.model_slot}})});
+    if (selection.audience == AudienceIntent::normal && selection.audience_reset_epoch == 0) return;
+    if (selection.audience != AudienceIntent::everyone || !everyone_audience_mode(selection.mode) || context.context_sequence == 0 ||
+        selection.audience_reset_epoch > 9'007'199'254'740'991ULL ||
+        std::ranges::find(context.capabilities, "dialogue.everyone") == context.capabilities.end())
+        throw std::invalid_argument{"invalid or unnegotiated Everyone audience"};
+    // Top-level beside the closed control object, which never gains an audience field.
+    payload.emplace_back("audience_intent", json::Value{std::string{"everyone"}});
+    payload.emplace_back("audience_reset_epoch", selection.audience_reset_epoch);
 }
 
 inline std::string encode_control(const EventContext& context, std::string setting, std::string value) {
+    const auto has = [&](std::string_view capability) {
+        return std::ranges::find(context.capabilities, capability) != context.capabilities.end();
+    };
     const auto valid = (setting == "status" && value.empty()) || (setting == "mode" && valid_control_mode(value)) ||
-        (setting == "model_slot" && (value == "1" || value == "2" || value == "3" || value == "4"));
-    if (!valid || context.protocol_version != 2 || context.context_sequence != 0 ||
-        std::ranges::find(context.capabilities, "control.menu") == context.capabilities.end())
+        (setting == "model_slot" && (value == "1" || value == "2" || value == "3" || value == "4")) ||
+        (setting == "audience" && (value == "normal" || value == "everyone") && has("dialogue.everyone"));
+    if (!valid || context.protocol_version != 2 || context.context_sequence != 0 || !has("control.menu"))
         throw std::invalid_argument{"invalid or unnegotiated control request"};
     return encode_event(context, "control", json::Value{object({{"setting", std::move(setting)}, {"value", std::move(value)}})});
 }

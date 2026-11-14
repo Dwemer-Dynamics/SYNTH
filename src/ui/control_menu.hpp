@@ -106,6 +106,7 @@ enum class ControlAction : unsigned char {
     release_wait,      // value: the target's display name, for the caller's log line
     open_dashboard,    // value: empty
     diary_target,      // value: target display name; game thread retains exact identity
+    audience,          // value: an `audiences` catalog value
 };
 
 // One selection, handed over exactly once.
@@ -155,21 +156,25 @@ public:
         std::string pending_mode;   // empty unless a mode change is unconfirmed
         std::string pending_model;  // empty unless a slot change is unconfirmed
         std::optional<ControlAction> pending_action;  // unconfirmed one-shot
+        std::string audience;          // acknowledged audience
+        std::string pending_audience;  // empty unless an audience change is unconfirmed
     };
 
     // Game thread: ask for the menu. Refused while a draft is still up or a
     // selection is still unread, so the player cannot open a second menu over an
     // in-flight one.
     bool request_open(std::uint64_t generation, std::string target_name, std::string mode,
-                      std::string model) {
+                      std::string model, std::string audience = {}) {
         auto name = clamp(std::move(target_name), label_limit);
         auto mode_text = clamp(std::move(mode), label_limit);
         auto model_text = clamp(std::move(model), label_limit);
+        auto audience_text = clamp(std::move(audience), label_limit);
         std::scoped_lock lock{mutex_};
         if (open_pending_ || draft_ || request_) return false;
         draft_ = Draft{++revision_, generation, std::move(name)};
         mode_ = std::move(mode_text);
         model_ = std::move(model_text);
+        audience_ = std::move(audience_text);
         status_.clear();
         clear_pending_locked();
         open_pending_ = true;
@@ -211,21 +216,24 @@ public:
     // every pending echo - including a refused one, which the status line
     // explains - so a selection the consumer declined cannot stay on screen as
     // though it had been applied.
-    void publish_status(std::string mode, std::string model, std::string status) {
+    // An empty audience leaves the displayed audience as it was.
+    void publish_status(std::string mode, std::string model, std::string status, std::string audience = {}) {
         auto mode_text = clamp(std::move(mode), label_limit);
         auto model_text = clamp(std::move(model), label_limit);
         auto status_text = clamp(std::move(status), status_limit);
+        auto audience_text = clamp(std::move(audience), label_limit);
         std::scoped_lock lock{mutex_};
         mode_ = std::move(mode_text);
         model_ = std::move(model_text);
         status_ = std::move(status_text);
+        if (!audience_text.empty()) audience_ = std::move(audience_text);
         clear_pending_locked();
     }
 
     // Render thread: everything the menu draws, in one copy.
     [[nodiscard]] View status() const {
         std::scoped_lock lock{mutex_};
-        return View{mode_, model_, status_, pending_mode_, pending_model_, pending_action_};
+        return View{mode_, model_, status_, pending_mode_, pending_model_, pending_action_, audience_, pending_audience_};
     }
 
     // Render thread: the player closed the menu. A renderer holding an obsolete
@@ -257,6 +265,7 @@ public:
         request_.reset();
         mode_.clear();
         model_.clear();
+        audience_.clear();
         status_.clear();
         clear_pending_locked();
         ++revision_;
@@ -267,6 +276,7 @@ private:
     void clear_pending_locked() noexcept {
         pending_mode_.clear();
         pending_model_.clear();
+        pending_audience_.clear();
         pending_action_.reset();
     }
 
@@ -278,6 +288,10 @@ private:
             break;
         case ControlAction::model_slot:
             pending_model_ = value;
+            pending_action_.reset();
+            break;
+        case ControlAction::audience:
+            pending_audience_ = value;
             pending_action_.reset();
             break;
         default:
@@ -305,6 +319,8 @@ private:
     std::string status_;
     std::string pending_mode_;
     std::string pending_model_;
+    std::string audience_;
+    std::string pending_audience_;
     std::optional<ControlAction> pending_action_;
     std::uint64_t revision_{};
     bool open_pending_{};
@@ -349,10 +365,10 @@ inline void clear_control_menu_state() noexcept {
 // framework's visibility flag is published by the render lifecycle, so an older
 // render close cannot lose this request between the bridge and that flag.
 inline bool open_control_menu(std::uint64_t generation, std::string target_name, std::string mode,
-                              std::string model) {
+                              std::string model, std::string audience) {
     if (control_menu_window.load(std::memory_order_acquire) == nullptr) return false;
     return control_menu.request_open(generation, std::move(target_name), std::move(mode),
-                                     std::move(model));
+                                     std::move(model), std::move(audience));
 }
 
 // The player-facing name of a value, or the raw value when the catalog does not
@@ -465,6 +481,19 @@ inline void __stdcall render_control_menu() {
                               view.pending_model.empty() ? view.model : view.pending_model) +
                 (view.pending_model.empty() ? "]" : "] (pending)") + "##SYNTH.Control.LlmMode";
             if (control_row(model_row, false)) control_menu_level = ControlLevel::llm_model;
+
+            // Two values, so Enter asks for the other one. The game thread refuses an unsupported server or an
+            // incompatible chat mode on the status line instead of quietly keeping Normal.
+            const auto& shown_audience = view.pending_audience.empty() ? view.audience : view.pending_audience;
+            const auto audience_row =
+                std::string{"Audience  ["} + control_label(audiences, shown_audience) +
+                (view.pending_audience.empty() ? "]" : "] (pending)") + "##SYNTH.Control.Audience";
+            if (control_row(audience_row, false)) {
+                control_submit(ControlAction::audience, shown_audience == "everyone" ? "normal" : "everyone");
+            }
+            for (const auto& option : audiences) {
+                if (shown_audience == option.value) describe_option(option);
+            }
 
             if (control_row("Dynamic Profiles##SYNTH.Control.Profiles", false)) {
                 control_menu_level = ControlLevel::profiles;
@@ -683,15 +712,16 @@ public:
     // there is no window to show or a selection is still in flight, so the caller
     // can fall back to its own notification.
     static bool request_open(std::uint64_t generation, std::string target_name, std::string mode,
-                             std::string model) {
+                             std::string model, std::string audience = {}) {
 #if SYNTH_HAS_MENU_FRAMEWORK
         return detail::open_control_menu(generation, std::move(target_name), std::move(mode),
-                                         std::move(model));
+                                         std::move(model), std::move(audience));
 #else
         (void)generation;
         (void)target_name;
         (void)mode;
         (void)model;
+        (void)audience;
         return false;
 #endif
     }
@@ -707,8 +737,8 @@ public:
     // Game thread: publish what is now in force, plus one line explaining the
     // last selection. This is what clears the menu's pending echo, so call it
     // whether the selection was applied or refused.
-    static void publish_status(std::string mode, std::string model, std::string status) {
-        detail::control_menu.publish_status(std::move(mode), std::move(model), std::move(status));
+    static void publish_status(std::string mode, std::string model, std::string status, std::string audience = {}) {
+        detail::control_menu.publish_status(std::move(mode), std::move(model), std::move(status), std::move(audience));
     }
 
     // Game thread: drop the menu and everything queued for a session that is

@@ -46,6 +46,7 @@ bool voice_capture_down{};
 bool player_was_in_combat{};
 bool control_status_confirmed{};
 std::uint64_t control_failure_revision{};
+std::uint64_t control_audience_revision{};
 auto next_context_publish = synth::core::SnapshotClock::time_point{};
 auto next_profile_refresh = synth::core::SnapshotClock::time_point{};
 auto profile_timer_paused_at = synth::core::SnapshotClock::time_point{};
@@ -180,6 +181,7 @@ void invalidate_sessions(bool discard_speech = false) noexcept {
     runtime_disabled = false;
     control_status_confirmed = false;
     control_failure_revision = 0;
+    control_audience_revision = 0;
     if (session_host) session_host->invalidate();
     if (dispatcher) dispatcher->discard_pending();
     if (session) {
@@ -246,6 +248,15 @@ void track_control_status() {
             present_notification("SYNTHVR server settings: " + controls.status +
                                  "; press SYNTH Control to retry");
         }
+    }
+    // VR selects the audience in the dashboard; each completed SYNTH Control refresh after confirmation reports
+    // what the server acknowledged for future speech, without changing the exact status text the gate reads.
+    if (!controls.pending && control_status_confirmed && controls.revision != control_audience_revision) {
+        control_audience_revision = controls.revision;
+        const std::string audience = controls.everyone
+            ? "Everyone (eligible NPCs within Standard/Shout hearing range)" : "Normal";
+        present_notification(controls.status == "Server settings confirmed" ? "SYNTHVR audience: " + audience
+            : "SYNTHVR server settings: " + controls.status + "; audience: " + audience);
     }
 }
 

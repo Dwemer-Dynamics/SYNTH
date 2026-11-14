@@ -152,6 +152,16 @@ public:
     [[nodiscard]] bool private_narrator_ready() const noexcept {
         return private_narrator_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Everyone is offered and encoded only after this init carried a structured control_audience acknowledgement.
+    [[nodiscard]] bool uses_everyone_contract() const noexcept {
+        const auto has = [this](std::string_view value) {
+            return std::ranges::find(options_.capabilities, value) != options_.capabilities.end();
+        };
+        return options_.protocol_version == 2 && has("dialogue.everyone") && has("control.menu");
+    }
+    [[nodiscard]] bool everyone_ready() const noexcept {
+        return everyone_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool social_tasks_ready() const noexcept {
         return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -299,6 +309,7 @@ public:
             native_turn_negotiated_.store(false, std::memory_order_release);
             actor_stats_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
+            everyone_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -345,6 +356,9 @@ public:
                 std::memory_order_release);
             private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
+                std::memory_order_release);
+            everyone_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->control_audience && uses_everyone_contract(),
                 std::memory_order_release);
             social_tasks_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->social_tasks &&
@@ -582,6 +596,8 @@ public:
             if (text.empty() || text.size() > 4096) throw std::invalid_argument{"dialogue text is out of bounds"};
             if (intent == protocol_native::TextIntent::conversation && !native_turn_ready())
                 throw std::invalid_argument{"the server did not accept native conversation turns"};
+            if (selection.audience != protocol_native::AudienceIntent::normal && !everyone_ready())
+                throw std::invalid_argument{"the server did not acknowledge the Everyone audience"};
             request_id = next_id("text");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
@@ -737,6 +753,8 @@ public:
         {
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
+            if (selection.audience != protocol_native::AudienceIntent::normal && !everyone_ready())
+                throw std::invalid_argument{"the server did not acknowledge the Everyone audience"};
             request_id = next_id("audio");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
@@ -1416,6 +1434,7 @@ private:
     std::atomic_bool native_turn_negotiated_{};
     std::atomic_bool actor_stats_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
+    std::atomic_bool everyone_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};

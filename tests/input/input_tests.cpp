@@ -289,7 +289,15 @@ int main() try {
         bridge.publish_status("WHISPER", "standard", "confirmed");
         CHECK(bridge.status().mode == "WHISPER");
         CHECK(bridge.status().pending_mode.empty());
+        // The audience row echoes its request until the game thread publishes what the server acknowledged.
+        CHECK(bridge.submit(synth::ui::ControlAction::audience, "everyone", draft->revision) == synth::ui::detail::ControlSubmit::accepted);
+        CHECK(bridge.take_request()->action == synth::ui::ControlAction::audience && bridge.status().pending_audience == "everyone");
+        bridge.publish_status("STANDARD", "standard", "Everyone needs Standard or Shout chat mode", "normal");
+        CHECK(bridge.status().audience == "normal" && bridge.status().pending_audience.empty());
+        bridge.publish_status("STANDARD", "standard", "Server dashboard opened in your browser");
+        CHECK(bridge.status().audience == "normal");
         bridge.invalidate();
+        CHECK(bridge.status().audience.empty());
         CHECK(!bridge.is_open());
         CHECK(bridge.submit(synth::ui::ControlAction::wait_here, "Preston", draft->revision) == synth::ui::detail::ControlSubmit::stale);
         CHECK(!bridge.take_request());

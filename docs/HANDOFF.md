@@ -1,5 +1,14 @@
 # SYNTH developer handoff
 
+## Everyone audience candidate
+
+An explicit, server-acknowledged Everyone audience for Standard/Shout player speech and typed text. Normal keeps every
+existing automatic, directed and untargeted path. One deterministic nearest eligible NPC is the transport anchor; there
+is no per-hearer dispatch. Flat selects it on the Control menu's Audience row; VR uses the dashboard plus a `SYNTHControl`
+refresh. See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Paired with the server `dialogue.everyone`
+contract. Acceptance is tracked in [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#everyone-audience); deployment, provider,
+history and flat/VR gameplay remain unverified.
+
 ## NPC biography and SPECIAL candidate
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).

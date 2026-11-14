@@ -909,6 +909,68 @@ int main(int argc,char** argv){
     const auto rpc = synth::json::parse(encode_control(control_context, "status", ""));
     if (integer(rpc, "context_sequence") != 0 || text(rpc, "type") != "control")
       throw std::runtime_error{"control RPC incorrectly owns a dialogue context"};
+    // Everyone (dialogue.everyone): explicit paired top-level fields only for STANDARD/SHOUT; Normal adds no bytes.
+    const auto rejects = [](auto&& encode) {
+      try { (void)encode(); } catch (const std::invalid_argument&) { return true; }
+      return false;
+    };
+    if (!rejects([&] { return encode_control(control_context, "audience", "everyone"); }))
+      throw std::runtime_error{"audience control accepted without dialogue.everyone"};
+    control_context.capabilities.push_back("dialogue.everyone");
+    const auto audience_rpc = required(synth::json::parse(encode_control(control_context, "audience", "everyone")), "payload");
+    if (text(audience_rpc, "setting") != "audience" || text(audience_rpc, "value") != "everyone" ||
+        !rejects([&] { return encode_control(control_context, "audience", "all"); }))
+      throw std::runtime_error{"audience control request was not exact"};
+    control_context.context_sequence = 1;
+    if (encode_input_text(control_context, "Hello", {"STANDARD", 1}) !=
+        encode_input_text(control_context, "Hello", {"STANDARD", 1, AudienceIntent::normal, 0}))
+      throw std::runtime_error{"Normal audience changed existing turn bytes"};
+    const auto normal = required(synth::json::parse(encode_input_text(control_context, "Hello", {"STANDARD", 1})), "payload");
+    if (normal.find("audience_intent") || normal.find("audience_reset_epoch"))
+      throw std::runtime_error{"Normal turn gained audience fields"};
+    const auto everyone = required(synth::json::parse(encode_input_text(control_context, "Hello",
+        {"SHOUT", 1, AudienceIntent::everyone, 7})), "payload");
+    closed_object(required(everyone, "control"), {"mode", "model_slot"});
+    if (text(everyone, "audience_intent") != "everyone" || integer(everyone, "audience_reset_epoch") != 7)
+      throw std::runtime_error{"Everyone audience was not frozen into the turn"};
+    const Media voice{"media/" + std::string(64, 'b'), "audio/wav", std::string(64, 'b'), 8};
+    if (integer(required(synth::json::parse(encode_input_audio(control_context, voice, {"STANDARD", 2, AudienceIntent::everyone, 0})),
+        "payload"), "audience_reset_epoch") != 0)
+      throw std::runtime_error{"Everyone voice turn lost its epoch"};
+    for (const ControlSelection invalid : {ControlSelection{"WHISPER", 1, AudienceIntent::everyone, 1},
+             ControlSelection{"CLOSE", 1, AudienceIntent::everyone, 1}, ControlSelection{"NARRATOR", 1, AudienceIntent::everyone, 1},
+             ControlSelection{"STANDARD", 1, AudienceIntent::everyone_unconfirmed, 1}, ControlSelection{"STANDARD", 1, AudienceIntent::normal, 2},
+             ControlSelection{"", 1, AudienceIntent::everyone, 1}, ControlSelection{"STANDARD", 1, AudienceIntent::everyone, 9'007'199'254'740'992ULL}}) {
+      if (!rejects([&] { return encode_input_text(control_context, "Hello", invalid); }) ||
+          !rejects([&] { return encode_input_audio(control_context, voice, invalid); }))
+        throw std::runtime_error{"invalid Everyone selection accepted"};
+    }
+    auto unnegotiated = control_context;
+    std::erase(unnegotiated.capabilities, std::string{"dialogue.everyone"});
+    if (!rejects([&] { return encode_input_text(unnegotiated, "Hello", {"STANDARD", 1, AudienceIntent::everyone, 1}); }))
+      throw std::runtime_error{"Everyone encoded without dialogue.everyone"};
+    // Acknowledged audience: an exact closed object on v2 status only.
+    const auto status_line = [](std::uint64_t version, synth::json::Value audience) {
+      auto fields = object({{"schema", "synth.response.line.v" + std::to_string(version)}, {"protocol_version", version},
+          {"type", "status"}, {"line_id", "control:1:status"}, {"request_id", "control:1"}, {"turn_id", "settings:1"},
+          {"generation", std::uint64_t{1}}, {"game", "fo4"}, {"runtime_variant", "flat"},
+          {"payload", synth::json::Value{object({{"code", "control_state"}, {"detail", "STANDARD|1"}, {"control_audience", std::move(audience)}})}}});
+      if (version == 2) fields.emplace_back("context_sequence", std::uint64_t{0});
+      return synth::json::write(synth::json::Value{std::move(fields)});
+    };
+    const auto acknowledged = std::get<Status>(decode_line(status_line(2,
+        synth::json::Value{object({{"intent", "everyone"}, {"reset_epoch", std::uint64_t{4}}})})).payload).control_audience;
+    if (!acknowledged || !acknowledged->everyone || acknowledged->reset_epoch != 4)
+      throw std::runtime_error{"control audience was not decoded"};
+    for (auto malformed : {synth::json::Value{object({{"intent", "all"}, {"reset_epoch", std::uint64_t{1}}})},
+             synth::json::Value{object({{"intent", "normal"}})},
+             synth::json::Value{object({{"intent", "normal"}, {"reset_epoch", std::uint64_t{1}}, {"extra", true}})},
+             synth::json::Value{object({{"intent", "normal"}, {"reset_epoch", std::int64_t{-1}}})}}) {
+      if (!rejects([&] { return decode_line(status_line(2, malformed)); }))
+        throw std::runtime_error{"malformed control audience accepted"};
+    }
+    if (!rejects([&] { return decode_line(status_line(1, synth::json::Value{object({{"intent", "normal"}, {"reset_epoch", std::uint64_t{0}}})})); }))
+      throw std::runtime_error{"v1 status accepted a control audience"};
   }
   std::cout<<"protocol native tests passed\n"; return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
