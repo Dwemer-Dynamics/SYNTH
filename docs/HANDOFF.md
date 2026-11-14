@@ -6,8 +6,17 @@ An explicit, server-acknowledged Everyone audience for Standard/Shout player spe
 existing automatic, directed and untargeted path. One deterministic nearest eligible NPC is the transport anchor; there
 is no per-hearer dispatch. Flat selects it on the Control menu's Audience row; VR uses the dashboard plus a `SYNTHControl`
 refresh. See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Paired with the server `dialogue.everyone`
-contract. Acceptance is tracked in [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#everyone-audience); deployment, provider,
-history and flat/VR gameplay remain unverified.
+contract. Acceptance is tracked in [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#everyone-audience).
+
+Specific automated paired checks passed. With the exact server commit on PostgreSQL 17, the compiled client driver and
+codec carried synthetic actors over real loopback HTTP and confirmed the server's one-reply, receipt and bounded-continuation
+rules. Static pair reviews found no blockers.
+
+Not yet covered:
+
+- `PluginSession`, game, microphone or HMD runs.
+- Deployment, publication, or flat/VR gameplay.
+- Merge and the AutoChat handoff are held until verification or a human waiver.
 
 ## NPC biography and SPECIAL candidate
 

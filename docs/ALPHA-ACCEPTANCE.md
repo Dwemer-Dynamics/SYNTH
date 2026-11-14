@@ -2,8 +2,14 @@
 
 ## Everyone audience
 
-See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Native and fake-server checks only so far.
+See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Off-game evidence only so far:
+automated native-client and fake-server checks plus one paired loopback HTTP run; nothing has run in game, with a
+microphone or in a headset.
 
+- [x] Off-game pairing: with the exact server commit on PostgreSQL 17, the compiled client driver and codec carried
+  synthetic actors over real loopback HTTP (3 tests, 1244 assertions). Results: one reply, a held duplicate refused as
+  pending, delivered and undelivered native replies kept distinct, and bounded continuations. No `PluginSession`, game,
+  microphone or HMD was involved.
 - [ ] Flat: select Everyone on the Audience row in Standard and Shout; push-to-talk and typed Send reach the nearest
   eligible NPC while the crosshair points elsewhere, and moving the crosshair mid-recording does not change it.
 - [ ] Flat: zero eligible NPCs, Whisper/Close, an older server and an anchor walking out of range each show a refusal and
