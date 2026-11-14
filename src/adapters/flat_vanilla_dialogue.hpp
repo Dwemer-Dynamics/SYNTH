@@ -108,9 +108,9 @@ public:
             if (info->GetFormType() != RE::ENUM_FORM_ID::kINFO) return result;
             result.line.text.assign(*text);
             result.line.topic_info_form_id = info->GetFormID();
-            result.line.topic_info_plugin = commonlib::origin_plugin(*info);
-            handle = current; // Copied under the leases; the native handle lookup runs after both are released.
+            handle = current; // Copied under the leases; native file and handle lookups run after both are released.
         }
+        result.line.topic_info_plugin = commonlib::origin_plugin(*info);
         const RE::NiPointer<RE::TESObjectREFR> speaker = handle.get();
         if (!speaker) return result; // An unresolved handle is unknown, not a known non-NPC line.
         auto* actor = speaker->As<RE::Actor>();
