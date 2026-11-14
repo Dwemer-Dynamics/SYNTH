@@ -8,17 +8,19 @@ is no per-hearer dispatch. Flat selects it on the Control menu's Audience row; V
 refresh. See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Paired with the server `dialogue.everyone`
 contract. Acceptance is tracked in [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#everyone-audience).
 
-Specific automated paired checks passed. With the exact server commit on PostgreSQL 17, the compiled client driver and
-codec carried synthetic actors over real loopback HTTP and confirmed the server's one-reply, receipt and bounded-continuation
-rules. Static pair reviews found no blockers.
+Specific automated paired checks passed on the combined pair (client `ed4b155`, server `d288852`). On PostgreSQL 17, the
+compiled client driver and codec carried synthetic actors over real loopback HTTP and confirmed the server's one-reply,
+receipt and bounded-continuation rules; the server's full suite and a private-history control also passed. The native
+Windows suites, fresh flat and VR DLLs, both audited packages and the portable Linux suites passed. Independent
+exact-source and runtime-evidence reviews found no new privacy or integration blockers.
 
 Not yet covered:
 
-- `PluginSession`, game, microphone or HMD runs.
+- `PluginSession`, game, microphone, HMD or performance runs.
 - Deployment, publication, or flat/VR gameplay.
-- Merge and the AutoChat handoff are held until verification or a human waiver.
-- These checks, the vanilla witness checks and the flat settings layout checks below predate their merge and do not
-  cover the combined pair.
+- Hosted Actions are unavailable and have not passed for this pair; the local Debian 12 run is a workflow equivalent,
+  not the hosted Ubuntu image. Gameplay and deployment are unverified. Publication state is tracked on the pull
+  requests.
 
 ## Flat settings layout candidate
 
@@ -28,8 +30,9 @@ and clarifies Whisper, Close, server model slots and profile refresh. All settin
 defaults, hotkey identifiers and wire values remain unchanged. See
 [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#layout-and-first-use). Off-game checks
 do not establish native menu layout or keyboard scrolling. Flat/VR gameplay and deployment
-remain on hold. Its checks predate the merge with the Everyone and vanilla witness
-candidates; combined acceptance is pending.
+remain on hold. Its off-game checks were rerun on the combined pair with Everyone and vanilla
+witnesses (`ed4b155`). The combined menu keeps one Audience row in the existing root, and the
+grouped modes and page wire bindings are unchanged. Native menu and in-game checks stay open.
 
 ## Vanilla dialogue witnesses candidate
 

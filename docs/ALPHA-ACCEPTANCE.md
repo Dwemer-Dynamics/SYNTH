@@ -2,14 +2,22 @@
 
 ## Everyone audience
 
-See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Off-game evidence only so far:
-automated native-client and fake-server checks plus one paired loopback HTTP run; nothing has run in game, with a
-microphone or in a headset.
+See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Off-game evidence only so far, on exact
+commits of the pair combined with vanilla dialogue witnesses and the flat settings layout (client `ed4b155`, server
+`d288852`), with source hashes unchanged after each run; nothing has run in game, with a microphone or in a headset.
 
-- [x] Off-game pairing: with the exact server commit on PostgreSQL 17, the compiled client driver and codec carried
-  synthetic actors over real loopback HTTP (3 tests, 1244 assertions). Results: one reply, a held duplicate refused as
-  pending, delivered and undelivered native replies kept distinct, and bounded continuations. No `PluginSession`, game,
-  microphone or HMD was involved.
+- [x] Off-game pairing: on PostgreSQL 17, the compiled client driver and codec carried synthetic actors over real
+  loopback HTTP (3 tests, 1239 assertions; the count varies with an unforced concurrency case). Results: one reply, a
+  held duplicate refused as pending, delivered and undelivered native replies kept distinct, and bounded continuations.
+  The server's full suite (1313 tests, 26641 assertions), quest probes and a private-history control also passed. No
+  `PluginSession`, game, microphone or HMD was involved.
+- [x] Native Windows: the 19 engine-free suites pass in the flat and VR lanes, both x64 DLLs were built fresh, and both
+  packaged ZIPs passed the audit; 65 build guards and 22 packaging tests pass. The server release-tree audit (536 PHP,
+  368 JSON files) and content SQL parity check pass.
+- [x] Portable Linux: 18 suites, 57 direct build-gate tests and the protocol mirror (45 schemas, 418 fixture cases,
+  406 files byte-identical with the server) pass. This used local Debian 12 tools as a workflow equivalent, not the
+  hosted Ubuntu image.
+- [ ] Hosted Actions: unavailable and not passed for this pair.
 - [ ] Flat: select Everyone on the Audience row in Standard and Shout; push-to-talk and typed Send reach the nearest
   eligible NPC while the crosshair points elsewhere, and moving the crosshair mid-recording does not change it.
 - [ ] Flat: zero eligible NPCs, Whisper/Close, an older server and an anchor walking out of range each show a refusal and
@@ -18,8 +26,8 @@ microphone or in a headset.
 - [ ] VR in headset: select Everyone in the dashboard, press SYNTH Control, confirm the audience notification, then repeat
   the voice checks with room-scale movement (fresh HMD pose, body-range anchor).
 - [ ] With the paired server: one reply only, captured hearers and their history; no witness replies.
-- [ ] Combined with vanilla dialogue witnesses: these results and the witness results below predate that merge;
-  rerun both on the combined pair.
+- [x] Combined with vanilla dialogue witnesses: the off-game results above and the witness loopback check below were
+  rerun on the combined pair. The in-game checks stay open.
 
 ## Vanilla dialogue witnesses
 
@@ -30,7 +38,8 @@ microphone or in a headset.
   and fast multi-speaker scenes show how many lines the delivery cadence and 4-capture queue drop.
 - [x] Disposable loopback prompt check (fake provider, synthetic state): the line reaches the
   granted witness's ordinary and `/talk` prompts once each, and never a non-witness, a same-name
-  actor or a save loaded from before the observation.
+  actor or a save loaded from before the observation. Rerun on the combined Everyone pair (3 tests,
+  772 assertions). `first_observed` is dialogue-only, not physical-perception proof.
 - [ ] Model answers: witnesses' ordinary and `/talk` answers reflect the line and non-witnesses'
   answers do not.
 - [ ] VR: builds, but capture is unavailable; implement and verify separately.
