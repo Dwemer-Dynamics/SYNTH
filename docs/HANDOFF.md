@@ -8,7 +8,7 @@ and clarifies Whisper, Close, server model slots and profile refresh. All settin
 defaults, hotkey identifiers and wire values remain unchanged. See
 [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#layout-and-first-use). Off-game checks
 do not establish native menu layout or keyboard scrolling. Flat/VR gameplay and deployment
-remain on hold; final independent review is pending before integration.
+remain on hold.
 
 ## Vanilla dialogue witnesses candidate
 
