@@ -152,6 +152,17 @@ public:
     [[nodiscard]] bool private_narrator_ready() const noexcept {
         return private_narrator_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Readable notes are flat only and need the read and share capabilities, saved anchors and the plugin manifest.
+    [[nodiscard]] bool uses_readable_notes_contract() const noexcept {
+        const auto has = [this](std::string_view value) {
+            return std::ranges::find(options_.capabilities, value) != options_.capabilities.end();
+        };
+        return options_.protocol_version == 2 && options_.runtime_variant == "flat" && has("note.read.v1") &&
+            has("note.share.v1") && has("context.saved_anchor") && has("context.loaded_plugins");
+    }
+    [[nodiscard]] bool readable_notes_ready() const noexcept {
+        return readable_notes_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool social_tasks_ready() const noexcept {
         return social_tasks_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -302,6 +313,7 @@ public:
             native_turn_negotiated_.store(false, std::memory_order_release);
             actor_stats_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
+            readable_notes_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
@@ -349,6 +361,9 @@ public:
                 std::memory_order_release);
             private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
+                std::memory_order_release);
+            readable_notes_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->readable_notes && uses_readable_notes_contract(),
                 std::memory_order_release);
             social_tasks_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->social_tasks &&
@@ -644,6 +659,36 @@ public:
         }
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", binding, false,
                           turn ? 0 : 5000);
+    }
+
+    // Worker-only readable-note event, encoded once under an acknowledged binding of this generation. The bytes are
+    // immutable: an ambiguous retry resends exactly this request, which the server replays by request ID if committed.
+    struct NoteRequest final {
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{}, sequence{};
+    };
+    [[nodiscard]] NoteRequest prepare_note(bool share, const ContextBinding& binding,
+                                           const std::function<std::string(const protocol_native::EventContext&)>& encode) {
+        std::scoped_lock state_lock{state_mutex_};
+        require_ready();
+        if (!readable_notes_ready() || binding.generation != generation_ || binding.sequence == 0)
+            throw std::invalid_argument{"readable note owner is not current"};
+        NoteRequest request{next_id(share ? "note-share" : "note-read"), {}, {}, generation_, binding.sequence};
+        request.turn_id = next_id("note-turn");
+        request.body = encode(context(request.request_id, request.turn_id, binding));
+        return request;
+    }
+    [[nodiscard]] RequestOutcome send_note(const NoteRequest& request, core::CancellationToken cancellation) {
+        std::scoped_lock request_lock{request_mutex_};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            if (!readable_notes_ready() || request.generation != generation_ || request.sequence == 0 ||
+                request.sequence > context_sequence_ || request.body.empty())
+                throw std::invalid_argument{"readable note owner is not current"};
+        }
+        return send_event(request.request_id, request.turn_id, request.generation, request.body, {}, true, "/main.php",
+                          ContextBinding{request.generation, request.sequence, std::move(cancellation), request.turn_id});
     }
 
     [[nodiscard]] RequestOutcome activate(const protocol_native::Identity& actor,
@@ -1430,6 +1475,7 @@ private:
     std::atomic_bool native_turn_negotiated_{};
     std::atomic_bool actor_stats_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
+    std::atomic_bool readable_notes_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;
     std::atomic_bool halted_{};

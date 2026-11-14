@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/note.schema.json",
+  "title": "SYNTH v2 readable paper note read and share payloads",
+  "$defs": {
+    "book": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x(?![Ff][Ff])(?:[Ff][Ee][0-9A-Fa-f]{3}(?!000)[0-9A-Fa-f]{3}|(?![Ff][Ee])[0-9A-Fa-f]{2}(?!000000)[0-9A-Fa-f]{6})$"
+        }
+      }
+    },
+    "read": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "book",
+        "body"
+      ],
+      "properties": {
+        "book": {
+          "$ref": "#/$defs/book"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "share": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "STANDARD",
+            "WHISPER",
+            "CLOSE"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -121,7 +121,8 @@ public:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false,
-                                                             bool observed_dialogue_available = false) {
+                                                             bool observed_dialogue_available = false,
+                                                             bool readable_notes = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
@@ -168,6 +169,9 @@ public:
             if (observed_dialogue_available) result.push_back("context.observed_dialogue");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
+            // Only the exact owned flat BookMenu capture can report a note the player opened.
+            if (readable_notes) result.push_back("note.read.v1");
+            if (readable_notes) result.push_back("note.share.v1");
         }
         if (variant == core::RuntimeVariant::vr) {
             result.push_back("runtime.hmd_pose");

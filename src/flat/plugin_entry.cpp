@@ -69,6 +69,8 @@ std::uint64_t vanilla_dialogue_generation{}, vanilla_dialogue_epoch{}, vanilla_d
 synth::core::PlayerInventoryRefresh player_inventory_refresh;
 std::uint64_t inventory_change_revision{};
 std::uint64_t pending_session_request{};
+// Copied note reads admitted before a session of their generation could take them; bodies are never logged natively.
+synth::client::PendingNoteReads pending_note_reads;
 bool runtime_disabled{};
 std::array<bool, 256> hotkey_down{};
 bool voice_capture_down{};
@@ -357,6 +359,8 @@ void retire_session(bool discard_speech = false) noexcept {
     synth::adapters::commonlib::FlatSocialVisit::cancel_all();
     synth::adapters::commonlib::FlatWaitPackage::cancel_all();
     if (!session) return;
+    // A replacement of this generation must not share a note older than any read this session saw or inherited.
+    pending_note_reads.retire(session->unconfirmed_note_read());
     if (runtime && !session->stop_local_speech(*runtime, discard_speech))
         REX::WARN("SYNTH speech: local ownership cleanup failed during retirement");
     session->request_stop();
@@ -406,7 +410,8 @@ void queue_session_initialization(
     }
     pending_session_request = session_host->request_initialize(snapshot, *dispatcher, lifetime,
         synth::adapters::FlatRestEvents::available(), synth::adapters::FlatQuestEvents::available(),
-        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported());
+        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported(),
+        synth::adapters::FlatReadableNotes::available());
     if (pending_session_request != 0) {
         REX::INFO("SYNTH runtime: session initialization queued off the game thread");
     }
@@ -556,7 +561,18 @@ void pump_runtime_impl() {
         return;
     }
     const auto now = synth::core::SnapshotClock::now();
-    if (now < runtime_ready_after || !synth::adapters::commonlib::world_ready_for_capture()) {
+    const auto world_ready = synth::adapters::commonlib::world_ready_for_capture();
+    // Note capture is a safety path, not startup work: while the world is ready the verified game-thread pump registers
+    // the menu sink, drops stale candidates and admits a read every frame, also during the startup dwell and while
+    // BookMenu holds off session startup. An admitted read is a copied value kept until a session of its generation takes
+    // it below; dwell and unready-world frames keep it, and a generation change discards it at drain.
+    if (world_ready) {
+        if (auto note_read = synth::adapters::FlatReadableNotes::pump(runtime->generation().value()))
+            pending_note_reads.push(std::move(*note_read));
+    } else {
+        synth::adapters::FlatReadableNotes::invalidate();
+    }
+    if (now < runtime_ready_after || !world_ready) {
         dialogue_subtitles.present({});
         synth::adapters::FlatInventoryChanges::invalidate();
         synth::adapters::FlatActorEvents::invalidate();actor_event_binder.reset();actor_event_epoch=0;
@@ -620,6 +636,11 @@ void pump_runtime_impl() {
         }
         session->set_composing(synth::ui::Chatbox::has_submission() || synth::ui::Chatbox::is_open());
         session->set_runtime_paused(runtime_paused);
+        // Queued even while BookMenu pauses dialogue or the server is still connecting; delivery waits for the grant
+        // and a fresh scene after the pause ends.
+        pending_note_reads.drain(runtime->generation().value(),
+            [&](synth::adapters::FlatReadableNotes::Read read) { return session->observe_note_read(std::move(read)); },
+            [&](std::uint64_t generation) { return session->inherit_unconfirmed_note_read(generation); });
         if (runtime_paused && profile_timer_paused_at.time_since_epoch().count() == 0) {
             profile_timer_paused_at = now;
         } else if (!runtime_paused && profile_timer_paused_at.time_since_epoch().count() != 0) {
@@ -1057,6 +1078,15 @@ void pump_runtime_impl() {
             if (session.get() != owner || runtime->generation() != generation) return;
             (void)session->checkpoint_diary(std::move(snapshot));
         }
+        // Each queued note read or share publishes its own fresh scene; a share captures its exact recipient.
+        if (!menu_mode && session->note_delivery_due()) {
+            const auto* owner = session.get();
+            const auto generation = runtime->generation();
+            const auto actor = session->note_capture_actor();
+            auto snapshot = actor ? runtime->capture_actor_snapshot(now, actor) : runtime->capture_snapshot(now);
+            if (session.get() != owner || runtime->generation() != generation) return;
+            (void)session->deliver_note(std::move(snapshot));
+        }
         trace_pump_phase("hotkey polling");
         if (synth::ui::MenuFramework::input_captured()) {
             session->cancel_voice_capture();
@@ -1354,6 +1384,7 @@ void defer_lifecycle(LifecycleAction action) noexcept {
         synth::adapters::FlatPickedReference::invalidate();
         synth::adapters::FlatRestEvents::invalidate();
         synth::adapters::FlatQuestEvents::invalidate();
+        synth::adapters::FlatReadableNotes::invalidate();
     }
     if (action==LifecycleAction::invalidate || action==LifecycleAction::invalidate_and_ready || action==LifecycleAction::stop) {
         synth::integration::external_requests.set_available(false);
@@ -1383,6 +1414,7 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
     switch (message->type) {
     case F4SE::MessagingInterface::kPostLoad:
         (void)synth::adapters::FlatPickedReference::install();
+        (void)synth::adapters::FlatReadableNotes::install();
         (void)synth::adapters::FlatRestEvents::install();
         (void)synth::adapters::FlatQuestEvents::install();
         (void)synth::adapters::FlatActorEvents::install();

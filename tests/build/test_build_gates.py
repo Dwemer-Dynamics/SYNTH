@@ -704,7 +704,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         for forbidden in ("actor_snapshot(", "nearby_actors(", "active_quest_snapshot(", "inventory_snapshot(", "Get3D(", "PlayerCamera"):
             self.assertNotIn(forbidden, capture)
         entry = read("src/flat/plugin_entry.cpp")
-        unavailable = entry.split("if (now < runtime_ready_after || !synth::adapters::commonlib::world_ready_for_capture())", 1)[1].split("return;", 1)[0]
+        unavailable = entry.split("if (now < runtime_ready_after || !world_ready)", 1)[1].split("return;", 1)[0]
         self.assertIn("session->observe_player_events(std::nullopt)", unavailable)
         sample = entry.split("if (!menu_mode && session->player_event_sample_due(now))", 1)[1].split("if (!menu_mode && session->quest_event_capture_ready())", 1)[0]
         self.assertIn("session.get() == owner_session && runtime->generation() == owner_generation", sample)
@@ -1571,3 +1571,37 @@ class ConversationApproachGates(unittest.TestCase):
         self.assertIn('job_->receipt.revoke_install()',recovery)
         self.assertIn('controller_.reset();initialized_=false',recovery)
         self.assertIn('if (recovery_requested_) return;',source)
+
+
+class ReadableNoteGates(unittest.TestCase):
+    def test_flat_only_capture_reaches_session_and_command_precedes_speech_routing(self):
+        capabilities = read("src/client/context_publication.hpp").split("static std::vector<std::string> capabilities(", 1)[1].split("return result;", 1)[0]
+        flat = capabilities.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr)", 1)[0]
+        for capability in ('"note.read.v1"', '"note.share.v1"'):
+            self.assertIn(capability, flat)
+            self.assertEqual(capabilities.count(capability), 1)
+        self.assertNotIn("ReadableNotes", read("src/vr/plugin_entry.cpp"))
+        host = read("src/flat/plugin_entry.cpp")
+        self.assertNotIn("(void)synth::adapters::FlatReadableNotes::pump(", host)
+        self.assertIn("pending_note_reads.push(std::move(*note_read));", host)
+        self.assertIn("return session->observe_note_read(std::move(read));", host)
+        self.assertLess(host.index("pending_note_reads.push("), host.index("if (!session && menu_mode) {"))
+        # Capture runs while the world is ready, ahead of the startup dwell; dwell frames keep copied reads.
+        pump = host.split("void pump_runtime_impl() {", 1)[1].split('trace_pump_phase("dispatcher drain");', 1)[0]
+        self.assertLess(pump.index("if (world_ready) {"), pump.index("pending_note_reads.push("))
+        self.assertLess(pump.index("pending_note_reads.push("), pump.index("if (now < runtime_ready_after || !world_ready) {"))
+        self.assertNotIn("pending_note_reads.clear()", host)
+        # Observed dialogue and readable notes stay separate positional flags through host and session construction.
+        self.assertIn("FlatVanillaDialogue::supported(),\n        synth::adapters::FlatReadableNotes::available());", host)
+        self.assertIn("request->observed_dialogue_available, request->readable_notes_available);", read("src/client/plugin_session_host.hpp"))
+        submit = read("src/client/plugin_session.hpp").split("[[nodiscard]] bool submit_text(Snapshot snapshot", 1)[1].split("// One-shot integrations", 1)[0]
+        self.assertLess(submit.index("ReadableNotes::parse(text)"), submit.index("PrivateNarrator::parse(text)"))
+        self.assertLess(submit.index("ReadableNotes::parse(text)"), submit.index("dialogue_.admit_text("))
+        session = read("src/client/plugin_session.hpp")
+        self.assertIn("return dialogue_.selected_target(snapshot, false, &target).has_value();", session.split("ReadableNotes notes_{", 1)[1].split("}}};", 1)[0])
+        self.assertIn("ReadableNotes::Recipient{std::move(actor), *retained, current_controls()()}", session)
+        # A hard halt keeps the generation: a retiring session that saw any read taints its replacement.
+        retire = host.split("void retire_session(bool discard_speech = false) noexcept {", 1)[1].split("void invalidate_sessions(", 1)[0]
+        self.assertLess(retire.index("pending_note_reads.retire(session->unconfirmed_note_read());"), retire.index("session_host->retire(std::move(session));"))
+        self.assertLess(retire.index("if (!session) return;"), retire.index("pending_note_reads.retire("))
+        self.assertIn("return session->inherit_unconfirmed_note_read(generation);", host)

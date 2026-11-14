@@ -15,6 +15,31 @@ queue pressure remain in-game checks. There is no model-answer review, game run 
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).
 
+## Readable paper notes (flat only)
+
+The flat plugin hooks the two audited direct callers of the 1.11.240 BookMenu open
+path. It admits a read only after a later fresh, visible open of the same BOOK and body.
+`TESBookReadEvent` is not used because pickup/AddItem also produces it. See [READABLE-NOTES.md](READABLE-NOTES.md).
+
+Client delivery (`src/client/readable_notes.hpp`): `note.read.v1` and `note.share.v1` are advertised
+only when the owned flat capture is installed, and used only after the init acknowledgement grants
+`readable_notes`. VR never advertises or sends notes. Each admitted read is a copied value, kept by the
+flat host until a session of its generation takes it (also before the init grant), and queued per
+session (at most 4; an overflow counts as an unconfirmed latest read). It is sent after the pause ends,
+as a `note_read` bound to its own freshly published context. Typed `/share-note` is handled before
+narrator routing and text admission, so it is never player speech; any argument, including a new line,
+is refused. It shares with the chat's exact retained recipient in a confirmed Standard, Whisper or Close
+mode. It is fixed to the latest read before the command and runs after earlier reads and before later
+ones, so a later read stays private. It is refused when that read was not accepted, or when the fresh
+scene no longer passes the retained-target selection check. An ambiguous transport failure resends the
+same bytes, at most 3 attempts. While the world is ready the flat host captures every frame, also during
+the startup dwell, and keeps buffered reads across dwell and unready-world frames. After a hard halt the
+same-generation replacement refuses to share until a new read is acknowledged, even if the last read was
+persisted. No native diagnostic log carries a body. The compiled client core has run against the real
+server over loopback HTTP (scratch callbacks, not native proof). Native gameplay, VR (unsupported),
+Everyone (not merged, held) and combined runtime integration with observed vanilla dialogue have not run;
+see [READABLE-NOTES.md](READABLE-NOTES.md#limits).
+
 ## Optional post-combat companion comments
 
 The paired source candidate adds participant-bound, default-off flat comments with

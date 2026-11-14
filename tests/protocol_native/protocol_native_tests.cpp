@@ -349,9 +349,56 @@ void native_turn_receipt_tests(const std::string& root) {
 }
 }
 
+// Readable notes: exact closed payloads, flat-only negotiated bound contexts, and the strict init grant flag.
+void readable_note_codec_tests() {
+    using namespace synth;
+    const auto rejected=[](auto encode){try{(void)encode();return false;}catch(const std::invalid_argument&){return true;}};
+    const auto undecodable=[](auto decode){try{(void)decode();return false;}catch(const std::exception&){return true;}};
+    protocol_native::EventContext context{"session:flat:notes","note-read:1","note-turn:1","flat","0.1.0","1.11.240",3,
+        {"note.read.v1","note.share.v1","context.saved_anchor","context.loaded_plugins"},2,9};
+    const auto read=json::parse(protocol_native::encode_note_read(context,{0x0001A4D7,"Dear Piper,\nMeet me at Sanctuary."}));
+    if(protocol_native::text(read,"type")!="note_read" || protocol_native::integer(read,"context_sequence")!=9 ||
+       json::write(protocol_native::required(read,"payload"))!=R"({"book":{"form_id":"0x0001A4D7"},"body":"Dear Piper,\nMeet me at Sanctuary."})")
+        throw std::runtime_error{"note read encoding"};
+    if(json::write(protocol_native::required(json::parse(protocol_native::encode_note_read(context,{0xFE001801,"Light"})),"payload"))
+       !=R"({"book":{"form_id":"0xFE001801"},"body":"Light"})") throw std::runtime_error{"light note form encoding"};
+    for(const auto form:{0U,0xFF000802U,0x01000000U,0xFE001000U})
+        if(!rejected([&]{return protocol_native::encode_note_read(context,{form,"Body"});})) throw std::runtime_error{"invalid note form encoded"};
+    for(const auto& body:{std::string{},std::string{" \t\r\n"},std::string(16*1024+1,'a'),std::string{"bad\xC3"},std::string{"nul\0x",5}})
+        if(!rejected([&]{return protocol_native::encode_note_read(context,{0x0001A4D7,body});})) throw std::runtime_error{"invalid note body encoded"};
+    if(rejected([&]{return protocol_native::encode_note_read(context,{0x0001A4D7,std::string(16*1024,'a')});}))
+        throw std::runtime_error{"bounded note body refused"};
+    const auto share=json::parse(protocol_native::encode_note_share(context,"WHISPER"));
+    if(protocol_native::text(share,"type")!="note_share" || json::write(protocol_native::required(share,"payload"))!=R"({"mode":"WHISPER"})")
+        throw std::runtime_error{"note share encoding"};
+    for(const auto* mode:{"SHOUT","NARRATOR","EVERYONE","INJECTION_LOG","standard",""})
+        if(!rejected([&]{return protocol_native::encode_note_share(context,mode);})) throw std::runtime_error{"broadcast or unknown share mode encoded"};
+    auto vr=context; vr.runtime_variant="vr";
+    auto unbound=context; unbound.context_sequence=0;
+    auto no_anchor=context; no_anchor.capabilities={"note.read.v1","note.share.v1","context.loaded_plugins"};
+    auto no_manifest=context; no_manifest.capabilities={"note.read.v1","note.share.v1","context.saved_anchor"};
+    auto read_only=context; read_only.capabilities={"note.read.v1","context.saved_anchor","context.loaded_plugins"};
+    for(const auto& bad:{vr,unbound,no_anchor,no_manifest})
+        if(!rejected([&]{return protocol_native::encode_note_read(bad,{0x0001A4D7,"Body"});})) throw std::runtime_error{"unbound or VR note read encoded"};
+    if(rejected([&]{return protocol_native::encode_note_read(read_only,{0x0001A4D7,"Body"});}) ||
+       !rejected([&]{return protocol_native::encode_note_share(read_only,"STANDARD");})) throw std::runtime_error{"share capability boundary"};
+    const auto status=[](std::string payload,int version=2){
+        return protocol_native::decode_line(R"({"schema":"synth.response.line.v)"+std::to_string(version)+R"(","protocol_version":)"+
+            std::to_string(version)+R"(,"type":"status","line_id":"status","request_id":"init:1","turn_id":"turn:init:1","generation":1,"game":"fo4","runtime_variant":"flat","payload":)"+
+            payload+(version==2?R"(,"context_sequence":0})":"}"));
+    };
+    if(!std::get<protocol_native::Status>(status(R"({"code":"init_accepted","readable_notes":true})").payload).readable_notes ||
+       std::get<protocol_native::Status>(status(R"({"code":"init_accepted"})").payload).readable_notes)
+        throw std::runtime_error{"readable notes grant decoding"};
+    for(const auto& bad:{std::string{R"({"code":"init_accepted","readable_notes":"true"})"},std::string{R"({"code":"init_accepted","readable_note":true})"}})
+        if(!undecodable([&]{return status(bad);})) throw std::runtime_error{"malformed readable notes grant accepted"};
+    if(!undecodable([&]{return status(R"({"code":"init_accepted","readable_notes":true})",1);})) throw std::runtime_error{"v1 readable notes grant accepted"};
+}
+
 int main(int argc,char** argv){
  try{
   actor_stats_tests();
+  readable_note_codec_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);

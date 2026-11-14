@@ -1,8 +1,11 @@
 #include "client/fake_http.hpp"
 #include "client/synth_client.hpp"
 #include "client/private_narrator.hpp"
+#include "client/readable_notes.hpp"
+#include "targeting/targeting.hpp"
 #include "client/rechat_prefetch.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <array>
 #include <future>
@@ -92,6 +95,9 @@ public:
     std::optional<synth::json::Value> ambient_npc_ack;
     std::optional<synth::protocol_native::Identity> dialogue_listener;
     std::string player_ack{"context_accepted"};
+    bool readable_notes_support{};
+    std::string note_code{"note_read_accepted"}, note_detail{"player_private"};
+    std::size_t note_timeouts{};
     std::vector<synth::client::HttpRequest> requests;
     synth::client::HttpResult send(const synth::client::HttpRequest& request,
                                    const synth::client::Cancelled&) override {
@@ -101,6 +107,12 @@ public:
         if (fault == Fault::http_error) return {client::TransportFailure::none, {409, "application/json",
             R"({"schema":"synth.error.response.v1","code":"unknown_context_snapshot","error":"Do not reflect this text"})"}};
         const auto event = json::parse(request.body);
+        const auto* kind = event.find("type");
+        const bool note = kind && kind->is_string() && kind->as_string().starts_with("note_");
+        if (note && note_timeouts != 0) {
+            --note_timeouts;
+            return {client::TransportFailure::timeout, {}};
+        }
         if (request.target == "/itt.php") {
             if (before_reply) before_reply();
             return {client::TransportFailure::none, {200, "application/json", json::write(json::Value{protocol_native::object({
@@ -126,7 +138,7 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        if ((readable_notes_support || social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
@@ -140,8 +152,10 @@ public:
             if (ambient_npc_ack) payload.emplace_back("ambient_npc",*ambient_npc_ack);
             else if (ambient_npc_support) payload.emplace_back("ambient_npc",true);
             if (companion_support) payload.emplace_back("companion_combat_comments",true);
+            if (readable_notes_support) payload.emplace_back("readable_notes",true);
             body += line("status", json::Value{std::move(payload)});
         }
+        if (note) body += line("status", json::Value{protocol_native::object({{"code", note_code}, {"detail", note_detail}})});
         if (protocol_native::text(event, "type") == "input_text") {
             auto payload=protocol_native::object({
                 {"speaker", protocol_native::identity_value({"0x0001A4D7", "Fallout4.esm", "save:one", "Preston"})},
@@ -158,7 +172,7 @@ public:
         if(social_offer&&protocol_native::text(event,"type")=="context")
             body+=line("social_task",json::Value{protocol_native::object({{"task",runtime::encode_social_task(*social_offer)}})});
         body += line("response_end", json::Value{protocol_native::object({
-            {"status", fault == Fault::failed ? "error" : "complete"}})}, true);
+            {"status", fault == Fault::failed || (note && !note_code.ends_with("_accepted")) ? "error" : "complete"}})}, true);
         if (fault == Fault::truncated) body.pop_back();
         if (before_reply) before_reply();
         response_returned = false;
@@ -296,6 +310,290 @@ int main() {
             CHECK(requests.responses() == 0);
             CHECK(!private_narrator.refresh(snapshot));
             CHECK(requests.responses() == 0);
+        }
+        {
+            // Readable notes: flat-only grant, strict item order, exact receipts and same-byte ambiguous retries.
+            const std::vector<std::string> note_caps{"note.read.v1","note.share.v1","context.saved_anchor","context.loaded_plugins"};
+            const auto negotiated=[](std::string variant, std::vector<std::string> caps, bool ack) {
+                BindingEchoTransport echo; echo.readable_notes_support=ack;
+                client::SynthClient candidate{echo,client::SessionOptions{.runtime_session_id="notes:negotiate",.runtime_variant=variant,
+                    .client_version="test",.runtime_version="1.11.240",.capabilities=caps,.protocol_version=2}};
+                (void)candidate.initialize(1,false);
+                const bool ready=candidate.readable_notes_ready();
+                echo.readable_notes_support=false; (void)candidate.initialize(2,false);
+                return ready && !candidate.readable_notes_ready();
+            };
+            CHECK(negotiated("flat",note_caps,true));
+            CHECK(!negotiated("flat",note_caps,false));
+            CHECK(!negotiated("vr",note_caps,true));
+            CHECK(!negotiated("flat",{"note.read.v1","context.saved_anchor","context.loaded_plugins"},true));
+            CHECK(!negotiated("flat",{"note.read.v1","note.share.v1","context.loaded_plugins"},true));
+            using Command=client::ReadableNotes::Command;
+            CHECK(client::ReadableNotes::parse(" /share-note \n")==Command::share);
+            CHECK(client::ReadableNotes::parse("/share-note Piper")==Command::malformed);
+            CHECK(client::ReadableNotes::parse("/share-notes")==Command::none && client::ReadableNotes::parse("share-note")==Command::none);
+            for (const auto* argument:{"/share-note\nPiper","/share-note\r\nhello there","/share-note\tPiper","/share-note\vx","/share-note\fx"})
+                CHECK(client::ReadableNotes::parse(argument)==Command::malformed);
+
+            BindingEchoTransport wire; wire.readable_notes_support=true;
+            client::SynthClient notes_client{wire,client::SessionOptions{.runtime_session_id="notes:flat",.runtime_variant="flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=note_caps,.protocol_version=2}};
+            CHECK(notes_client.initialize(1,false).status==client::RequestStatus::complete && notes_client.readable_notes_ready());
+            tasks::TaskLanes lanes{{tasks::LaneConfig{"network",4,1,3}},0};
+            std::atomic_bool terminal{}, paused{};
+            core::CancellationSource session{core::RuntimeGeneration::initial()};
+            std::vector<std::string> notices;
+            std::size_t frontier{};
+            std::vector<std::optional<protocol_native::Identity>> published;
+            const protocol_native::Identity player{"0x00000014","Fallout4.esm","save:notes","Player"};
+            const auto publisher=[&](client::SynthClient& owner) {
+                return [&,owner=&owner](const auto&, const std::optional<protocol_native::Identity>& target, const auto&, core::CancellationToken token) {
+                    published.push_back(target);
+                    return owner->publish_context(0,"save:notes",player,target,{},{},std::nullopt,{},{},{},{},std::move(token));
+                };
+            };
+            // Mirrors the retained branch of PlayerDialogue::selected_target the session wires in: full identity and
+            // the Standard selection bound, never a nearest fallback.
+            std::size_t eligibility_checks{};
+            const auto eligible=[&](const core::RuntimeSnapshot& scene, const integration::PromptTarget& target) {
+                ++eligibility_checks;
+                return std::ranges::any_of(scene.actors(), [&](const core::ActorSnapshot& actor) {
+                    return target.matches(actor) && targeting::distance(scene.player_pose().position(), actor.position()) <=
+                        targeting::SelectionBounds{}.maximum_distance;
+                });
+            };
+            const auto notify=[&](std::string message) { notices.push_back(std::move(message)); };
+            client::ReadableNotes notes{{notes_client,lanes,terminal,paused,session.token(),publisher(notes_client),
+                [&](std::uint64_t, const auto&) { ++frontier; }, eligible, notify, std::chrono::milliseconds{0}}};
+            const core::ActorSnapshot piper{0x2F1F,"Piper",{},"Fallout4.esm","save:notes"};
+            const auto pump_on=[&](client::ReadableNotes& owner, std::vector<core::ActorSnapshot> actors) {
+                const auto started=owner.due() && owner.deliver(std::make_shared<const core::RuntimeSnapshot>(core::Game::fallout4,
+                    core::RuntimeVariant::flat, session.token().generation(), 1, core::SnapshotClock::now(),
+                    core::WorldPose{{}, core::UnitVector3::from({1, 0, 0}), core::UnitVector3::from({0, 0, 1})},
+                    std::nullopt, std::nullopt, std::nullopt, core::ActorSnapshot{0x14, "Player", {}, "Fallout4.esm", "save:notes"},
+                    std::move(actors)));
+                (void)lanes.run_until_idle();
+                return started;
+            };
+            const auto pump=[&](std::vector<core::ActorSnapshot> actors) { return pump_on(notes, std::move(actors)); };
+            const auto sent=[&](std::size_t back) { return json::parse(wire.requests[wire.requests.size()-1-back].body); };
+            const auto type=[&](std::size_t back) { return protocol_native::text(sent(back),"type"); };
+            const auto to_piper=[&]{ return client::ReadableNotes::Recipient{{"0x00002F1F","Fallout4.esm","save:notes","Piper"},
+                integration::PromptTarget{.session=session.token(),.form_id=0x2F1F,.base_form_id=0x2F1F,.origin_plugin="Fallout4.esm",.base_origin_plugin="Fallout4.esm",
+                    .playthrough_id="save:notes",
+                    .display_name="Piper"},{"WHISPER",1}}; };
+            const auto kinds_since=[&](const std::vector<client::HttpRequest>& requests, std::size_t first) {
+                std::vector<std::string> kinds;
+                for (auto i=first; i<requests.size(); ++i) kinds.push_back(protocol_native::text(json::parse(requests[i].body),"type"));
+                return kinds;
+            };
+
+            // Local refusals never reach the server; a read of another generation is never queued.
+            const auto before=wire.requests.size();
+            CHECK(!notes.observe({1,2,0x0001A4D7,"Stale body"}));
+            CHECK(!notes.share(std::nullopt,"",false,false) && notices.back()=="Choose one listener first");
+            CHECK(!notes.share(to_piper(),"",false,true) && notices.back().find("narrator")!=std::string::npos);
+            CHECK(!notes.share(to_piper(),"",true,false) && notices.back().find("still changing")!=std::string::npos);
+            auto shout=to_piper(); shout.controls.mode="SHOUT";
+            CHECK(!notes.share(shout,"",false,false) && notices.back().find("Standard, Whisper or Close")!=std::string::npos);
+            CHECK(!notes.share(to_piper(),"STANDARD",false,false) && notices.back().find("mode changed")!=std::string::npos);
+            CHECK(wire.requests.size()==before && !notes.due());
+
+            // A read admitted while BookMenu pauses dialogue waits; a share queued behind it is sent only after its receipt.
+            paused=true;
+            CHECK(notes.observe({1,1,0x0001A4D7,"Meet me at the Sanctuary bridge."}) && !notes.due());
+            CHECK(notes.share(to_piper(),"WHISPER",false,false) && !notes.share(to_piper(),"",false,false));
+            paused=false;
+            CHECK(notes.capture_actor()==0 && pump({}));
+            CHECK(type(0)=="note_read" && type(1)=="context" && !published.back() && frontier==1);
+            CHECK(json::write(protocol_native::required(sent(0),"payload"))==
+                R"({"book":{"form_id":"0x0001A4D7"},"body":"Meet me at the Sanctuary bridge."})");
+            wire.note_code="note_share_accepted"; wire.note_detail="shared_with_target";
+            CHECK(notes.capture_actor()==0x2F1F && pump({piper}));
+            CHECK(type(0)=="note_share" && type(1)=="context" && published.back()->form_id=="0x00002F1F");
+            CHECK("turn:context:"+std::to_string(protocol_native::integer(sent(0),"context_sequence"))==protocol_native::text(sent(1),"turn_id"));
+            CHECK(json::write(protocol_native::required(sent(0),"payload"))==R"({"mode":"WHISPER"})");
+            CHECK(notices.back()=="Note shared with Piper" && frontier==2 && !notes.due());
+
+            // An ambiguous failure resends the identical bytes without a new context; exhaustion drops the read.
+            wire.note_code="note_read_accepted"; wire.note_detail="player_private"; wire.note_timeouts=1;
+            CHECK(notes.observe({0,1,0x0001A4D8,"Second note"}) && pump({}));
+            CHECK(notes.due() && pump({}));
+            CHECK(type(0)=="note_read" && type(1)=="note_read" && type(2)=="context" &&
+                wire.requests[wire.requests.size()-1].body==wire.requests[wire.requests.size()-2].body && frontier==3);
+            wire.note_timeouts=3;
+            CHECK(notes.observe({0,1,0x0001A4D9,"Third note"}) && pump({}) && pump({}) && pump({}) && !notes.due());
+            CHECK(type(0)=="note_read" && type(2)=="note_read" && type(3)=="context" &&
+                wire.requests[wire.requests.size()-1].body==wire.requests[wire.requests.size()-3].body && frontier==3);
+            // The unconfirmed latest read is never replaced by an older one on the server.
+            const auto unconfirmed=wire.requests.size();
+            CHECK(notes.share(to_piper(),"",false,false) && pump({piper}));
+            CHECK(wire.requests.size()==unconfirmed && notices.back().find("could not record your last note")!=std::string::npos);
+
+            // A terminal refusal drops the read; a confirmed read with a missing or refused recipient is reported.
+            wire.note_code="note_identity_unresolved";
+            CHECK(notes.observe({0,1,0x0001A4DA,"Refused note"}) && pump({}) && !notes.due() && frontier==3);
+            wire.note_code="note_read_accepted";
+            CHECK(notes.observe({0,1,0x0001A4DB,"Fourth note"}) && pump({}) && frontier==4);
+            const auto absent=wire.requests.size();
+            CHECK(notes.share(to_piper(),"",false,false) && !pump({}));
+            CHECK(wire.requests.size()==absent && notices.back()=="Choose one listener first");
+            wire.note_code="note_share_no_visible_read"; wire.note_detail.clear();
+            CHECK(notes.share(to_piper(),"",false,false) && pump({piper}) && type(0)=="note_share" && notices.back()=="Read a note first");
+
+            // Read A, /share-note, read B: the share stays fixed to A and is sent before B, also when an ambiguous
+            // attempt resends its identical bytes in a scene without the recipient. B then stays private.
+            wire.note_code="note_read_accepted"; wire.note_detail="player_private";
+            paused=true;
+            CHECK(notes.observe({0,1,0x0001A600,"Note A"}) && notes.share(to_piper(),"",false,false) && notes.observe({0,1,0x0001A601,"Note B"}));
+            paused=false;
+            const auto ordered=wire.requests.size();
+            CHECK(notes.capture_actor()==0 && pump({}) && notes.capture_actor()==0x2F1F);
+            wire.note_code="note_share_accepted"; wire.note_detail="shared_with_target"; wire.note_timeouts=1;
+            CHECK(pump({piper}) && notes.capture_actor()==0x2F1F && pump({}));
+            CHECK(notices.back()=="Note shared with Piper");
+            wire.note_code="note_read_accepted"; wire.note_detail="player_private";
+            CHECK(notes.capture_actor()==0 && pump({}) && !notes.due());
+            CHECK((kinds_since(wire.requests,ordered)==std::vector<std::string>{"context","note_read","context","note_share","note_share","context","note_read"}));
+            CHECK(wire.requests[ordered+1].body.find("Note A")!=std::string::npos && wire.requests[ordered+6].body.find("Note B")!=std::string::npos);
+            CHECK(wire.requests[ordered+3].body==wire.requests[ordered+4].body);
+
+            // The retained recipient is re-checked in the fresh scene: a reused reference with another base, or one
+            // beyond the selection bound, is refused locally and never published.
+            auto based=to_piper(); based.target.base_form_id=0x2F1E; based.target.base_origin_plugin="Fallout4.esm";
+            const auto at=[](std::uint32_t base, double x) {
+                return core::ActorSnapshot{0x2F1F,"Piper",{x,0,0},"Fallout4.esm","save:notes",true,false,false,false,false,1,{},{},{},false,
+                    100.0,100.0,{},std::nullopt,{},"unavailable","unknown","unknown",false,0.0,false,false,false,std::nullopt,base,"Fallout4.esm"};
+            };
+            wire.note_code="note_share_accepted"; wire.note_detail="shared_with_target";
+            const auto fresh=wire.requests.size(); const auto eligibility_before=eligibility_checks;
+            CHECK(notes.share(based,"",false,false) && !pump({at(0x2F1D,10)}) && notices.back()=="Choose one listener first");
+            CHECK(notes.share(based,"",false,false) && !pump({at(0x2F1E,5000)}) && notices.back()=="Choose one listener first");
+            CHECK(wire.requests.size()==fresh && eligibility_checks==eligibility_before+2);
+            CHECK(notes.share(based,"",false,false) && pump({at(0x2F1E,100)}) && type(0)=="note_share" && notices.back()=="Note shared with Piper");
+
+            // A full queue records the newest read as unconfirmed, so the share refuses instead of using an older read.
+            wire.note_code="note_read_accepted"; wire.note_detail="player_private";
+            paused=true;
+            for (std::uint32_t form=0x0001A500; form<0x0001A504; ++form) CHECK(notes.observe({0,1,form,"Queued"}));
+            CHECK(notes.observe({0,1,0x0001A504,"Overflow"}) && notes.share(to_piper(),"",false,false));
+            paused=false;
+            const auto overflowed=wire.requests.size();
+            for (int item=0; item<5; ++item) CHECK(pump({piper}));
+            CHECK(notices.back().find("could not record your last note")!=std::string::npos &&
+                std::ranges::count(kinds_since(wire.requests,overflowed),std::string{"note_share"})==0);
+
+            // A read admitted before the session or its init grant is kept (the host keeps it across startup dwell and
+            // unready-world frames), so a share never falls back to an older
+            // server note: when that newest read is refused, nothing is shared. Another generation is never replayed.
+            BindingEchoTransport late; late.readable_notes_support=true; late.note_code="note_identity_unresolved"; late.note_detail.clear();
+            client::SynthClient late_client{late,client::SessionOptions{.runtime_session_id="notes:late",.runtime_variant="flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=note_caps,.protocol_version=2}};
+            client::ReadableNotes late_notes{{late_client,lanes,terminal,paused,session.token(),publisher(late_client),
+                [&](std::uint64_t, const auto&) { ++frontier; }, eligible, notify, std::chrono::milliseconds{0}}};
+            client::PendingNoteReads early;
+            early.push({0,2,0x0001A700,"Other generation"});
+            early.push({0,1,0x0001A701,"Note B"});
+            const auto no_taint=[](std::uint64_t) { return false; };
+            early.drain(1,[](client::ReadableNotes::Read) { return false; },no_taint);
+            early.drain(1,[&](client::ReadableNotes::Read read) { return late_notes.observe(std::move(read)); },no_taint);
+            CHECK(!late_notes.due() && !late_notes.share(to_piper(),"",false,false) && notices.back().find("unavailable")!=std::string::npos);
+            CHECK(late.requests.empty());
+            CHECK(late_client.initialize(1,false).status==client::RequestStatus::complete && late_client.readable_notes_ready());
+            CHECK(late_notes.share(to_piper(),"",false,false) && pump_on(late_notes,{piper}) && pump_on(late_notes,{piper}) && !late_notes.due());
+            CHECK((kinds_since(late.requests,0)==std::vector<std::string>{"init","context","note_read"}));
+            CHECK(late.requests.back().body.find("Note B")!=std::string::npos && notices.back().find("could not record your last note")!=std::string::npos);
+
+            // Hard halt keeps the generation: B handed to the old session and never sent taints its same-generation
+            // replacement, which refuses to share the server's older A until a fresh read's receipt; then the latest
+            // is shared. Any read a retiring session saw taints, also an acknowledged one; another generation clears it.
+            BindingEchoTransport halted; halted.readable_notes_support=true;
+            client::SynthClient old_client{halted,client::SessionOptions{.runtime_session_id="notes:old",.runtime_variant="flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=note_caps,.protocol_version=2}};
+            CHECK(old_client.initialize(1,false).status==client::RequestStatus::complete);
+            std::atomic_bool old_terminal{};
+            auto old_notes=std::make_unique<client::ReadableNotes>(client::ReadableNotes::Dependencies{old_client,lanes,old_terminal,paused,
+                session.token(),publisher(old_client),[&](std::uint64_t, const auto&) { ++frontier; },eligible,notify,std::chrono::milliseconds{0}});
+            CHECK(old_notes->observe({0,1,0x0001A800,"Note A"}) && pump_on(*old_notes,{}) && old_notes->unconfirmed_read()==std::optional<std::uint64_t>{1});
+            client::PendingNoteReads host;
+            host.retire(old_notes->unconfirmed_read());
+            paused=true;
+            host.push({0,1,0x0001A801,"Note B"});
+            const auto inherit_into=[](client::ReadableNotes& owner) {
+                return [&owner](std::uint64_t generation) { return owner.inherit_unconfirmed_read(generation); };
+            };
+            host.drain(1,[&](client::ReadableNotes::Read read) { return old_notes->observe(std::move(read)); },inherit_into(*old_notes));
+            old_terminal=true;
+            CHECK(old_notes->unconfirmed_read()==std::optional<std::uint64_t>{1});
+            host.retire(old_notes->unconfirmed_read());
+            old_notes.reset();
+            paused=false;
+            CHECK((kinds_since(halted.requests,0)==std::vector<std::string>{"init","context","note_read"}));
+            client::SynthClient new_client{halted,client::SessionOptions{.runtime_session_id="notes:new",.runtime_variant="flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities=note_caps,.protocol_version=2}};
+            CHECK(new_client.initialize(1,false).status==client::RequestStatus::complete);
+            client::ReadableNotes new_notes{{new_client,lanes,terminal,paused,session.token(),publisher(new_client),
+                [&](std::uint64_t, const auto&) { ++frontier; },eligible,notify,std::chrono::milliseconds{0}}};
+            host.drain(1,[&](client::ReadableNotes::Read read) { return new_notes.observe(std::move(read)); },inherit_into(new_notes));
+            const auto replaced=halted.requests.size();
+            halted.note_code="note_share_accepted"; halted.note_detail="shared_with_target";
+            CHECK(new_notes.unconfirmed_read() && new_notes.share(to_piper(),"",false,false) && pump_on(new_notes,{piper}));
+            CHECK(halted.requests.size()==replaced && notices.back().find("could not record your last note")!=std::string::npos);
+            halted.note_code="note_read_accepted"; halted.note_detail="player_private";
+            CHECK(new_notes.observe({0,1,0x0001A802,"Note C"}) && pump_on(new_notes,{}) && new_notes.unconfirmed_read());
+            halted.note_code="note_share_accepted"; halted.note_detail="shared_with_target";
+            CHECK(new_notes.share(to_piper(),"",false,false) && pump_on(new_notes,{piper}) && notices.back()=="Note shared with Piper");
+            CHECK((kinds_since(halted.requests,replaced)==std::vector<std::string>{"context","note_read","context","note_share"}));
+            CHECK(halted.requests[replaced+1].body.find("Note C")!=std::string::npos);
+            // B acknowledged, then a halt before the saved ACK covering it: the receipt does not clear the taint, since
+            // the replacement binds the older anchor whose latest read is A. Retiring again without a fresh read carries it.
+            const auto session_on=[&](client::SynthClient& owner, const std::atomic_bool& halt) {
+                return std::make_unique<client::ReadableNotes>(client::ReadableNotes::Dependencies{owner,lanes,halt,paused,
+                    session.token(),publisher(owner),[&](std::uint64_t, const auto&) { ++frontier; },eligible,notify,std::chrono::milliseconds{0}});
+            };
+            client::PendingNoteReads relay;
+            halted.note_code="note_read_accepted"; halted.note_detail="player_private";
+            std::atomic_bool acked_halt{};
+            auto acked=session_on(new_client,acked_halt);
+            CHECK(acked->observe({0,1,0x0001A900,"Note A"}) && pump_on(*acked,{}) && acked->observe({0,1,0x0001A901,"Note B"}) && pump_on(*acked,{}));
+            CHECK(halted.requests.back().body.find("Note B")!=std::string::npos && !acked->due());
+            acked_halt=true;
+            relay.retire(acked->unconfirmed_read());
+            acked.reset();
+            halted.note_code="note_share_accepted"; halted.note_detail="shared_with_target";
+            const auto after_ack=halted.requests.size();
+            for (int retirement=0; retirement<2; ++retirement) {
+                std::atomic_bool halt{};
+                auto replacement=session_on(new_client,halt);
+                relay.drain(1,[&](client::ReadableNotes::Read read) { return replacement->observe(std::move(read)); },inherit_into(*replacement));
+                CHECK(replacement->share(to_piper(),"",false,false) && pump_on(*replacement,{piper}));
+                CHECK(halted.requests.size()==after_ack && notices.back().find("could not record your last note")!=std::string::npos);
+                halt=true;
+                relay.retire(replacement->unconfirmed_read());
+            }
+            // A session that never saw a read leaves no taint; a carried taint of another generation is dropped.
+            std::size_t inherited{};
+            relay.drain(2,[](client::ReadableNotes::Read) { return true; },[&](std::uint64_t) { ++inherited; return true; });
+            relay.drain(1,[](client::ReadableNotes::Read) { return true; },[&](std::uint64_t) { ++inherited; return true; });
+            std::atomic_bool idle_halt{};
+            auto idle=session_on(new_client,idle_halt);
+            idle_halt=true;
+            CHECK(!idle->unconfirmed_read());
+            relay.retire(idle->unconfirmed_read());
+            relay.drain(1,[](client::ReadableNotes::Read) { return true; },[&](std::uint64_t) { ++inherited; return true; });
+            CHECK(inherited==0);
+
+            // Only the Normal audience shares; verified shape of the Everyone branch's ControlSelection::audience.
+            enum class AudienceIntent { normal, everyone, everyone_unconfirmed };
+            struct EveryoneSelection { std::string mode; std::uint64_t model_slot{1}; AudienceIntent audience{AudienceIntent::normal}; std::uint64_t audience_reset_epoch{}; };
+            CHECK(client::ReadableNotes::normal_audience(EveryoneSelection{"STANDARD",1,AudienceIntent::normal,0}));
+            CHECK(!client::ReadableNotes::normal_audience(EveryoneSelection{"STANDARD",1,AudienceIntent::everyone,3}));
+            CHECK(!client::ReadableNotes::normal_audience(EveryoneSelection{"STANDARD",1,AudienceIntent::everyone_unconfirmed,0}));
+            CHECK(client::ReadableNotes::normal_audience(protocol_native::ControlSelection{"STANDARD",1}));
+
+            // A halted session admits nothing.
+            terminal=true;
+            CHECK(!notes.observe({0,1,0x0001A505,"Halted"}) && !notes.due());
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     {
