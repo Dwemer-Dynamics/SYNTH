@@ -56,10 +56,32 @@ None of this has been exercised in game.
 
 ## Status
 
-All 19 native suites pass (the core native suite has 207 assertions), and the protocol check (45
-schemas, 403 cases, 395 files) passes. The flat and VR x64 builds succeed; the VR build used the
-existing installed ports without installing or fetching packages, and capture stays unavailable
-in VR. Packaging validation is blocked by missing generated wait-script output. There is no in-game evidence and no provider prompt
-probe. No real provider has been called, and there is no schema
-or database migration. The server's ordinary and `/talk` paths consume the observation. Model
-answers have not been reviewed or accepted. This is not complete, released or deployed.
+All 19 native suites pass (the core native suite alone has 207 assertions), and the existing 65
+build guards pass unchanged. The protocol check (45 schemas, 403 cases, 395 mirrored files)
+passes. The flat and VR x64 DLLs build with the pinned SDK and existing installed ports, with no
+package installs or fetches. Capture stays unavailable in VR.
+
+Packaging: all 22 packaging regressions pass. Both lane archives were staged and audited locally
+and never deployed or distributed. The archives reuse the existing compiled wait script and its
+build manifest unchanged, checked against the current source and flags by the existing bundle
+verifier. No wait script was compiled for this change and no compiler path was qualified.
+
+The server's opt-in loopback check compiles this client's driver against the paired server, a
+private disposable database and a fake provider (3 tests, 778 assertions). It publishes synthetic
+game state, not engine state. The observed-line marker reaches the granted witness's prompts once
+in an ordinary turn and once in `/talk`. It reaches a non-witness, a different same-name actor,
+and the witness after loading a save from before the observation zero times. A retry keeps one
+unchanged history row. The server's full existing suite passes with one skip, and the skipped
+client-wiring test passed separately against this client commit.
+
+A read-only source review found no wrong-grant defect and accepted three conservative limits that
+can only miss lines: the audio-playing check can lag the selected subtitle; the 5-second delivery
+cadence, busy gate and 4-capture queue can drop lines in fast scenes; and strict plugin-name and
+text eligibility can reject unusual input. Audio start and queue pressure are in-game acceptance
+checks.
+
+These are prompt checks, not model answers or game acceptance. The limits above still apply:
+first-observed basis, sampling, dependence on subtitle settings and residency keying, and the
+fixed 1000-unit radius. No real provider has been called. There is no in-game evidence, VR capture
+is unavailable although the VR DLL builds, native gameplay and performance are unmeasured, and
+there is no schema or database migration. Nothing is deployed.

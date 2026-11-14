@@ -4,8 +4,11 @@
 
 Flat-only `context.observed_dialogue` grants canonical witnesses for a vanilla NPC line at the
 first sampled observation (policy `same_cell_speaker_radius_1000_v1`). It does not prove a voice
-start or audibility. VR does not offer it. Native tests, protocol fixtures and the flat and VR x64
-builds pass. Packaging validation is blocked by missing generated wait-script output. There is no game run, no provider prompt probe and no migration. See
+start or audibility. VR does not offer it. Native tests, build guards, protocol fixtures, the flat
+and VR x64 builds and the packaging regressions pass. Packaging reused the existing source-bound
+wait script and compiled nothing new. A loopback prompt check with a fake provider shows the line
+reaches only the granted witness. A source review found no wrong-grant defect; audio start and
+queue pressure remain in-game checks. There is no model-answer review, game run or migration. See
 [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md).
 
 ## NPC biography and SPECIAL candidate
