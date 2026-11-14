@@ -46,7 +46,9 @@
         "speech_receipt",
         "narrator_command",
         "narrator_turn",
-        "narrator_receipt"
+        "narrator_receipt",
+        "note_read",
+        "note_share"
       ]
     },
     "session_id": {
@@ -941,7 +943,9 @@
               "speech_receipt",
               "narrator_command",
               "narrator_turn",
-              "narrator_receipt"
+              "narrator_receipt",
+              "note_read",
+              "note_share"
             ]
           }
         }
@@ -1839,6 +1843,159 @@
           },
           "payload": {
             "$ref": "narrator.schema.json#/$defs/receipt"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "note_read"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "note.read.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.loaded_plugins"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "note.schema.json#/$defs/read"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "note_share"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "note.read.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "note.share.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.loaded_plugins"
+                }
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "note.schema.json#/$defs/share"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "enum": [
+                "note.read.v1",
+                "note.share.v1"
+              ]
+            }
+          }
+        },
+        "required": [
+          "capabilities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "note.read.v1"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.saved_anchor"
+                }
+              },
+              {
+                "contains": {
+                  "const": "context.loaded_plugins"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "note.share.v1"
+            }
+          }
+        },
+        "required": [
+          "capabilities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "note.read.v1"
+            }
           }
         }
       }

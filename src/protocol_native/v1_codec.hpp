@@ -182,7 +182,7 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{}, readable_notes{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -444,7 +444,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "readable_notes"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -458,7 +458,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("companion_combat_comments") ? required(payload,"companion_combat_comments").as_bool() : false,
             payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false,
             payload.find("private_narrator") ? required(payload,"private_narrator").as_bool() : false,
-            payload.find("observed_dialogue") ? required(payload,"observed_dialogue").as_bool() : false};
+            payload.find("observed_dialogue") ? required(payload,"observed_dialogue").as_bool() : false,
+            payload.find("readable_notes") ? required(payload,"readable_notes").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -844,7 +845,8 @@ inline std::string encode_event(const EventContext& context, std::string type, j
         const bool bound = type == "input_text" || type == "input_audio" || type == "activate"
             || type == "trigger" || type == "profile_refresh" || type == "diary_request" || type == "action_result"
             || type == "social_task_request" || type == "social_task_progress" || type == "speech_receipt"
-            || type == "narrator_command" || type == "narrator_turn" || type == "narrator_receipt";
+            || type == "narrator_command" || type == "narrator_turn" || type == "narrator_receipt"
+            || type == "note_read" || type == "note_share";
         if (context.context_sequence > 9'007'199'254'740'991ULL
             || (bound ? context.context_sequence == 0 : context.context_sequence != 0))
             throw std::invalid_argument{"event context binding is invalid"};
@@ -977,6 +979,40 @@ inline std::string encode_narrator_receipt(const EventContext& context, const Na
         {"narrator_request_id", receipt.narrator_request_id}, {"line_id", receipt.narrator_request_id + ":narrator"},
         {"definition_id", receipt.narrator.definition_id}, {"revision_id", receipt.narrator.revision_id},
         {"parent_state_id", receipt.parent_state_id}, {"outcome", outcome}})});
+}
+// Readable paper notes (protocol/v2/schemas/note.schema.json): flat only, bound to an acknowledged context of a session
+// that negotiated note.read.v1 with saved anchors and the loaded plugin manifest the server derives the note key from.
+struct NoteRead {
+    std::uint32_t book_form_id{};
+    std::string body;
+};
+inline void require_readable_notes(const EventContext& context, bool share) {
+    const auto has = [&](std::string_view value) { return std::ranges::find(context.capabilities, value) != context.capabilities.end(); };
+    if (context.protocol_version != 2 || context.runtime_variant != "flat" || context.context_sequence == 0 ||
+        !has("note.read.v1") || !has("context.saved_anchor") || !has("context.loaded_plugins") || (share && !has("note.share.v1")))
+        throw std::invalid_argument{"readable notes require a bound, negotiated flat v2 context"};
+}
+// A runtime BOOK form: never dynamic (0xFF), and a nonzero local ID in its full or light (0xFE, 12-bit) plugin space.
+inline bool note_book_form(std::uint32_t form) noexcept {
+    const auto high = form >> 24;
+    return high != 0xFF && (form & (high == 0xFE ? 0xFFFU : 0xFFFFFFU)) != 0;
+}
+inline std::string encode_note_read(const EventContext& context, const NoteRead& read) {
+    require_readable_notes(context, false);
+    if (!note_book_form(read.book_form_id) || read.body.empty() || read.body.size() > 16 * 1024 ||
+        read.body.find('\0') != std::string::npos || !json::detail::valid_utf8(read.body) ||
+        read.body.find_first_not_of(" \t\n\r\v") == std::string::npos)
+        throw std::invalid_argument{"invalid readable note"};
+    char form[11]{};
+    std::snprintf(form, sizeof(form), "0x%08X", read.book_form_id);
+    return encode_event(context, "note_read", json::Value{object({
+        {"book", json::Value{object({{"form_id", std::string{form}}})}}, {"body", read.body}})});
+}
+// Only addressed modes share with the snapshot's one target; broadcast and narrator modes need their own policy.
+inline std::string encode_note_share(const EventContext& context, std::string_view mode) {
+    require_readable_notes(context, true);
+    if (mode != "STANDARD" && mode != "WHISPER" && mode != "CLOSE") throw std::invalid_argument{"invalid note share mode"};
+    return encode_event(context, "note_share", json::Value{object({{"mode", std::string{mode}}})});
 }
 inline std::string encode_init(const EventContext& context, std::string locale, bool hmd_pose_fresh=false,
                                const std::vector<LoadedPlugin>& loaded_plugins = {}) {

@@ -24,6 +24,7 @@
 #include "client/visual_capture.hpp"
 #include "client/server_control.hpp"
 #include "client/private_narrator.hpp"
+#include "client/readable_notes.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/companion_combat_comment.hpp"
@@ -80,7 +81,7 @@ public:
                   core::SaveContextStore* save_context = nullptr,
                   core::SaveContextStore::Binding save_binding = {}, bool rest_events_available = false,
                   bool quest_events_available = false, bool actor_events_available = false,
-                  bool observed_dialogue_available = false)
+                  bool observed_dialogue_available = false, bool readable_notes_available = false)
         : dispatcher_{dispatcher},
           configuration_{std::move(configuration)},
           transport_{configuration_.server.base_url,
@@ -93,7 +94,8 @@ public:
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
-                          configuration_.behavior.companion_combat_comments, observed_dialogue_available),
+                          configuration_.behavior.companion_combat_comments, observed_dialogue_available,
+                          readable_notes_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
@@ -770,6 +772,9 @@ public:
             push_notification("SYNTH is still connecting; try your message again when connected");
             return false;
         }
+        // Checked before narrator routing and text admission: the command is never player speech or history.
+        if (const auto command = ReadableNotes::parse(text); command != ReadableNotes::Command::none)
+            return share_note(*snapshot, retained, command);
         if (const auto command = PrivateNarrator::parse(text); command || narrator_.talking()) {
             // Only private speech and a scene request are new player turns. Viewing and routing controls leave live
             // playback alone; select and cancel retire just the private lane themselves. A scene without a loaded
@@ -848,6 +853,8 @@ public:
     [[nodiscard]] bool submit_prompt(Snapshot snapshot, const integration::PromptTarget& target, std::string text) {
         if (target.session.is_cancelled() || target.session.generation()!=cancellation_.token().generation() ||
             !PlayerDialogue::text_within_bounds(text)) return false;
+        if (const auto command = ReadableNotes::parse(text); command != ReadableNotes::Command::none)
+            return snapshot && client_.ready() && share_note(*snapshot, &target, command);
         const auto current=prepare_external_prompt(snapshot,target.form_id);
         if (!current || current->origin_plugin!=target.origin_plugin || current->base_form_id!=target.base_form_id ||
             current->base_origin_plugin!=target.base_origin_plugin || current->playthrough_id!=target.playthrough_id) return false;
@@ -857,7 +864,36 @@ public:
         return queue_text_for_actor(std::move(snapshot),std::move(text),actor);
     }
 
+    // Readable notes: ReadableNotes owns admission order, receipts and retries; the host captures each fresh scene.
+    bool observe_note_read(core::ReadableNoteGate::Read read) { return notes_.observe(std::move(read)); }
+    [[nodiscard]] bool note_delivery_due() const { return notes_.due(); }
+    [[nodiscard]] std::uint32_t note_capture_actor() const { return notes_.capture_actor(); }
+    bool deliver_note(Snapshot snapshot) { return notes_.deliver(std::move(snapshot)); }
+    [[nodiscard]] std::optional<std::uint64_t> unconfirmed_note_read() const { return notes_.unconfirmed_read(); }
+    bool inherit_unconfirmed_note_read(std::uint64_t generation) { return notes_.inherit_unconfirmed_read(generation); }
+
 private:
+    // `/share-note` names only the chat's exact retained recipient, revalidated in this scene; there is no crosshair,
+    // nearest or stale fallback. The retained draft mode is its frozen intent and must match the confirmed one.
+    [[nodiscard]] bool share_note(const core::RuntimeSnapshot& snapshot, const integration::PromptTarget* retained,
+                                  ReadableNotes::Command command) {
+        if (command == ReadableNotes::Command::malformed) {
+            push_notification("Use /share-note alone; it shares your last note with the listener you are addressing");
+            return true;
+        }
+        // The dialogue selection, as every player turn sees it, carries the audience the share must not broadcast to.
+        const auto controls = server_control_.state();
+        std::optional<ReadableNotes::Recipient> recipient;
+        if (const auto selected = retained ? dialogue_.selected_target(snapshot, false, retained) : std::nullopt) {
+            auto actor = identity(*selected);
+            actor.display_name = retained->display_name;
+            recipient = ReadableNotes::Recipient{std::move(actor), *retained, current_controls()()};
+        }
+        (void)notes_.share(std::move(recipient), retained ? std::string_view{retained->conversation_mode} : std::string_view{},
+                           controls.pending, narrator_.talking());
+        return true;
+    }
+
     // Both typed input and external Ask retain the same exact actor through context publication and response delivery.
     [[nodiscard]] bool queue_text_for_actor(Snapshot snapshot, std::string text, protocol_native::Identity target,
                                           std::optional<protocol_native::ControlSelection> retained_controls = {},
@@ -1198,6 +1234,18 @@ private:
     // network and speech lanes before this owner is destroyed.
     PrivateNarrator narrator_;
     std::optional<std::uint64_t> private_voice_state_;
+    // Borrows client, network lane, context publication and the terminal/pause flags declared above. Its network tasks
+    // capture it and its callbacks capture this session; ~PluginSession joins the network lane first.
+    ReadableNotes notes_{{client_, network_, terminal_, runtime_paused_, cancellation_.token(),
+        [this](const Snapshot& snapshot, const std::optional<protocol_native::Identity>& target,
+               const protocol_native::ControlSelection& controls, core::CancellationToken token) {
+            return publish_snapshot(snapshot, target, std::move(token), nullptr, {}, {}, {}, controls);
+        },
+        [this](std::uint64_t generation, const core::CancellationToken& token) { context_.note_heard_receipt(generation, token); },
+        [this](const core::RuntimeSnapshot& snapshot, const integration::PromptTarget& target) {
+            return dialogue_.selected_target(snapshot, false, &target).has_value();
+        },
+        [this](std::string message) { push_notification(std::move(message)); }}};
     // Borrows configuration, client, network lane, response accounting, context publication and the
     // terminal flag. Its network tasks and progress bindings capture it and its callbacks capture this
     // session; ~PluginSession joins the network lane first. Native visits run only in its game-thread

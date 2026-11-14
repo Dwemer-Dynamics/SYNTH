@@ -91,6 +91,9 @@
         },
         "private_narrator": {
           "type": "boolean"
+        },
+        "readable_notes": {
+          "type": "boolean"
         }
       },
       "maxProperties": 64

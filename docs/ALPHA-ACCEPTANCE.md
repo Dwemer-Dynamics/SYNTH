@@ -29,6 +29,24 @@ See [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md). No gameplay 
 - [ ] VR: repeat independently in headset, including push-to-talk, centered audio and readable transcript controls.
 - [ ] Qualify configured live model, speech recognition and voice providers. Off-game synthetic audio is insufficient.
 
+## Readable paper notes (flat)
+
+- [ ] Flat: world and carried note opens each admit exactly one read with the matching BOOK ID
+  (needs the follow-up transport or a scratch build to observe); repeat and same-base reopen, close
+  before display and load during open admit nothing stale.
+- [ ] Flat: picking up or AddItem of a note/skill magazine without opening admits nothing; scripted,
+  "can't take" and mod-opened books are verified or recorded as unsupported.
+- [ ] Flat: both hooked callers run on the main thread and actual BookMenu rendering is unchanged.
+- [ ] Flat, paired server: one opened note is accepted as a private read after the book closes; `/share-note`
+  in chat with one addressed NPC reports "Note shared with <name>", and only that NPC can use it.
+- [ ] Flat: `/share-note` with no listener, in Shout or narrator mode, or before any read is refused
+  with a short notice and never reaches NPC speech or history; reload before the next save hides the read.
+- [ ] Flat, paired server: read A, `/share-note`, then read B shares A only; B stays private. A note opened
+  while SYNTH is still connecting is recorded before any share.
+- [ ] VR: nothing is advertised or sent; `/share-note` only reports that sharing is unavailable.
+
+See [the feature note](READABLE-NOTES.md). Static audit and off-game tests only.
+
 ## Optional companion combat comments
 
 - [ ] Flat: verify participant selection, duplicate ends, dismissal, re-aggro by

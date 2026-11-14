@@ -51,6 +51,9 @@
     },
     "observed_dialogue": {
       "type": "boolean"
+    },
+    "readable_notes": {
+      "type": "boolean"
     }
   }
 }

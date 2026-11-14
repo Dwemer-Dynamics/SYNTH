@@ -1,5 +1,43 @@
 # SYNTH protocol v2
 
+## Readable paper notes (2026-11-13)
+
+`note.read.v1` and optional `note.share.v1` are flat-only. Both need
+`context.saved_anchor` and `context.loaded_plugins`; `note.share.v1` also needs
+`note.read.v1`. A VR or partial declaration is rejected at ingress. Only an init
+from flat runtime `1.11.240` with a `plugins` manifest, on a migrated server, is
+acknowledged with status `readable_notes: true`. The client sends note events only
+after that acknowledgement.
+
+`note_read` reports one BookMenu open the player actually saw, never a pickup or
+AddItem. It is bound to a fresh context the client publishes after the open was
+admitted, not to a snapshot of the open itself. `payload.book.form_id` is the
+runtime BOOK form ID (`0x` + 8 hex). Dynamic `0xFF` forms and a zero plugin-local
+ID are rejected. `body` is the displayed text (1 to 16 KiB UTF-8). `title` is an
+optional single-line label (up to 255 bytes); it is not identity. The client
+cannot authenticate an origin plugin or placed reference, so neither is accepted.
+The server derives the stable key from the generation's own init manifest (full
+plugins by high byte, light plugins by `FE` plus the 12-bit index). An unlisted
+prefix is refused with `note_identity_unresolved`. The read is private to the bound
+player identity and that save's ancestry. Acknowledgement: status
+`note_read_accepted`, detail `player_private`. A changed body under the same key
+is a new revision; earlier revisions are kept.
+
+`note_share` has only `payload.mode`: `STANDARD`, `WHISPER` or `CLOSE`, and it must
+equal the server's saved mode. It hands the player's newest read visible from the
+bound snapshot to that snapshot's addressed target. The bound snapshot must still
+be the lane's newest one. The server picks the recipient; the payload never names
+one. Close bystanders receive nothing. `SHOUT` and every other mode are refused. The
+server does not see an audience: the client shares only from the Normal audience, and
+Everyone is not merged. Acknowledgement: `note_share_accepted`, detail `shared_with_target`.
+Refusals are terminal statuses: `note_unavailable`, `note_capability_required`,
+`note_context_unavailable`, `note_identity_unresolved`, `note_share_context_stale`,
+`note_share_mode_unsupported`, `note_share_mode_mismatch`,
+`note_share_target_missing`, `note_share_target_unplaced` and
+`note_share_no_visible_read`. Exact repeats replay the stored response. Neither event calls
+a model. A shared note reaches only that recipient's later prompts, as quoted
+document text, from a save that contains the share.
+
 ## Addressed actor SPECIAL values (2026-11-13)
 
 `context.actor_stats` is optional for flat and VR. A v2 init that lists it is
