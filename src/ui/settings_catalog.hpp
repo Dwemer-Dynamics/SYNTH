@@ -66,18 +66,19 @@ struct ControlOption final {
     const char* label;  // what the player reads
     const char* value;  // what travels to the game thread, verbatim
     const char* help;
+    const char* group{};  // optional presentation heading; never sent to the server
 };
 
 inline constexpr std::array<ControlOption, 9> chat_modes{{
-    {"Standard", "STANDARD", "Normal conversational replies."},
-    {"Whisper", "WHISPER", "Private dialogue with the selected listener within 200 game units."},
-    {"Close", "CLOSE", "Small-group dialogue within 200 game units; nearby NPCs may overhear."},
-    {"Shout", "SHOUT", "Raised replies that carry further than normal speech."},
-    {"Narrator", "NARRATOR", "Route the exchange through The Narrator."},
-    {"Director", "DIRECTOR", "Direct the selected NPC using supported dialogue and actions. Multi-NPC scene orchestration is not available yet."},
-    {"Injection Log", "INJECTION_LOG", "Record injected context without producing a reply."},
-    {"Injection Chat", "INJECTION_CHAT", "Inject context and continue the conversation."},
-    {"Cheat Mode", "CHEATMODE", "Give direct instructions using SYNTH's supported actions; unsupported commands remain blocked."},
+    {"Standard", "STANDARD", "Normal conversational replies.", "Conversation"},
+    {"Whisper", "WHISPER", "Only the selected listener hears you, within 200 game units.", "Conversation"},
+    {"Close", "CLOSE", "Nearby NPCs within 200 game units may overhear you.", "Conversation"},
+    {"Shout", "SHOUT", "Raised replies that carry further than normal speech.", "Conversation"},
+    {"Narrator", "NARRATOR", "Route the exchange through The Narrator.", "Narration"},
+    {"Director", "DIRECTOR", "Direct the selected NPC using supported dialogue and actions. Multi-NPC scene orchestration is not available yet.", "Direction"},
+    {"Cheat Mode", "CHEATMODE", "Give direct instructions using SYNTH's supported actions; unsupported commands remain blocked.", "Direction"},
+    {"Injection Log", "INJECTION_LOG", "Record injected context without producing a reply.", "Context Injection"},
+    {"Injection Chat", "INJECTION_CHAT", "Inject context and continue the conversation.", "Context Injection"},
 }};
 
 inline constexpr std::array<ControlOption, 4> llm_models{{
@@ -125,6 +126,10 @@ namespace detail {
 // visible notes say where a rebind takes effect: the framework registry only
 // mirrors SYNTH's INI for conflict checks and is never read back.
 inline constexpr Setting hotkeys_page[] = {
+    {"Start here: bind Chatbox or Hold to Talk, plus SYNTH Control.",
+     "Open SYNTH > Hotkeys to assign keys. All eight start unbound. Chatbox opens text dialogue; "
+     "Hold to Talk records while held. SYNTH Control chooses the chat mode and server model slot.",
+     "", "", SettingKind::note},
     {"Bindings", "", "", "", SettingKind::section},
     {"Change SYNTH keys here or in SYNTH_custom.ini.",
      "SYNTH reads its keys from SYNTH_custom.ini, and a change on this page is saved there. "
@@ -181,6 +186,14 @@ inline constexpr Setting auto_activate_page[] = {
      "Distance", "ActivatingNpcInterior", SettingKind::integer, 200, 4000, 100},
     {"Exterior Auto Activate Distance", "AI actors within this distance outside are auto activated.",
      "Distance", "ActivatingNpcExterior", SettingKind::integer, 200, 6000, 100},
+    {"Policy", "", "", "", SettingKind::section},
+    {"Add Hostile NPCs", "Allow hostile NPCs to be auto activated.",
+     "AutoActivate", "AutoAddHostile", SettingKind::toggle},
+    {"Include creatures in auto-activation", "Allow creatures as well as humanoid NPCs to be auto activated.",
+     "AutoActivate", "AutoAddCreatures", SettingKind::toggle},
+};
+
+inline constexpr Setting hearing_page[] = {
     {"Spatial Hearing", "", "", "", SettingKind::section},
     {"Interior Spatial Hearing Distance",
      "How far AI actors can hear spoken dialogue in interiors.",
@@ -190,11 +203,19 @@ inline constexpr Setting auto_activate_page[] = {
     {"Auto Hearing Radius",
      "Default hearing radius used by automatic listener and rechat selection.",
      "SpatialAudio", "AutoHearingDistance", SettingKind::integer, 100, 4000, 50},
-    {"Policy", "", "", "", SettingKind::section},
-    {"Add Hostile NPCs", "Allow hostile NPCs to be auto activated.",
-     "AutoActivate", "AutoAddHostile", SettingKind::toggle},
-    {"Add All Races", "Allow auto activation for all actor categories, including creatures.",
-     "AutoActivate", "AutoAddCreatures", SettingKind::toggle},
+};
+
+inline constexpr Setting behavior_page[] = {
+    {"Dialogue", "", "", "", SettingKind::section},
+    {"AI response timeout", "Maximum time to wait for an AI response, in seconds.",
+     "Behavior", "AIResponseTimeout", SettingKind::integer, 5, 180, 5},
+    {"Pause Dialogue in Menus",
+     "Pause active AI dialogue audio while menus or the Pip-Boy are open.",
+     "Behavior", "PauseDialogueOnMenu", SettingKind::toggle},
+    {"Show AI Subtitles", "Display passive Fallout-style subtitles while AI audio plays.",
+     "Behavior", "ShowAISubtitles", SettingKind::toggle},
+    {"Scene Safety", "Avoid actors currently controlled by active scene or dialogue packages.",
+     "Behavior", "SceneSafety", SettingKind::toggle},
     {"Combat", "", "", "", SettingKind::section},
     {"Allow Combat Dialogue", "Allow regular AI dialogue requests while the player is in combat.",
      "Behavior", "EnableCombatDialogue", SettingKind::toggle},
@@ -207,19 +228,6 @@ inline constexpr Setting auto_activate_page[] = {
      "RpgEvents", "CombatBarkPeriodSeconds", SettingKind::integer, 5, 120, 5},
     {"Companion Combat Comments", "After combat, let one following companion who fought nearby comment (flat).",
      "RpgEvents", "CompanionCombatComments", SettingKind::toggle},
-};
-
-inline constexpr Setting behavior_page[] = {
-    {"Dialogue", "", "", "", SettingKind::section},
-    {"Connection Timeout", "Maximum response wait in seconds.",
-     "Behavior", "AIResponseTimeout", SettingKind::integer, 5, 180, 5},
-    {"Pause Dialogue in Menus",
-     "Pause active AI dialogue audio while menus or the Pip-Boy are open.",
-     "Behavior", "PauseDialogueOnMenu", SettingKind::toggle},
-    {"Show AI Subtitles", "Display passive Fallout-style subtitles while AI audio plays.",
-     "Behavior", "ShowAISubtitles", SettingKind::toggle},
-    {"Scene Safety", "Avoid actors currently controlled by active scene or dialogue packages.",
-     "Behavior", "SceneSafety", SettingKind::toggle},
     {"Dynamic Profiles", "", "", "", SettingKind::section},
     {"Dynamic Profile Timer", "Minutes between automatic dynamic profile refreshes.",
      "DynamicProfile", "TimerMinutes", SettingKind::integer, 5, 240, 5},
@@ -296,9 +304,10 @@ inline constexpr Setting tools_page[] = {
 
 }  // namespace detail
 
-inline constexpr std::array<Page, 5> pages{{
+inline constexpr std::array<Page, 6> pages{{
     {"Hotkeys", detail::hotkeys_page},
-    {"Auto Activate", detail::auto_activate_page},
+    {"NPC Activation", detail::auto_activate_page},
+    {"Hearing & Awareness", detail::hearing_page},
     {"Behavior", detail::behavior_page},
     {"Sound", detail::sound_page},
     {"Tools", detail::tools_page},

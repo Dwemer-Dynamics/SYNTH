@@ -14,11 +14,11 @@ F4SE runtime. Runtime compatibility has not been proven until the corresponding 
 and in-game acceptance matrix succeeds.
 
 F4SE Menu Framework is optional. When it is installed, SYNTH registers its own native
-Hotkeys, Auto Activate, Behavior, Sound, and Tools pages, the native chatbox with its To:
-NPC picker, and the SYNTH Control menu. SYNTH ships no MCM config and never appears under
-"MCM Mod Configs (Legacy)". Without the framework, every setting and hotkey remains
-available through SYNTH_custom.ini, the Chatbox key sends clipboard text instead of
-opening a window, and the SYNTH Control menu is unavailable.
+Hotkeys, NPC Activation, Hearing & Awareness, Behavior, Sound, and Tools pages, the
+native chatbox with its To: NPC picker, and the SYNTH Control menu. SYNTH ships no MCM
+config and never appears under "MCM Mod Configs (Legacy)". Without the framework, every
+setting and hotkey remains available through SYNTH_custom.ini, the Chatbox key sends
+clipboard text instead of opening a window, and the SYNTH Control menu is unavailable.
 
 Hotkeys
 

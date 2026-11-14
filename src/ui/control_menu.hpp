@@ -517,8 +517,14 @@ inline void __stdcall render_control_menu() {
         }
         case ControlLevel::chat_mode: {
             ImGuiMCP::SeparatorText("Chat Mode");
+            ImGuiMCP::TextWrapped("Choose one mode. Whisper: selected listener only. Close: nearby NPCs may overhear.");
             auto first = true;
+            std::string_view group;
             for (const auto& option : chat_modes) {
+                if (option.group != nullptr && group != option.group) {
+                    group = option.group;
+                    ImGuiMCP::SeparatorText(option.group);
+                }
                 const auto current = view.mode == option.value;
                 auto row = std::string{option.label};
                 if (view.pending_mode == option.value) row += "  (pending)";
@@ -539,7 +545,7 @@ inline void __stdcall render_control_menu() {
         }
         case ControlLevel::llm_model: {
             ImGuiMCP::SeparatorText("Model Slot");
-            ImGuiMCP::TextWrapped("Choose a model slot configured in the server dashboard.");
+            ImGuiMCP::TextWrapped("Choose a server-configured model slot. Configure its provider and model in the server dashboard; availability depends on the NPC profile.");
             ImGuiMCP::Spacing();
             auto first = true;
             for (const auto& option : llm_models) {
@@ -563,6 +569,7 @@ inline void __stdcall render_control_menu() {
         }
         case ControlLevel::profiles: {
             ImGuiMCP::SeparatorText("Dynamic Profiles");
+            ImGuiMCP::TextWrapped("Rebuild NPC profile details from the server's current context. Refresh runs after SYNTH Control closes.");
             auto first = true;
             for (const auto& scope : profile_scopes) {
                 const auto is_target = std::string_view{scope.value} == "target";

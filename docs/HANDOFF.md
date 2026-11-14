@@ -1,5 +1,15 @@
 # SYNTH developer handoff
 
+## Flat settings layout candidate
+
+The flat settings catalog separates NPC Activation from Hearing & Awareness and places
+combat dialogue controls under Behavior. Control groups its existing nine modes by purpose
+and clarifies Whisper, Close, server model slots and profile refresh. All settings keys,
+defaults, hotkey identifiers and wire values remain unchanged. See
+[CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#layout-and-first-use). Off-game checks
+do not establish native menu layout or keyboard scrolling. Flat/VR gameplay and deployment
+remain on hold.
+
 ## Vanilla dialogue witnesses candidate
 
 Flat-only `context.observed_dialogue` grants canonical witnesses for a vanilla NPC line at the
