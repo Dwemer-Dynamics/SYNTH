@@ -80,7 +80,7 @@ public:
         auto* manager = RE::SubtitleManager::GetSingleton();
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!manager || !player) return result;
-        RE::NiPointer<RE::TESObjectREFR> speaker;
+        decltype(manager->currentSpeaker) handle;
         const RE::TESForm* info{};
         {
             const commonlib::TryReadLock lease{RE::SubtitleManager::GetRWLock()};
@@ -109,8 +109,9 @@ public:
             result.line.text.assign(*text);
             result.line.topic_info_form_id = info->GetFormID();
             result.line.topic_info_plugin = commonlib::origin_plugin(*info);
-            speaker = current.get();
+            handle = current; // Copied under the leases; the native handle lookup runs after both are released.
         }
+        const RE::NiPointer<RE::TESObjectREFR> speaker = handle.get();
         if (!speaker) return result; // An unresolved handle is unknown, not a known non-NPC line.
         auto* actor = speaker->As<RE::Actor>();
         if (!actor || actor == player) {
