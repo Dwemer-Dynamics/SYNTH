@@ -305,7 +305,7 @@ Control and lifecycle:
       do not expand audience or history readership. See [COMBAT-TARGETS.md](COMBAT-TARGETS.md).
 - [ ] Generation invalidation: load save, new game, return to main menu and quit each drop
       stale replies, audio and actions.
-- [ ] F4SE Menu Framework pages (Hotkeys, Auto Activate, Behavior, Sound, Tools) save to
+- [ ] F4SE Menu Framework pages (Hotkeys, NPC Activation, Hearing & Awareness, Behavior, Sound, Tools) save to
       `SYNTH_custom.ini`. Without the framework, the INI alone works.
 
 Wait (flat only, `SYNTH.esp` enabled):

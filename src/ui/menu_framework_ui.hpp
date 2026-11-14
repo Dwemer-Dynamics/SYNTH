@@ -738,14 +738,15 @@ inline void draw_voice_import_controls() {
 
 inline void __stdcall render_hotkeys() { draw_page(pages[0]); }
 inline void __stdcall render_auto_activate() { draw_page(pages[1]); }
-inline void __stdcall render_behavior() { draw_page(pages[2]); }
-inline void __stdcall render_sound() { draw_page(pages[3]); }
+inline void __stdcall render_hearing() { draw_page(pages[2]); }
+inline void __stdcall render_behavior() { draw_page(pages[3]); }
+inline void __stdcall render_sound() { draw_page(pages[4]); }
 
 // `draw_page` returns early before a configuration is published; the controls
 // still draw, because queueing an action needs no settings and the status line
 // is the one place the player can see what an earlier press did.
 inline void __stdcall render_tools() {
-    draw_page(pages[4]);
+    draw_page(pages[5]);
     draw_voice_import_controls();
 }
 
@@ -1151,7 +1152,8 @@ public:
         try {
             F4SEMenuFramework::SetSection("SYNTH");
             F4SEMenuFramework::AddSectionItem("Hotkeys", detail::render_hotkeys);
-            F4SEMenuFramework::AddSectionItem("Auto Activate", detail::render_auto_activate);
+            F4SEMenuFramework::AddSectionItem("NPC Activation", detail::render_auto_activate);
+            F4SEMenuFramework::AddSectionItem("Hearing & Awareness", detail::render_hearing);
             F4SEMenuFramework::AddSectionItem("Behavior", detail::render_behavior);
             F4SEMenuFramework::AddSectionItem("Sound", detail::render_sound);
             F4SEMenuFramework::AddSectionItem("Tools", detail::render_tools);
