@@ -1,5 +1,42 @@
 # SYNTH protocol v2
 
+## Explicit Everyone audience (2026-11-13)
+
+`dialogue.everyone` is v2-only and is granted only with `control.menu`. Only an
+init whose status carries `control_audience` grants it. Without that
+acknowledgement the client does not offer Everyone, shows it as unavailable and
+never falls back to a directed turn. A client that does not list the capability
+receives no new field.
+
+Status `control_audience` is exactly `{intent, reset_epoch}`: `intent` is
+`normal` or `everyone`, `reset_epoch` a non-negative integer. Init returns
+`normal` with the session's epoch; every init of an existing session advances it,
+and a new session starts at 0. A negotiated `control_state` carries the current
+value beside its unchanged `MODE|SLOT` detail. A missing value means unavailable,
+and the client then disables Everyone.
+
+`control` with `setting: "audience"` and `value` `normal` or `everyone` also
+requires `dialogue.everyone`. It edits the session preference only and never
+advances the epoch. Choosing `everyone` requires Standard or Shout mode. Everyone
+is not a mode; Normal keeps the existing automatic and directed behavior.
+
+An Everyone `input_text` or `input_audio` carries `audience_intent: "everyone"`
+together with the acknowledged `audience_reset_epoch`; neither appears alone, and
+there is no other intent value. Both require explicit `payload.control` with mode
+`STANDARD` or `SHOUT` and a bound context sequence whose target is a member of
+that context's captured audience. Normal input, triggers, action results and
+tools never carry these fields, and they are independent of `intent:
+"conversation"`. The target is the single responder the client chose
+deterministically; the server makes one initial reply and no per-hearer dispatch.
+
+Changing to any mode other than Standard or Shout resets every active session to
+Normal and advances its epoch in the same transaction. The server's first
+canonical claim refuses an Everyone input whose epoch is stale
+(`audience_epoch_stale`) or whose mode no longer allows it
+(`audience_mode_incompatible`). A replay of an admitted request returns its stored
+outcome unchanged. A pending dashboard change to Normal does not revoke an
+acknowledged Everyone before the game refreshes its control state.
+
 ## Addressed actor SPECIAL values (2026-11-13)
 
 `context.actor_stats` is optional for flat and VR. A v2 init that lists it is

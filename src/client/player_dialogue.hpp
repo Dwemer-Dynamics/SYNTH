@@ -340,7 +340,8 @@ public:
         const auto selected = retained ? conversation_target(*snapshot, controls, &*retained, nullptr) : std::nullopt;
         const auto untargeted = controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG";
         if (!selected && !untargeted) {
-            notify_("SYNTH voice input needs an eligible target");
+            if (!refuse_everyone(controls, retained ? &*retained : nullptr))
+                notify_("SYNTH voice input needs an eligible target");
             return std::nullopt;
         }
         return VoiceTurn{std::move(*wave), controls, untargeted ? std::nullopt : selected, voice_turn_};
@@ -418,17 +419,21 @@ public:
             text = text.substr(begin, end - begin + 1);
             intent = protocol_native::TextIntent::conversation;
         }
-        const auto controls = retained && !retained->conversation_mode.empty()
+        // Everyone is frozen here, at Send, from the acknowledged selection: the paused draft's actor and mode
+        // do not apply. Normal keeps the draft's retained actor and controls exactly as before.
+        const auto current = current_controls();
+        const bool everyone = current.audience != protocol_native::AudienceIntent::normal;
+        const auto controls = !everyone && retained && !retained->conversation_mode.empty()
             ? protocol_native::ControlSelection{retained->conversation_mode, retained->conversation_model_slot}
-            : current_controls();
-        const auto selected = conversation_target(snapshot, controls, retained, nullptr);
+            : current;
+        const auto selected = conversation_target(snapshot, controls, everyone ? nullptr : retained, nullptr);
         const auto untargeted = controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG";
         if (intent == protocol_native::TextIntent::conversation && untargeted) {
             notify_("SYNTH /talk needs a targeted conversation mode, not " + controls.mode);
             return std::nullopt;
         }
         if (!selected && !untargeted) {
-            notify_("SYNTH text input needs an eligible target");
+            if (!refuse_everyone(controls, nullptr)) notify_("SYNTH text input needs an eligible target");
             return std::nullopt;
         }
         return TextTurn{TextCommand::text, std::move(text), controls, intent, untargeted ? std::nullopt : selected};
@@ -542,6 +547,12 @@ public:
         return std::move(selected.target);
     }
 
+    // Revalidates the actor retained at speech admission under that admission's frozen controls; never retargets.
+    [[nodiscard]] std::optional<context::TargetContext> revalidate_target(const core::RuntimeSnapshot& snapshot,
+        const protocol_native::ControlSelection& controls, const integration::PromptTarget& retained) {
+        return conversation_target(snapshot, controls, &retained, nullptr);
+    }
+
     // Pointed subject for diary and portrait commands: availability only, no cooldown or range policy.
     [[nodiscard]] static std::optional<context::TargetContext> pointed_subject(const core::RuntimeSnapshot& snapshot) {
         const context::PlaythroughIdentity playthrough{snapshot.player().playthrough_id()};
@@ -581,6 +592,18 @@ private:
     // Capture has definitively stopped; safe from teardown without reading game-thread state.
     void publish_voice_inactive() noexcept { voice_active_.store(false, std::memory_order_release); }
 
+    // Explains a failed Everyone admission; nothing is sent. False leaves Normal's existing message to the caller.
+    bool refuse_everyone(const protocol_native::ControlSelection& controls, const integration::PromptTarget* anchor) {
+        if (controls.audience == protocol_native::AudienceIntent::normal) return false;
+        if (controls.audience == protocol_native::AudienceIntent::everyone_unconfirmed)
+            notify_("SYNTH Everyone audience is not confirmed by the server; nothing was sent");
+        else if (anchor)
+            notify_("SYNTH Everyone: " + anchor->display_name + " is no longer an eligible listener; nothing was sent");
+        else
+            notify_("SYNTH Everyone: no eligible NPC is within hearing range; nothing was sent");
+        return true;
+    }
+
     // Player conversation only: commands retain their existing pointed/explicit selection semantics.
     [[nodiscard]] std::optional<context::TargetContext> conversation_target(
         const core::RuntimeSnapshot& snapshot, const protocol_native::ControlSelection& controls,
@@ -613,17 +636,33 @@ private:
                 targeting::automatic_actor_class_supported(actor.race(), configuration_.activation.include_creatures) &&
                 targeting::player_speech_audible(range, targeting::distance(origin, actor.position()));
         };
+        // Everyone ignores crosshair, ray and gaze. Its one transport anchor must be an actual Standard/Shout hearer
+        // under the nearby rules, from both the selection origin and the body pose the published context measures.
+        const bool everyone = controls.audience == protocol_native::AudienceIntent::everyone;
+        if (controls.audience == protocol_native::AudienceIntent::everyone_unconfirmed ||
+            (everyone && !protocol_native::everyone_audience_mode(controls.mode))) return {};
+        const auto everyone_hearer = [&](const core::ActorSnapshot& actor) {
+            return nearby_eligible(actor) &&
+                targeting::player_speech_audible(range, targeting::distance(snapshot.player_pose().position(), actor.position()));
+        };
         if (retained) {
             if (retained->session.is_cancelled() || retained->session.generation() != snapshot.generation()) return {};
             for (const auto& actor : snapshot.actors()) {
                 if (!retained->matches(actor) || !direct_eligible(actor) ||
-                    (retained->nearby_conversation && !nearby_eligible(actor))) continue;
+                    (retained->nearby_conversation && !nearby_eligible(actor)) || (everyone && !everyone_hearer(actor))) continue;
                 const auto distance = targeting::distance(origin, actor.position());
                 if (distance > range) return {};
                 return context::TargetContext{context::identity_of(actor), actor.name(), actor.position(),
                     distance, snapshot.generation(), snapshot.frame()};
             }
             return {}; // A draft/recording never silently switches to another nearby actor.
+        }
+        if (everyone) {
+            // Deterministic: nearest by body distance, then form identity; never one request per hearer.
+            auto selected = targeting::select_nearest(snapshot, playthrough, snapshot.player_pose().position(), range,
+                everyone_hearer);
+            if (nearby) *nearby = selected.target.has_value();
+            return std::move(selected.target);
         }
         const targeting::SelectionBounds bounds{range, 75.0};
         auto selected = targeting::select_conversation(snapshot, playthrough, now, bounds,

@@ -211,6 +211,9 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         payload_schema = dict(payload_schema)
         payload_schema["properties"] = dict(payload_schema["properties"])
         payload_schema["properties"]["control"] = {"$ref": "../../v2/schemas/control.schema.json#/$defs/selection"}
+        # Explicit public audience; its pairing and capability rules live in v2/schemas/event.schema.json.
+        payload_schema["properties"]["audience_intent"] = {"const": "everyone"}
+        payload_schema["properties"]["audience_reset_epoch"] = {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
         if payload_type == "input_text":
             payload_schema["properties"]["intent"] = {"const": "conversation"}
     if value.get("schema") == "synth.response.line.v2" and payload_type == "dialogue":

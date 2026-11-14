@@ -4,11 +4,12 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["setting", "value"],
-  "properties": {"setting": {"enum": ["status", "mode", "model_slot"]}, "value": {"type": "string", "maxLength": 32}},
+  "properties": {"setting": {"enum": ["status", "mode", "model_slot", "audience"]}, "value": {"type": "string", "maxLength": 32}},
   "allOf": [
     {"if": {"properties": {"setting": {"const": "status"}}}, "then": {"properties": {"value": {"const": ""}}}},
     {"if": {"properties": {"setting": {"const": "mode"}}}, "then": {"properties": {"value": {"$ref": "#/$defs/mode"}}}},
-    {"if": {"properties": {"setting": {"const": "model_slot"}}}, "then": {"properties": {"value": {"enum": ["1", "2", "3", "4"]}}}}
+    {"if": {"properties": {"setting": {"const": "model_slot"}}}, "then": {"properties": {"value": {"enum": ["1", "2", "3", "4"]}}}},
+    {"if": {"properties": {"setting": {"const": "audience"}}}, "then": {"properties": {"value": {"enum": ["normal", "everyone"]}}}}
   ],
   "$defs": {
     "mode": {"enum": ["STANDARD", "WHISPER", "CLOSE", "SHOUT", "NARRATOR", "DIRECTOR", "INJECTION_LOG", "INJECTION_CHAT", "CHEATMODE"]},
