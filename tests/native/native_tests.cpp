@@ -1,4 +1,5 @@
 #include "core/cancellation.hpp"
+#include "core/event_witness.hpp"
 #include "core/priority_event_queue.hpp"
 #include "core/runtime_identity.hpp"
 #include "core/snapshot.hpp"
@@ -496,6 +497,42 @@ void test_voice_archive_bounds_and_cancellation() {
 
 }  // namespace
 
+// Sampled residency: baseline on arm, unavailable never ends a line, absence then the same line is new.
+void test_dialogue_residency_tracker() {
+    using synth::core::DialogueLine;
+    synth::core::DialogueResidencyTracker tracker;
+    const DialogueLine line{{0x2F1E, "Fallout4.esm", "save-001", "Piper"}, 0xF1A2B, "Fallout4.esm", "Get it while it's hot."};
+    auto other = line;
+    other.speaker = {0x2F1F, "Fallout4.esm", "save-001", "Piper"}; // Same display name, distinct identity.
+    CHECK(!tracker.present(0, line));
+    tracker.arm(1);
+    CHECK(!tracker.present(1, line)); // Already resident when armed: a delayed first sample claims nothing.
+    CHECK(!tracker.present(1, line));
+    CHECK(tracker.present(1, other));
+    CHECK(!tracker.present(1, other)); // Unavailable samples are simply not reported to the tracker.
+    tracker.absent(1);
+    CHECK(tracker.present(1, other));
+    tracker.absent(2);                 // A stale owner cannot invent an absence.
+    CHECK(!tracker.present(1, other));
+    CHECK(tracker.present(1, line));
+    tracker.arm(2);                    // Load/session replacement re-baselines.
+    CHECK(!tracker.present(1, other) && !tracker.present(2, line));
+    tracker.absent(2);
+    CHECK(tracker.present(2, line));
+    auto renamed = line;
+    renamed.speaker.display_name = "Piper Wright"; // A name change mid-line is the same residency.
+    CHECK(!tracker.present(2, renamed));
+    tracker.excluded(2);               // A positively observed player line ends NPC residency...
+    CHECK(tracker.present(2, line));   // ...so identical NPC speech after it is a new observation.
+    tracker.excluded(1);               // A stale owner cannot invent a transition.
+    CHECK(!tracker.present(2, line));
+    auto invalid = line;
+    invalid.text = std::string{"bad"} + char{0x0A} + "control";
+    CHECK(!invalid.valid() && !tracker.present(2, invalid));
+    tracker.invalidate();
+    CHECK(!tracker.present(2, other));
+}
+
 int main() {
     try {
         test_runtime_identity();
@@ -507,6 +544,7 @@ int main() {
         test_fake_runtime_flat_and_vr_pose_freshness();
         test_game_thread_dispatcher();
         test_voice_archive_bounds_and_cancellation();
+        test_dialogue_residency_tracker();
         std::cout << "native tests passed (" << assertions << " assertions)\n";
         return 0;
     } catch (const std::exception& error) {

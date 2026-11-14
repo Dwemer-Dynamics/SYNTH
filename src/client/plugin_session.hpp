@@ -79,7 +79,8 @@ public:
                   core::RuntimeGeneration generation,
                   core::SaveContextStore* save_context = nullptr,
                   core::SaveContextStore::Binding save_binding = {}, bool rest_events_available = false,
-                  bool quest_events_available = false, bool actor_events_available = false)
+                  bool quest_events_available = false, bool actor_events_available = false,
+                  bool observed_dialogue_available = false)
         : dispatcher_{dispatcher},
           configuration_{std::move(configuration)},
           transport_{configuration_.server.base_url,
@@ -92,7 +93,7 @@ public:
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
-                          configuration_.behavior.companion_combat_comments),
+                          configuration_.behavior.companion_combat_comments, observed_dialogue_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
@@ -173,7 +174,7 @@ public:
                    },
                    [this](std::string message) { push_notification(std::move(message)); }}},
           observations_{{configuration_, client_, network_, context_, quest_events_, terminal_, runtime_paused_, cancellation_.token(),
-                         variant, quest_events_available, actor_events_available,
+                         variant, quest_events_available, actor_events_available, observed_dialogue_available,
                          [this] {
                              return dialogue_.recording() || requests_.responses() != 0 || actions_.active() != 0 ||
                                  speech_.jobs_active() || !speech_.playback_idle();
@@ -288,6 +289,14 @@ public:
         return observations_.observe_actor_events(std::move(capture));
     }
     void pump_actor_events() { observations_.pump_actor_events(); }
+    [[nodiscard]] bool observed_dialogue_ready() const noexcept { return observations_.observed_dialogue_ready(); }
+    [[nodiscard]] bool observed_dialogue_capture_ready() const noexcept { return observations_.observed_dialogue_capture_ready(); }
+    [[nodiscard]] std::uint64_t dropped_observed_dialogue() const noexcept { return observations_.dropped_observed_dialogue(); }
+    [[nodiscard]] std::uint64_t next_observed_dialogue_serial() noexcept { return observations_.next_observed_dialogue_serial(); }
+    [[nodiscard]] bool observe_dialogue(DialogueObservationDelivery::Prepared capture) {
+        return observations_.observe_dialogue(std::move(capture));
+    }
+    void pump_observed_dialogue() { observations_.pump_observed_dialogue(); }
 
     [[nodiscard]] bool player_event_sample_due(core::SnapshotClock::time_point now) {
         return observations_.player_event_sample_due(now);

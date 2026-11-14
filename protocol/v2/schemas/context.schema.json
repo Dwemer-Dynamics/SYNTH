@@ -190,6 +190,41 @@
     }
   ],
   "properties": {
+    "observed_dialogue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_id",
+        "source",
+        "speaker",
+        "topic_info",
+        "text",
+        "witnesses"
+      ],
+      "properties": {
+        "observation_id": {
+          "type": "string",
+          "pattern": "^dialogue:[1-9][0-9]{0,15}$"
+        },
+        "source": {
+          "const": "flat_subtitle_selection"
+        },
+        "speaker": {
+          "$ref": "witness-observation.schema.json#/$defs/actor"
+        },
+        "topic_info": {
+          "$ref": "witness-observation.schema.json#/$defs/reference"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "witnesses": {
+          "$ref": "witness-observation.schema.json"
+        }
+      }
+    },
     "actor_events": {
       "$ref": "actor-events.schema.json"
     },

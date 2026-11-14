@@ -25,7 +25,11 @@
 // synthetic scene, and a SIMULATED executor outcome (nothing runs in a game) sent through the real action-result API,
 // then repeated, contradicted, superseded, cancelled and generation-invalidated. See README.md for its phases and limits.
 //
-// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion]   (any non-loopback address is refused)
+// The opt-in "witness" scenario publishes one SYNTHETIC first-observed vanilla line (Preston speaks, Piper is the only
+// granted witness), then retries it, and asks Piper, Nick (absent) and a same-name Piper (absent) on the ordinary and
+// /talk routes so the harness can inspect the actual provider messages. No game supplied any of this evidence.
+//
+// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness]   (any non-loopback address is refused)
 #include "client/http.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/speech_receipts.hpp"
@@ -692,15 +696,78 @@ int run_companion(std::string_view base) {
     return 0;
 }
 
+// SYNTHETIC first-observed scene: the speaker then exactly the granted witnesses, in the published world's cell.
+int run_witness(std::string_view base) {
+    LoopbackHttpTransport transport{base};
+    core::SaveContextStore store;
+    const auto fill = [] { core::PlaythroughUuid bytes{}; bytes.fill(0x7c); return std::optional{bytes}; };
+    CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
+    auto capabilities = dialogue_capabilities();
+    for (const auto* capability : {"dialogue.rechat.ownership", "dialogue.rechat.scene", "context.observed_dialogue"})
+        capabilities.emplace_back(capability);
+    Writer s{transport, "loopback-witness", 1, store, capabilities};
+    CHECK(s.synth.observed_dialogue_ready());
+    // Old-save cutoff: a co-save anchored before the observation.
+    CHECK(s.publish().status == client::RequestStatus::complete);
+    const auto older_bytes = store.for_save();
+    CHECK(older_bytes && saved_anchor(*older_bytes));
+    const auto speaker = s.actor(target_form, "Preston Garvey");
+    const auto witness = s.actor(piper_form, "Piper");
+    const core::SceneIdentity cell{0x1F2A3, 0, "Fallout4.esm", ""};
+    protocol_native::NativeDialogueObservation observed{{1,
+        {{0x1A4D7, "Fallout4.esm", s.playthrough, "Preston Garvey"}, 0xF1A2B, "Fallout4.esm", "Loopback vanilla line VWL5520."},
+        {cell, true, 4411, 834000000123, {{0x2F1F, "Fallout4.esm", s.playthrough, "Piper"}}}}, 35};
+    std::vector<std::string> published;
+    // The second publication is the client's retry of the same retained capture under a new context sequence.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto outcome = s.synth.publish_context(0, s.playthrough, s.actor(player_form, "Sole Survivor"), std::nullopt,
+            {speaker, witness}, {}, protocol_native::WorldState{"Diamond City", "DiamondCityMarket", "", "", true, 834000000123, cell},
+            {}, {}, {}, {}, s.owner.token(), std::nullopt, {}, {}, {}, "partial", std::nullopt, std::nullopt, std::nullopt, observed);
+        CHECK(outcome.status == client::RequestStatus::complete);
+        published.push_back(outcome.request_id);
+        observed.age_ms += 5000;
+    }
+    phase("witness_observed", {{"session", s.session}, {"playthrough_id", s.playthrough}, {"line", text("VWL5520")},
+        {"first_request_id", published[0]}, {"retry_request_id", published[1]}, {"synthetic_state", json::Value{true}}});
+    const auto ask = [](Writer& w, std::string_view form, const char* name, const std::string& prefix) {
+        w.target_form_id = std::string{form};
+        w.target_name = name;
+        const auto bound = w.publish();
+        const auto activation = w.synth.activate(w.actor(form, name), "manual", bound.context_binding);
+        CHECK(activation.status == client::RequestStatus::complete);
+        const auto ordinary = w.ask(std::string{name} + ", what did you overhear?", protocol_native::TextIntent::unmarked);
+        CHECK(ordinary.reply.status == client::RequestStatus::complete);
+        phase(prefix + "_ordinary", {{"session", w.session}, {"target_form", std::string{form}}, {"target_name", text(name)},
+            {"request_id", ordinary.reply.request_id}});
+        const auto talk = w.talk(std::string{name} + ", repeat what you overheard.");
+        phase(prefix + "_talk", {{"session", w.session}, {"target_form", std::string{form}}, {"target_name", text(name)},
+            {"request_id", talk.reply.request_id}});
+    };
+    const std::array<std::pair<std::string_view, const char*>, 3> readers{{
+        {piper_form, "Piper"}, {"0x00002F25", "Nick Valentine"}, {"0x0003F2A1", "Piper"}}};
+    for (const auto& [form, name] : readers) ask(s, form, name, "witness");
+    // A replacement session restored from the pre-observation co-save asks the same granted Piper.
+    core::SaveContextStore loaded;
+    loaded.begin_load();
+    core::read_saved_context(CoSave{*older_bytes}, loaded);
+    CHECK(loaded.finish_load(true, fill).resolution == core::IdentityResolution::restored);
+    Writer restored{transport, "loopback-witness-restored", 2, loaded, capabilities};
+    CHECK(restored.checkpoint.binding().loaded_context == saved_anchor(*older_bytes));
+    ask(restored, piper_form, "Piper", "witness_restored");
+    std::cout << "DONE" << std::endl;
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const std::string_view scenario = argc == 3 ? argv[2] : "dialogue";
-    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion")) {
-        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion]\n";
+    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness")) {
+        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness]\n";
         return 2;
     }
     try {
+        if (scenario == "witness") return run_witness(argv[1]);
         return scenario == "companion" ? run_companion(argv[1]) : run(argv[1]);
     } catch (const std::exception& error) {
         std::cout << "FAILED " << error.what() << std::endl;

@@ -314,6 +314,20 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
             other = record["other_actor"]
             if other and (other["form_id"].upper() != str(record["other_form_id"]).upper() or other["playthrough_id"] != record["actor"]["playthrough_id"]):
                 raise ValidationError(f"{path}: secondary identity differs from original evidence")
+    if payload_type == "context" and "observed_dialogue" in payload:
+        observed = payload["observed_dialogue"]
+        evidence = observed["witnesses"]
+        if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.observed_dialogue" not in value.get("capabilities", []):
+            raise ValidationError(f"{path}: observed dialogue requires negotiated v2 flat capability")
+        key = lambda actor: (actor["form_id"].upper(), actor["origin_plugin"].lower(), actor["playthrough_id"], actor.get("display_name"))
+        audience = [key(actor) for actor in payload["audience"]]
+        witnesses = [key(actor) for actor in evidence["actors"]]
+        world = payload.get("world", {})
+        if int(observed["observation_id"][9:]) > 9007199254740991 or "target" in payload \
+                or audience != [key(observed["speaker"])] + witnesses or len(set(audience)) != len(audience) \
+                or observed["speaker"]["playthrough_id"] != payload["playthrough_id"] \
+                or world.get("scene") != evidence["scene"] or world.get("game_time_ticks") != evidence["game_time_ticks"]:
+            raise ValidationError(f"{path}: observed dialogue is not bound to its first-observation scene")
     if payload_type == "context" and "player_event" in payload:
         event = payload["player_event"]
         before, after = event["before"], event["after"]
