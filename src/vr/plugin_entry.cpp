@@ -352,6 +352,13 @@ void pump_runtime_impl() {
             if (session.get()!=owner || runtime->generation()!=generation) return;
             session->submit_rechat_capture(std::move(snapshot),*target);
         }
+        if (const auto probe=session->autochat_departure_probe(now)) {
+            const auto* owner=session.get();
+            const auto generation=runtime->generation();
+            const auto observed=runtime->observe_conversation_actor(now,probe->actor);
+            if (session.get()!=owner || runtime->generation()!=generation) return;
+            session->submit_autochat_departure(*probe,observed);
+        }
         const auto playback_frame = session->playback_frame();
         // The shared frame keeps FIFO, pause and scene admission; each validated caption is posted once.
         const auto caption = session->subtitle_frame(runtime->generation().value(), playback_frame,
@@ -734,6 +741,7 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* load) {
     runtime->set_actor_detail_pump(synth::adapters::commonlib::selected_actor_details);
     runtime->set_speech_spatial_pump(synth::adapters::commonlib::speech_spatial_snapshot);
     runtime->set_requested_actor_pump(synth::adapters::commonlib::requested_actor_snapshot);
+    runtime->set_conversation_actor_pump(synth::adapters::commonlib::conversation_actor_presence);
     runtime->set_facing_pump(synth::adapters::commonlib::face_speech_listener);
     // Ordinary capture and enrichment belong to one world lifetime; PreLoadGame, NewGame and Revert change it
     // at once, before any lifecycle teardown reaches the pump.

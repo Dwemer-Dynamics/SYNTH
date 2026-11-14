@@ -3,6 +3,7 @@
 #include "adapters/flat_fallout_runtime.hpp"
 #include "adapters/vr_fallout_runtime.hpp"
 #include "core/actor_discovery_scan.hpp"
+#include "runtime/fake_fallout_runtime.hpp"
 
 #include <chrono>
 #include <exception>
@@ -520,6 +521,67 @@ void test_requested_actor_capture_outside_discovery() {
     }
 }
 
+// Auto Chat departure: only a fresh, fenced pump status counts; every prerequisite gap or race is unavailable.
+void test_conversation_actor_observation_status() {
+    using namespace synth;
+    using Status = runtime::RuntimeConversationActorStatus;
+    for (const auto* descriptor : {&adapters::flat_descriptor, &adapters::vr_descriptor}) {
+        const core::WorldPose pose{{},core::UnitVector3::from({1,0,0}),core::UnitVector3::from({0,0,1})};
+        std::uint64_t epoch=1;
+        int captures{},calls{},mode{};
+        Status reported=Status::departed;
+        adapters::detail::RuntimeBase runtime{*descriptor,
+            [&](auto,auto) { ++captures; if (mode==1) ++epoch;
+                return adapters::detail::CapturedRuntimeValues{pose,
+                    descriptor->variant==RuntimeVariant::vr ? std::optional{pose} : std::nullopt,{},{},
+                    core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a"},{},42}; },
+            [](auto){},[](const auto&){return synth::runtime::RuntimeActionResult{};}};
+        runtime.set_capture_epoch_reader([&]{return epoch;});
+        const auto now=core::SnapshotClock::now();
+        runtime::RuntimeConversationActorRequest request{runtime.generation(),0x1A4,0x1A3,"Actors.esm","Actors.esm","save-a"};
+        CHECK(runtime.observe_conversation_actor(now,request).status==Status::unavailable && captures==0); // No seam.
+        runtime.set_conversation_actor_pump([&](const runtime::RuntimeConversationActorRequest& asked) {
+            ++calls; CHECK(asked.base_form_id==0x1A3 && asked.base_origin_plugin=="Actors.esm");
+            if (mode==2) ++epoch;
+            if (mode==3) (void)runtime.capture_snapshot(now);
+            if (mode==4) (void)runtime.invalidate();
+            return reported;
+        });
+        const auto departed=runtime.observe_conversation_actor(now,request);
+        CHECK(departed.status==Status::departed && departed.generation==request.generation && calls==1);
+        CHECK(departed.frame!=0 && departed.captured_at==now);
+        reported=Status::present;
+        const auto present=runtime.observe_conversation_actor(now,request);
+        CHECK(present.status==Status::present && present.frame>departed.frame);
+        reported=Status::departed;
+        auto wrong=request; wrong.playthrough_id="save-b";
+        CHECK(runtime.observe_conversation_actor(now,wrong).status==Status::unavailable && calls==2);
+        wrong=request; wrong.form_id=0x14;
+        CHECK(runtime.observe_conversation_actor(now,wrong).status==Status::unavailable && calls==2);
+        wrong=request; wrong.generation=core::RuntimeGeneration::from_value(request.generation.value()+1);
+        CHECK(runtime.observe_conversation_actor(now,wrong).status==Status::unavailable && calls==2);
+        for (mode=1; mode<=3; ++mode) CHECK(runtime.observe_conversation_actor(now,request).status==Status::unavailable);
+        mode=4; CHECK(runtime.observe_conversation_actor(now,request).status==Status::unavailable);
+        mode=0; CHECK(runtime.observe_conversation_actor(now,request).status==Status::unavailable); // Old generation.
+        bool worker_rejected{};
+        std::thread worker{[&]{try{(void)runtime.observe_conversation_actor(now,request);}catch(const std::logic_error&){worker_rejected=true;}}};
+        worker.join(); CHECK(worker_rejected);
+    }
+    // The fake is unavailable by default and reports a controlled status only for the exact actor and generation.
+    runtime::FakeFalloutRuntime fake{core::RuntimeVariant::flat};
+    const auto now=core::SnapshotClock::now();
+    runtime::RuntimeConversationActorRequest request{fake.generation(),0x1A4,0x1A3,"Actors.esm","Actors.esm","fake-playthrough"};
+    CHECK(fake.observe_conversation_actor(now,request).status==Status::unavailable);
+    fake.set_conversation_actor_status(request,Status::departed);
+    const auto first=fake.observe_conversation_actor(now,request);
+    CHECK(first.status==Status::departed && fake.observe_conversation_actor(now,request).frame>first.frame);
+    auto other=request; other.base_origin_plugin="Other.esm";
+    CHECK(fake.observe_conversation_actor(now,other).status==Status::unavailable);
+    (void)fake.advance_generation();
+    request.generation=fake.generation();
+    CHECK(fake.observe_conversation_actor(now,request).status==Status::unavailable);
+}
+
 // Model coincident text/voice/maintenance requests on one serialized pump in both lanes.
 void test_scoped_scene_capture_reuse() {
     using namespace synth;
@@ -837,6 +899,7 @@ int main() {
         test_selected_actor_enrichment_ownership();
         test_request_player_inventory_ownership();
         test_requested_actor_capture_outside_discovery();
+        test_conversation_actor_observation_status();
         test_scoped_scene_capture_reuse();
         test_bounded_discovery_windows();
         test_action_actor_reservations();

@@ -69,11 +69,12 @@ struct ControlOption final {
     const char* group{};  // optional presentation heading; never sent to the server
 };
 
-inline constexpr std::array<ControlOption, 9> chat_modes{{
+inline constexpr std::array<ControlOption, 10> chat_modes{{
     {"Standard", "STANDARD", "Normal conversational replies.", "Conversation"},
     {"Whisper", "WHISPER", "Only the selected listener hears you, within 200 game units.", "Conversation"},
     {"Close", "CLOSE", "Nearby NPCs within 200 game units may overhear you.", "Conversation"},
     {"Shout", "SHOUT", "Raised replies that carry further than normal speech.", "Conversation"},
+    {"Auto Chat", "AUTOCHAT", "Rewrite your instruction as a line for your character, then send it to the selected NPC immediately.", "Conversation"},
     {"Narrator", "NARRATOR", "Route the exchange through The Narrator.", "Narration"},
     {"Director", "DIRECTOR", "Direct the selected NPC using supported dialogue and actions. Multi-NPC scene orchestration is not available yet.", "Direction"},
     {"Cheat Mode", "CHEATMODE", "Give direct instructions using SYNTH's supported actions; unsupported commands remain blocked.", "Direction"},

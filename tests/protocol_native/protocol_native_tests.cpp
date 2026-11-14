@@ -934,7 +934,20 @@ int main(int argc,char** argv){
     try { (void)encode_input_text(control_context, "Hello", {"invalid", 5}); }
     catch (const std::invalid_argument&) { bad = true; }
     if (!bad) throw std::runtime_error{"invalid control selection accepted"};
+    // Auto Chat is one closed mode value: an ordinary control object, never the native conversation intent.
+    const auto autochat = required(synth::json::parse(encode_input_text(control_context, "Ask about the caravan", {"AUTOCHAT", 3})), "payload");
+    closed_object(required(autochat, "control"), {"mode", "model_slot"});
+    if (text(required(autochat, "control"), "mode") != "AUTOCHAT" || autochat.find("intent"))
+      throw std::runtime_error{"Auto Chat selection was not frozen into the turn"};
+    auto native_context = control_context;
+    native_context.capabilities.insert(native_context.capabilities.end(), {"dialogue.turn_ownership", "dialogue.native_turn"});
+    bad = false;
+    try { (void)encode_input_text(native_context, "Hello", {"AUTOCHAT", 1}, TextIntent::conversation); }
+    catch (const std::invalid_argument&) { bad = true; }
+    if (!bad) throw std::runtime_error{"Auto Chat took the native conversation route"};
     control_context.context_sequence = 0;
+    if (text(required(synth::json::parse(encode_control(control_context, "mode", "AUTOCHAT")), "payload"), "value") != "AUTOCHAT")
+      throw std::runtime_error{"Auto Chat mode control was not exact"};
     const auto rpc = synth::json::parse(encode_control(control_context, "status", ""));
     if (integer(rpc, "context_sequence") != 0 || text(rpc, "type") != "control")
       throw std::runtime_error{"control RPC incorrectly owns a dialogue context"};
@@ -968,6 +981,7 @@ int main(int argc,char** argv){
       throw std::runtime_error{"Everyone voice turn lost its epoch"};
     for (const ControlSelection invalid : {ControlSelection{"WHISPER", 1, AudienceIntent::everyone, 1},
              ControlSelection{"CLOSE", 1, AudienceIntent::everyone, 1}, ControlSelection{"NARRATOR", 1, AudienceIntent::everyone, 1},
+             ControlSelection{"AUTOCHAT", 1, AudienceIntent::everyone, 1},
              ControlSelection{"STANDARD", 1, AudienceIntent::everyone_unconfirmed, 1}, ControlSelection{"STANDARD", 1, AudienceIntent::normal, 2},
              ControlSelection{"", 1, AudienceIntent::everyone, 1}, ControlSelection{"STANDARD", 1, AudienceIntent::everyone, 9'007'199'254'740'992ULL}}) {
       if (!rejects([&] { return encode_input_text(control_context, "Hello", invalid); }) ||

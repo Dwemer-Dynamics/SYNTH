@@ -1,5 +1,17 @@
 # SYNTH open-alpha acceptance
 
+## Auto Chat
+
+See [AUTO-CHAT.md](AUTO-CHAT.md#automated-checks).
+
+- [ ] Automated: the listed native suites, build gates and the paired `autochat` loopback scenario
+  on the exact client and server commits; both DLLs built and both packages audited.
+- [ ] Flat in game: select Auto Chat, typed and push-to-talk turns show the generated player line
+  then the NPC reply; `/talk` and external requests are refused; the target leaving cancels only
+  that turn.
+- [ ] VR in headset, separately: the same checks with HMD gaze and controller input.
+- [ ] Physical microphone input and heard player voice, flat and VR independently.
+
 ## Everyone audience
 
 See [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#everyone-audience). Off-game evidence only so far, on exact

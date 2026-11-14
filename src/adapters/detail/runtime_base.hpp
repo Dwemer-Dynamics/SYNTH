@@ -45,6 +45,8 @@ using CapturePump =
 using PresentationPump = std::function<void(std::string_view)>;
 using ActorDetailPump = std::function<std::optional<core::ActorSnapshot>(const core::ActorSnapshot&)>;
 using RequestedActorPump = std::function<std::optional<core::ActorSnapshot>(std::uint32_t, const std::string&)>;
+using ConversationActorPump =
+    std::function<runtime::RuntimeConversationActorStatus(const runtime::RuntimeConversationActorRequest&)>;
 using ActionPump =
     std::function<runtime::RuntimeActionResult(const runtime::RuntimeActionRequest&)>;
 
@@ -191,6 +193,30 @@ public:
         if (!observed || observed->form_id() != actor_form_id || generation() != expected_generation || !capture_epoch_current() ||
             snapshot->frame() != frame_) return {};
         return std::make_shared<const core::RuntimeSnapshot>(snapshot->with_requested_actor(*observed));
+    }
+
+    void set_conversation_actor_pump(ConversationActorPump pump) {
+        assert_game_thread();
+        conversation_actor_pump_ = std::move(pump);
+    }
+
+    // The pump's status counts only inside the same generation, native epoch and capture frame it was asked in.
+    [[nodiscard]] runtime::RuntimeConversationActorObservation observe_conversation_actor(
+        core::SnapshotClock::time_point now, const runtime::RuntimeConversationActorRequest& request) final {
+        assert_game_thread();
+        const auto expected_generation = generation();
+        const runtime::RuntimeConversationActorObservation unavailable{
+            runtime::RuntimeConversationActorStatus::unavailable, expected_generation};
+        if (!conversation_actor_pump_ || request.generation != expected_generation || request.form_id == 0 ||
+            request.form_id == 0x14 || request.playthrough_id.empty()) return unavailable;
+        std::shared_ptr<const core::RuntimeSnapshot> snapshot;
+        try { snapshot = capture_snapshot(now); }
+        catch (const std::runtime_error&) { return unavailable; } // A crossed generation/epoch boundary is a race.
+        if (!snapshot || generation() != expected_generation || !capture_epoch_current() ||
+            snapshot->player().playthrough_id() != request.playthrough_id) return unavailable;
+        const auto status = conversation_actor_pump_(request);
+        if (generation() != expected_generation || !capture_epoch_current() || snapshot->frame() != frame_) return unavailable;
+        return {status, expected_generation, snapshot->frame(), snapshot->captured_at()};
     }
 
     void set_actor_detail_pump(ActorDetailPump pump) {
@@ -458,6 +484,7 @@ private:
     std::function<std::uint64_t()> capture_epoch_reader_;
     std::uint64_t capture_epoch_{};
     RequestedActorPump requested_actor_pump_;
+    ConversationActorPump conversation_actor_pump_;
     core::GenerationClock generation_;
     std::uint64_t frame_{};
     bool capture_batch_active_{};

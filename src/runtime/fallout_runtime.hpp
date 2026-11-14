@@ -254,6 +254,22 @@ struct RuntimeSpeechSpatial final {
     bool interior{};
 };
 
+// Exact retained conversation actor. Unavailable (missing prerequisites, unresolved actor, identity mismatch,
+// generation/epoch/frame race) never implies departure; departed is only a current-frame observation that the
+// exact actor is dead, disabled, deleted or outside the player's conversation area.
+enum class RuntimeConversationActorStatus : unsigned char { unavailable, present, departed };
+struct RuntimeConversationActorRequest final {
+    core::RuntimeGeneration generation;
+    std::uint32_t form_id{}, base_form_id{};
+    std::string origin_plugin, base_origin_plugin, playthrough_id;
+};
+struct RuntimeConversationActorObservation final {
+    RuntimeConversationActorStatus status{RuntimeConversationActorStatus::unavailable};
+    core::RuntimeGeneration generation;
+    std::uint64_t frame{};
+    core::SnapshotClock::time_point captured_at{};
+};
+
 class IFalloutRuntime {
 public:
     virtual ~IFalloutRuntime() = default;
@@ -278,6 +294,12 @@ public:
         const RuntimeFacingRequest& request) = 0;
     [[nodiscard]] virtual std::shared_ptr<const core::RuntimeSnapshot> capture_actor_snapshot(
         core::SnapshotClock::time_point now, std::uint32_t actor_form_id) = 0;
+    // Status-bearing companion to capture_actor_snapshot; adapters without the seam report unavailable.
+    [[nodiscard]] virtual RuntimeConversationActorObservation observe_conversation_actor(
+        core::SnapshotClock::time_point, const RuntimeConversationActorRequest&) {
+        assert_game_thread();
+        return {RuntimeConversationActorStatus::unavailable, generation()};
+    }
     [[nodiscard]] virtual std::shared_ptr<const core::RuntimeSnapshot> enrich_actor_snapshot(
         const std::shared_ptr<const core::RuntimeSnapshot>& snapshot, std::uint32_t actor_form_id) = 0;
     virtual void present_notification(std::string_view message) = 0;

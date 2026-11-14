@@ -1,5 +1,14 @@
 # SYNTH developer handoff
 
+## Auto Chat candidate
+
+Explicit `AUTOCHAT` mode on the existing Control mode list: the server rewrites typed or voice
+intent into one player line, sends it at once (player TTS when configured) and returns the
+selected NPC's ordinary reply. `/talk` and external requests are refused in Auto Chat; Everyone
+stays Standard/Shout only. A confirmed fresh departure of the exact target cancels only that
+turn. No configuration or schema field is added. See [AUTO-CHAT.md](AUTO-CHAT.md); open gates
+are in [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#auto-chat).
+
 ## Everyone audience candidate
 
 An explicit, server-acknowledged Everyone audience for Standard/Shout player speech and typed text. Normal keeps every

@@ -1013,7 +1013,7 @@ struct ControlSelection final {
 };
 
 inline bool valid_control_mode(std::string_view mode) {
-    constexpr std::string_view modes[]{"STANDARD", "WHISPER", "CLOSE", "SHOUT", "NARRATOR", "DIRECTOR", "INJECTION_LOG", "INJECTION_CHAT", "CHEATMODE"};
+    constexpr std::string_view modes[]{"STANDARD", "WHISPER", "CLOSE", "SHOUT", "AUTOCHAT", "NARRATOR", "DIRECTOR", "INJECTION_LOG", "INJECTION_CHAT", "CHEATMODE"};
     return std::ranges::find(modes, mode) != std::end(modes);
 }
 
@@ -1057,6 +1057,8 @@ inline std::string encode_input_text(const EventContext& context, std::string te
     auto payload = object({{"text",std::move(text_value)}});
     append_control_selection(payload, context, selection);
     if (intent == TextIntent::conversation) {
+        // Auto Chat rewrites the player's line server-side; it never borrows the native /talk route.
+        if (selection.mode == "AUTOCHAT") throw std::invalid_argument{"conversation intent cannot use Auto Chat"};
         const auto has = [&](std::string_view value) { return std::ranges::find(context.capabilities, value) != context.capabilities.end(); };
         if (context.protocol_version != 2 || context.context_sequence == 0 || !has("dialogue.native_turn") || !has("dialogue.turn_ownership"))
             throw std::invalid_argument{"conversation intent requires a bound native-turn context"};
