@@ -40,7 +40,7 @@ initializers, so that warning is disabled. Clang doesn't need the flag.
 
 The harness starts the driver as `loopback_dialogue_driver http://127.0.0.1:PORT`, which runs the
 default `dialogue` scenario (13 requests). An optional second argument selects the scenario:
-`dialogue` (same as omitting it) or `companion` (see below). At each
+`dialogue` (same as omitting it), `companion`, `witness` or `autochat` (see below). At each
 `PHASE <name> <json>` line on stdout, the driver waits for `GO` on stdin. Any other reply, or
 stdin closing, aborts the run.
 
@@ -99,3 +99,34 @@ Limits of the companion scenario:
   load, a new game or the main menu, and it doesn't cover a cancellation that arrives while a
   request is in flight. The native fake-server suite covers the in-flight case.
 - VR is not covered. Wait capabilities are flat-only.
+
+## Auto Chat scenario (opt-in)
+
+`loopback_dialogue_driver http://127.0.0.1:PORT autochat` runs one flat session,
+`loopback-autochat`, with the dialogue capabilities plus `control.menu` and
+`dialogue.turn_cancel`. Every root is sent with the `AUTOCHAT` control selection and no `/talk`
+intent. Most are typed `input_text`. Two are voice roots sent as `DialogueRequests::submit_voice`
+sends them: `upload_media` of a tiny WAV under its sha256 reference, then a context and
+`send_audio`. The driver never knows the server's transcript. The phases, in order:
+
+| Phase | Driver work before it |
+| --- | --- |
+| `autochat_context` | Init and context 1 for the Settler target. |
+| `autochat_typed` | One root whose reply must hold exactly one player line (the 4096-byte generated line, addressed to the target) before the target's reply, and no raw intent. Its context ACK becomes the older anchor. The driver then resends the exact request bytes once. |
+| `autochat_grunt` | One root whose generated line is `Hmm!`. |
+| `autochat_voice` | One voice root whose generated line is `The generator hums again LGV250.`. The evidence records the player line's `speech` status, utterance id and media identity, which it doesn't fetch or play. |
+| `autochat_sibling` | A checkpoint context (the newer anchor), then one root for a same-named Settler with another reference. |
+| `autochat_failed` | A refused voice root, then four typed roots with refused rewrites. Each must return `provider_failed` and no dialogue. The provider failure is resent once. |
+| `autochat_rewrite_held` / `_cancelled` | One root sent on a worker thread while the harness holds the rewrite. The driver resends the in-flight bytes, which must get `409 request_pending`. It cancels the turn token, takes `SynthClient`'s interrupted-turn anchor and sends `cancel`, which must be `cancel_accepted`. The worker's request must end `cancelled`. |
+| `autochat_npc_held` / `_cancelled` | The same, with the NPC call held instead, and no resend. |
+| `autochat_older_talk`, `autochat_newer_talk` | Replacement sessions restored from the older and newer co-saves each make one `/talk`. |
+
+Limits of the Auto Chat scenario:
+
+- `PlayerDialogue` (the departure watch, its stale-observation and replacement fencing, and the
+  control lane) needs Windows headers. The driver runs only the `SynthClient` sequence that
+  `cancel_interrupted_turn` performs after the decision. The decision is covered by
+  `tests/fake_server`.
+- A rechat continuation is not covered. The server README explains why. The voice roots stand in
+  for the microphone with fixed WAV bytes. No recording, playback or game audio is involved.
+- The resends are duplicate-delivery probes. Production never retries a request.
