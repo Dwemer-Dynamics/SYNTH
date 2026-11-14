@@ -858,7 +858,7 @@ private:
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
         if (!requests_.submit_text(std::move(snapshot), std::move(text), target, controls, intent,
-                                   deadline, begin_player_turn(actor_key(target)))) return false;
+                                   deadline, begin_player_turn(actor_key(target), controls.mode == "CLOSE"))) return false;
         claim_external_work(actor_key(target));
         mark_activity();
         return true;
@@ -994,7 +994,7 @@ private:
     }
 
     // Game-thread admission only: invalidate old chains without HTTP or worker joins.
-    [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}) {
+    [[nodiscard]] core::CancellationToken begin_player_turn(std::string actor = {}, bool close_capture = false) {
         narrator_.cancel_local();
         if (configuration_.behavior.companion_combat_comments) observations_.discard_combat_reactions();
         cancel_companion_remark();
@@ -1002,7 +1002,7 @@ private:
         social_.interrupt_dialogue();
         conversation_holds_.clear();
         trace_->record(diagnostics::ConversationStage::turn_admitted,cancellation_.token().generation().value());
-        const auto turn = dialogue_.replace_turn();
+        const auto turn = dialogue_.replace_turn(close_capture);
         (void)network_.discard_cancelled();
         (void)speech_.discard_cancelled_jobs();
         dialogue_.begin_external(std::move(actor));

@@ -115,6 +115,13 @@ void test_generation_and_cancellation() {
     CancellationSource turn_b{token};
     CHECK(turn_a.token().generation() == first);
     CancellationSource child{turn_a.token()};
+    CancellationSource grandchild{child.token()};
+    CHECK(turn_a.contains(turn_a.token()));
+    CHECK(turn_a.contains(child.token()));
+    CHECK(turn_a.contains(grandchild.token()));
+    CHECK(!turn_a.contains(turn_b.token()));
+    CHECK(!turn_a.contains(token));
+    CHECK(!turn_a.contains(CancellationToken{}));
     CHECK(!turn_a.cancel_if_owner(turn_b.token()));
     CHECK(!turn_a.cancel_if_owner(token));
     CHECK(!turn_a.cancel_if_owner(child.token()));
@@ -122,6 +129,8 @@ void test_generation_and_cancellation() {
     CHECK(!turn_a.is_cancelled());
     CHECK(turn_a.cancel_if_owner(turn_a.token()));
     CHECK(child.is_cancelled());
+    CHECK(grandchild.is_cancelled());
+    CHECK(turn_a.contains(grandchild.token())); // Identity ownership is separate from cancellation state.
     CHECK(!turn_b.cancel_if_owner(turn_a.token()));
     CHECK(turn_a.token().is_cancelled());
     CHECK(!turn_b.is_cancelled());

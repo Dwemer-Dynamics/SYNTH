@@ -71,7 +71,7 @@ struct ControlOption final {
 inline constexpr std::array<ControlOption, 9> chat_modes{{
     {"Standard", "STANDARD", "Normal conversational replies."},
     {"Whisper", "WHISPER", "Private dialogue with the selected listener within 200 game units."},
-    {"Close", "CLOSE", "Close-range replies for a private exchange."},
+    {"Close", "CLOSE", "Small-group dialogue within 200 game units; nearby NPCs may overhear."},
     {"Shout", "SHOUT", "Raised replies that carry further than normal speech."},
     {"Narrator", "NARRATOR", "Route the exchange through The Narrator."},
     {"Director", "DIRECTOR", "Direct the selected NPC using supported dialogue and actions. Multi-NPC scene orchestration is not available yet."},

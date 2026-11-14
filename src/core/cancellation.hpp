@@ -70,6 +70,14 @@ public:
 
     void cancel() noexcept { state_->cancelled.store(true, std::memory_order_release); }
 
+    // Recognize speculative descendants without granting ownership to a sibling or the session ancestor.
+    [[nodiscard]] bool contains(const CancellationToken& token) const noexcept {
+        for (auto state = token.state_; state; state = state->parent) {
+            if (state == state_) return true;
+        }
+        return false;
+    }
+
     // Late worker failures must not cancel a replacement turn in the same runtime generation.
     [[nodiscard]] bool cancel_if_owner(const CancellationToken& owner) noexcept {
         if (state_ != owner.state_) return false;

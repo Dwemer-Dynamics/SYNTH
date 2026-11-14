@@ -491,14 +491,16 @@ public:
                 audience.push_back(identity(*found));actor_states.push_back(make_state(*found));
             }
         } else {
-            for (const auto* actor : targeting::context_participants(snapshot, hearing_distance, selected)) {
+            // Whisper and Close never publish without their addressed actor; the targeting helper rejects an
+            // addressed actor outside the body-measured 200-unit radius instead of substituting a hearer.
+            const bool narrow = controls.mode == "WHISPER" || controls.mode == "CLOSE";
+            for (const auto* actor : narrow && selected_actor_key.empty()
+                     ? std::vector<const core::ActorSnapshot*>{}
+                     : targeting::context_participants(snapshot, hearing_distance, selected, controls.mode)) {
                 if (controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG") continue;
                 if (!controls.mode.empty() && !selected_actor_key.empty() && actor_key(identity(*actor)) != selected_actor_key &&
                     (!actor->conversation_area_available() || !targeting::player_speech_audible(
                         hearing_distance, targeting::distance(snapshot.player_pose().position(), actor->position())))) continue;
-                if ((controls.mode == "WHISPER" || controls.mode == "CLOSE") &&
-                    (actor_key(identity(*actor)) != selected_actor_key ||
-                     targeting::distance(snapshot.player_pose().position(), actor->position()) > 200)) continue;
                 audience.push_back(identity(*actor));
                 if (actor_states.size() < 16) actor_states.push_back(make_state(*actor));
             }
