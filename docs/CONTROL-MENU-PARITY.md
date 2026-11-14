@@ -6,9 +6,17 @@ Source: `codex/response-flow-parity`, preserving the response-flow, subtitle and
 
 In the flat lane the `Hotkeys.SYNTHControl` scan-code binding opens SYNTH's own F4SE Menu Framework window. Like every SYNTH hotkey it ships as 0 (unbound) in `config/SYNTH.ini`. It no longer launches a browser. An explicit Open Server Dashboard row remains available.
 
-The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Audience (see below), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The existing Hotkeys, Auto Activate, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
+The menu exposes Chat Mode, Model Slot (server-configured Standard/Fast/Powerful/Experimental slots), Audience (see below), Dynamic Profiles, Wait Here, Release Wait, Write NPC Diary, Open Server Dashboard and Close. The Hotkeys, NPC Activation, Hearing & Awareness, Behavior, Sound and Tools settings pages remain separate. The renderer owns framework registration/rendering; it passes bounded, generation-tagged requests to the game thread. Save/load or retirement invalidates drafts and queued actions.
 
 Mode/model selectors wait for a validated server acknowledgement. Profile refresh waits until the menu closes. Wait Here and Release Wait close the menu automatically and execute on the next menu-free game pump, revalidating the originally displayed NPC. They cannot switch to a new target if that actor disappears.
+
+## Layout and first use
+
+Open **SYNTH > Hotkeys** and bind **Chatbox** or **Hold to Talk**, plus **SYNTH Control**. All eight keys remain unbound by default. Hold to Talk also needs its toggle enabled on Sound. Without the flat Menu Framework, configure keys in `SYNTH_custom.ini`; VR keeps the limits below.
+
+Chat Mode groups the same nine choices under Conversation, Narration, Direction and Context Injection. These headings do not create independent switches: exactly one mode remains selected, with unchanged wire values and acknowledgement behavior. Model Slot selects a server-configured slot; provider/model setup stays in the server dashboard and availability depends on the NPC profile. Dynamic Profiles rebuilds profile details after Control closes.
+
+NPC Activation holds the activation distances and hostile/creature policy. Hearing & Awareness holds the three existing hearing ranges. Behavior holds response timeout, interruption, combat dialogue, barks and companion combat comments. Sound keeps voice playback and input together, with advanced tuning in its own section. INI keys, defaults, ranges and persistence remain unchanged. Reporting the active microphone device name is deferred.
 
 ## Bindings and lanes
 
@@ -45,7 +53,7 @@ The flat root menu has an Audience row: Normal is the existing automatic and tar
 
 - Wait Here uses the original `SYNTH.esp` aliases and matching HoldPosition package for 90 seconds of unpaused gameplay. Terminal success requires the active owned package and stable stopped-position proof; Release Wait requires empty owned aliases and fresh package absence. Existing foreign restraint is preserved. See `WAIT-ALIAS-CHAT.md`; `WAIT-HERE.md` records historical implementations.
 - Native Director sends an instruction through the selected NPC's structured response/action pipeline. It does not yet provide Dialectic's full multi-NPC scene orchestration or legacy global role-command queue.
-- Whisper/Close publish a private, 200-unit audience; Shout expands the normal hearing radius. Provider-specific vocal whisper/shout effects are not added.
+- Whisper reaches only the selected listener within 200 game units. Close allows nearby NPCs within 200 game units to overhear. Shout expands the normal hearing radius. Provider-specific vocal whisper/shout effects are not added.
 - Model Slot 1/2/3/4 maps to the profile's primary/secondary/tertiary/quaternary connector. The control stores the selection server-side; a request may also carry its own copied `model_slot`. With the profile randomizer disabled and no forced connector override, ordinary unmarked dialogue (`main_synth_pipeline`) uses the request's copied slot, else the stored selection. A stored selection that is empty for the NPC's profile falls back to the first configured connector in that order.
 - On that ordinary unmarked path, a copied slot that is empty for the addressed NPC's profile is rejected with `model_slot_unconfigured`, without a fallback dialogue-provider call. The control accepts a slot when any profile has it, so its acknowledgement does not confirm the addressed NPC's profile has it. In-flight requests keep their copied slot; automatic follow-up inheritance is unaudited.
 - Marked native `/talk` currently uses the profile's primary connector and ignores the selected slot.

@@ -17,7 +17,19 @@ Not yet covered:
 - `PluginSession`, game, microphone or HMD runs.
 - Deployment, publication, or flat/VR gameplay.
 - Merge and the AutoChat handoff are held until verification or a human waiver.
-- These checks and the vanilla witness checks below predate their merge and do not cover the combined pair.
+- These checks, the vanilla witness checks and the flat settings layout checks below predate their merge and do not
+  cover the combined pair.
+
+## Flat settings layout candidate
+
+The flat settings catalog separates NPC Activation from Hearing & Awareness and places
+combat dialogue controls under Behavior. Control groups its existing nine modes by purpose
+and clarifies Whisper, Close, server model slots and profile refresh. All settings keys,
+defaults, hotkey identifiers and wire values remain unchanged. See
+[CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md#layout-and-first-use). Off-game checks
+do not establish native menu layout or keyboard scrolling. Flat/VR gameplay and deployment
+remain on hold. Its checks predate the merge with the Everyone and vanilla witness
+candidates; combined acceptance is pending.
 
 ## Vanilla dialogue witnesses candidate
 

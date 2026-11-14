@@ -621,7 +621,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
 
     def test_pages_and_hotkeys_are_preserved(self) -> None:
         catalog = read("src/ui/settings_catalog.hpp")
-        for title in ("Hotkeys", "Auto Activate", "Behavior", "Sound", "Tools"):
+        for title in ("Hotkeys", "NPC Activation", "Hearing & Awareness", "Behavior", "Sound", "Tools"):
             with self.subTest(page=title):
                 self.assertIn(f'{{"{title}", detail::', catalog)
         for key in (
