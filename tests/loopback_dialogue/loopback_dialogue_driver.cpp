@@ -939,6 +939,8 @@ int run_autochat(std::string_view base) {
     auto capabilities = dialogue_capabilities();
     capabilities.emplace_back("control.menu");
     capabilities.emplace_back("dialogue.turn_cancel");
+    // The shipped client advertises this beside dialogue.turn_ownership; the server then emits the player line's listener.
+    capabilities.emplace_back("dialogue.listener_identity");
     Writer s{transport, "loopback-autochat", 1, store, capabilities};
     const auto first = s.publish();
     phase("autochat_context", {{"session", s.session}, {"playthrough_id", s.playthrough}, {"target_form", std::string{target_form}},

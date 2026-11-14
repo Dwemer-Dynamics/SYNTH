@@ -103,11 +103,12 @@ Limits of the companion scenario:
 ## Auto Chat scenario (opt-in)
 
 `loopback_dialogue_driver http://127.0.0.1:PORT autochat` runs one flat session,
-`loopback-autochat`, with the dialogue capabilities plus `control.menu` and
-`dialogue.turn_cancel`. Every root is sent with the `AUTOCHAT` control selection and no `/talk`
-intent. Most are typed `input_text`. Two are voice roots sent as `DialogueRequests::submit_voice`
-sends them: `upload_media` of a tiny WAV under its sha256 reference, then a context and
-`send_audio`. The driver never knows the server's transcript. The phases, in order:
+`loopback-autochat`, with the dialogue capabilities plus `control.menu`,
+`dialogue.turn_cancel` and `dialogue.listener_identity`. Every root is sent with the `AUTOCHAT`
+control selection and no `/talk` intent. Most are typed `input_text`. Two are voice roots sent as
+`DialogueRequests::submit_voice` sends them: `upload_media` of a tiny WAV under its sha256
+reference, then a context and `send_audio`. The driver never knows the server's transcript. The
+phases, in order:
 
 | Phase | Driver work before it |
 | --- | --- |
