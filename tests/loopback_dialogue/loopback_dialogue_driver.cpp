@@ -29,13 +29,20 @@
 // granted witness), then retries it, and asks Piper, Nick (absent) and a same-name Piper (absent) on the ordinary and
 // /talk routes so the harness can inspect the actual provider messages. No game supplied any of this evidence.
 //
-// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness]   (any non-loopback address is refused)
+// The opt-in "autochat" scenario sends explicitly selected AUTOCHAT typed roots over the ordinary route, and two voice
+// roots whose WAV is uploaded to /media.php and sent as input_audio exactly as DialogueRequests::submit_voice does:
+// accepted, refused, resent byte for byte, and held at the rewrite or NPC provider while SynthClient's interrupted-turn cancel
+// runs. Two replacement sessions restored from co-saves before and after the generated lines then make one /talk each.
+// The PlayerDialogue departure watch that decides to cancel needs Windows headers and is not compiled here.
+//
+// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat]   (any non-loopback address is refused)
 #include "client/http.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/speech_receipts.hpp"
 #include "client/synth_client.hpp"
 #include "client/wait_action.hpp"
 #include "core/save_context.hpp"
+#include "media_fetch/media_fetch.hpp"
 #include "presentation/dialogue_presentation.hpp"
 #include "runtime/action_completion.hpp"
 
@@ -57,9 +64,11 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -87,6 +96,11 @@ public:
 
     client::HttpResult send(const client::HttpRequest& request, const client::Cancelled& cancelled) override {
         if (request.timeout_ms == 0 || !request.target.starts_with('/')) throw std::invalid_argument{"invalid HTTP request"};
+        if (request.method == client::HttpMethod::post) {
+            std::scoped_lock lock{mutex_};
+            last_post_ = request;
+            last_post_.response_chunk = {};
+        }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{request.timeout_ms};
         if (cancelled && cancelled()) return {client::TransportFailure::cancelled, {}};
         Socket socket{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
@@ -212,6 +226,12 @@ public:
 
     void cancel_all() noexcept override {}
 
+    // The latest POST as sent, without its line callback, so a scenario can resend exactly those bytes.
+    [[nodiscard]] client::HttpRequest last_post() const {
+        std::scoped_lock lock{mutex_};
+        return last_post_;
+    }
+
 private:
     struct Socket final {
         int fd;
@@ -229,6 +249,8 @@ private:
         }
     }
     std::uint16_t port_{};
+    mutable std::mutex mutex_;
+    client::HttpRequest last_post_;
 };
 
 json::Value text(std::string value) { return json::Value{std::move(value)}; }
@@ -383,11 +405,11 @@ struct Writer final {
     struct Exchange final {
         client::RequestOutcome context, reply;
     };
-    Exchange ask(std::string text, protocol_native::TextIntent intent) {
+    Exchange ask(std::string text, protocol_native::TextIntent intent, const protocol_native::ControlSelection& selection = {}) {
         Exchange result;
         const auto turn = synth.begin_context_turn();
         result.context = publish();
-        result.reply = synth.send_text(std::move(text), {}, result.context.context_binding, {}, intent);
+        result.reply = synth.send_text(std::move(text), {}, result.context.context_binding, selection, intent);
         return result;
     }
 };
@@ -758,16 +780,254 @@ int run_witness(std::string_view base) {
     return 0;
 }
 
+// ---- Auto Chat scenario (opt-in) ----
+
+// Raw intents carry LAI tokens and generated lines LAC/LG tokens, so the harness can tell which text reached which
+// prompt. The first generated line is exactly the 4096-byte wire bound, in two-byte UTF-8 characters.
+std::string autochat_long_line() {
+    std::string line{"LAC4096 "};
+    while (line.size() < 4096) line += "\xC3\xA9";
+    return line;
+}
+
+constexpr std::string_view sibling_form{"0x0001A4E1"};
+
+// The explicit selection: the closed control object only, never /talk intent or Everyone.
+protocol_native::ControlSelection autochat_selection() { return {"AUTOCHAT", 1}; }
+
+// One explicitly selected root on the ordinary route, as DialogueRequests::submit_text sends it. An accepted root
+// returns the player's one generated line, addressed to the exact target, before the target's reply; a refused root
+// returns no dialogue. The raw intent is never on the wire as dialogue.
+Writer::Exchange autochat_lines(Writer& s, Writer::Exchange exchange, std::string_view label, const std::optional<std::string>& line) {
+    const auto& reply = exchange.reply;
+    const protocol_native::Dialogue* player{};
+    std::size_t players{}, npcs{};
+    std::string code, detail;
+    for (const auto& item : reply.lines) {
+        if (const auto* status = std::get_if<protocol_native::Status>(&item.payload)) { code = status->code; detail = status->detail; }
+        const auto* said = std::get_if<protocol_native::Dialogue>(&item.payload);
+        if (!said) continue;
+        const auto* speaker = std::get_if<protocol_native::Identity>(&said->speaker);
+        CHECK(speaker && speaker->origin_plugin == "Fallout4.esm" && speaker->playthrough_id == s.playthrough && !said->native_turn);
+        CHECK(said->text.find("LAI") == std::string::npos);
+        if (same_form(speaker->form_id, player_form)) { player = said; ++players; CHECK(npcs == 0); }
+        else { CHECK(same_form(speaker->form_id, s.target_form_id)); ++npcs; }
+    }
+    evidence("autochat_root", {{"label", text(std::string{label})}, {"request_id", reply.request_id},
+        {"status", static_cast<std::uint64_t>(reply.status)}, {"code", code}, {"detail", detail},
+        {"player_lines", static_cast<std::uint64_t>(players)}, {"npc_lines", static_cast<std::uint64_t>(npcs)},
+        {"text", text(player ? player->text : "")}, {"speech", json::Value{player && player->speech.has_value()}},
+        {"speech_status", text(player && player->speech ? player->speech->status : "")},
+        {"media", json::Value{player && (player->media || (player->speech && player->speech->media))}},
+        {"speech_utterance", text(player && player->speech ? player->speech->utterance_id : "")},
+        {"speech_media", text(player && player->speech && player->speech->media ? player->speech->media->media_id : "")},
+        {"speech_sha256", text(player && player->speech && player->speech->media ? player->speech->media->sha256 : "")}});
+    if (line) {
+        CHECK(reply.status == client::RequestStatus::complete && players == 1 && npcs >= 1 && player->text == *line);
+        CHECK(player->listener && same_form(player->listener->form_id, s.target_form_id) && player->listener->origin_plugin == "Fallout4.esm");
+    } else {
+        CHECK(players == 0 && npcs == 0 && code == "provider_failed");
+    }
+    return exchange;
+}
+
+Writer::Exchange autochat_root(Writer& s, std::string intent, std::string_view label, const std::optional<std::string>& line) {
+    return autochat_lines(s, s.ask(std::move(intent), protocol_native::TextIntent::unmarked, autochat_selection()), label, line);
+}
+
+// A tiny valid 16-bit mono PCM WAV standing in for the microphone; the server's own STT connector transcribes it. The
+// driver never knows the transcript and sends no text.
+std::vector<std::byte> autochat_wave(std::uint8_t sample) {
+    std::vector<std::byte> wave;
+    const auto le = [&wave](std::uint32_t value, int bytes) {
+        for (int index = 0; index < bytes; ++index) wave.push_back(static_cast<std::byte>((value >> (8 * index)) & 0xffU));
+    };
+    const auto tag = [&wave](std::string_view chars) { for (const char c : chars) wave.push_back(static_cast<std::byte>(c)); };
+    tag("RIFF"); le(40, 4); tag("WAVEfmt ");
+    le(16, 4); le(1, 2); le(1, 2); le(8000, 4); le(16000, 4); le(2, 2); le(16, 2);
+    tag("data"); le(4, 4); le(sample, 2); le(sample, 2);
+    return wave;
+}
+
+// One voice root as DialogueRequests::submit_voice sends it: upload the bytes to /media.php under their opaque sha256
+// reference, then publish context and send input_audio with the explicit selection.
+Writer::Exchange autochat_voice(Writer& s, std::uint8_t sample, std::string_view label, const std::optional<std::string>& line) {
+    const auto wave = autochat_wave(sample);
+    const auto sha256 = media_fetch::sha256_hex(wave);
+    const protocol_native::Media media{"media/" + sha256, "audio/wav", sha256, static_cast<std::uint64_t>(wave.size())};
+    const auto upload = s.synth.upload_media(media, std::string(reinterpret_cast<const char*>(wave.data()), wave.size()));
+    CHECK(upload.delivered() && (upload.response.status == 200 || upload.response.status == 201));
+    evidence("autochat_upload", {{"label", text(std::string{label})}, {"media_id", media.media_id},
+        {"status", static_cast<std::uint64_t>(upload.response.status)}, {"size", media.size}});
+    Writer::Exchange exchange;
+    {
+        const auto turn = s.synth.begin_context_turn();
+        exchange.context = s.publish();
+        exchange.reply = s.synth.send_audio(media, {}, exchange.context.context_binding, autochat_selection());
+    }
+    return autochat_lines(s, std::move(exchange), label, line);
+}
+
+json::Value::Object autochat_phase(const Writer& s, const Writer::Exchange& exchange, std::string intent) {
+    return {{"session", s.session}, {"request_id", exchange.reply.request_id}, {"intent", std::move(intent)},
+        {"context_sequence", exchange.context.context_binding.sequence}, {"target_form", s.target_form_id}};
+}
+
+// The compiled client's own last POST, resent byte for byte: a duplicate-delivery probe only, production never retries.
+client::HttpResponse resend(LoopbackHttpTransport& transport, const client::HttpRequest& request) {
+    const auto result = transport.send(request, {});
+    CHECK(result.delivered());
+    return result.response;
+}
+
+// A root sent on a worker, as DialogueRequests does, while the harness holds one provider. The departure path once
+// PlayerDialogue::observe_autochat has decided: cancel the exact owned turn token, then cancel_interrupted_turn takes
+// SynthClient's interrupted-turn anchor and sends cancel. The driver runs that SynthClient sequence directly.
+json::Value::Object autochat_held(LoopbackHttpTransport& transport, Writer& s, std::string intent, const std::string& label, bool duplicate) {
+    core::CancellationSource turn{s.owner.token()};
+    client::RequestOutcome context;
+    {
+        const auto hold = s.synth.begin_context_turn();
+        context = s.publish();
+    }
+    auto binding = context.context_binding;
+    binding.cancellation = turn.token();
+    client::RequestOutcome reply;
+    std::string failure;
+    std::thread worker{[&] {
+        try { reply = s.synth.send_text(intent, {}, binding, autochat_selection(), protocol_native::TextIntent::unmarked); }
+        catch (const std::exception& error) { failure = error.what(); }
+    }};
+    // On any failure below the turn is cancelled and the worker joined, so its request cannot outlive the run.
+    struct Join final {
+        core::CancellationSource& turn;
+        std::thread& worker;
+        ~Join() { turn.cancel(); if (worker.joinable()) worker.join(); }
+    } join{turn, worker};
+    phase(label + "_held", {{"session", s.session}, {"context_request_id", context.request_id}});
+    json::Value::Object result{{"session", s.session}, {"intent", intent}, {"context_request_id", context.request_id}};
+    std::string duplicated;
+    if (duplicate) {
+        // The in-flight bytes again: the server's claim answers request_pending and never reclaims or reinvokes.
+        const auto request = transport.last_post();
+        duplicated = request.body;
+        const auto pending = resend(transport, request);
+        CHECK(pending.status == 409 && pending.body.find("\"request_pending\"") != std::string::npos);
+        result.emplace_back("pending_status", static_cast<std::uint64_t>(pending.status));
+    }
+    turn.cancel();
+    const auto anchor = s.synth.take_interrupted_turn();
+    CHECK(anchor && anchor->context_request_id == context.request_id && anchor->generation == s.generation.value());
+    const auto ack = s.synth.cancel(anchor->context_request_id, anchor->generation);
+    const auto* accepted = only_status(ack);
+    CHECK(ack.status == client::RequestStatus::complete && accepted && accepted->code == "cancel_accepted");
+    worker.join();
+    CHECK(failure.empty() && reply.status == client::RequestStatus::cancelled);
+    CHECK(!duplicate || duplicated.find("\"" + reply.request_id + "\"") != std::string::npos);
+    evidence("autochat_cancel", {{"label", text(label)}, {"request_id", reply.request_id}, {"cancel_request_id", ack.request_id},
+        {"local_status", static_cast<std::uint64_t>(reply.status)}, {"detail", reply.detail}});
+    result.emplace_back("request_id", reply.request_id);
+    result.emplace_back("cancel_request_id", ack.request_id);
+    return result;
+}
+
+int run_autochat(std::string_view base) {
+    LoopbackHttpTransport transport{base};
+    core::SaveContextStore store;
+    const auto fill = [] { core::PlaythroughUuid bytes{}; bytes.fill(0x8d); return std::optional{bytes}; };
+    CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
+    auto capabilities = dialogue_capabilities();
+    capabilities.emplace_back("control.menu");
+    capabilities.emplace_back("dialogue.turn_cancel");
+    // The shipped client advertises this beside dialogue.turn_ownership; the server then emits the player line's listener.
+    capabilities.emplace_back("dialogue.listener_identity");
+    Writer s{transport, "loopback-autochat", 1, store, capabilities};
+    const auto first = s.publish();
+    phase("autochat_context", {{"session", s.session}, {"playthrough_id", s.playthrough}, {"target_form", std::string{target_form}},
+        {"sequence", first.context_binding.sequence}});
+
+    // 1. Typed root, no player TTS: the 4096-byte generated line. Its own context ACK is the older anchor; its exact
+    // request bytes are then resent once.
+    std::string intent{"LAI101 tell the settler the water pump is fixed, politely."};
+    const auto typed = autochat_root(s, intent, "typed", autochat_long_line());
+    const auto older_bytes = store.for_save();
+    CHECK(older_bytes && saved_anchor(*older_bytes) && saved_anchor(*older_bytes)->context_sequence == typed.context.context_binding.sequence);
+    const auto replay = resend(transport, transport.last_post());
+    evidence("autochat_replay", {{"label", text("typed")}, {"status", static_cast<std::uint64_t>(replay.status)}, {"body", replay.body}});
+    CHECK(replay.status == 200);
+    phase("autochat_typed", autochat_phase(s, typed, intent));
+
+    // 2. "Hmm!" through the player's configured TTS connector.
+    intent = "LAI202 grunt";
+    phase("autochat_grunt", autochat_phase(s, autochat_root(s, intent, "grunt", std::string{"Hmm!"}), intent));
+
+    // 2b. A voice root: the server's own transcript is the intent; the player's configured TTS voices the line.
+    auto voice = autochat_phase(s, autochat_voice(s, 0x11, "voice", std::string{"The generator hums again LGV250."}), "");
+    voice.emplace_back("media_id", "media/" + media_fetch::sha256_hex(autochat_wave(0x11)));
+    phase("autochat_voice", std::move(voice));
+
+    // 3. A checkpoint whose exact ACK covers both generated rows, then a same-named Settler with another reference.
+    const auto checkpoint = s.publish();
+    const auto newer_bytes = store.for_save();
+    CHECK(newer_bytes && saved_anchor(*newer_bytes)->context_sequence == checkpoint.context_binding.sequence);
+    s.target_form_id = std::string{sibling_form};
+    intent = "LAI303 greet the other settler";
+    auto sibling = autochat_phase(s, autochat_root(s, intent, "sibling", std::string{"Evening, neighbour LGS303."}), intent);
+    s.target_form_id = std::string{target_form};
+    sibling.emplace_back("older_anchor", anchor_value(saved_anchor(*older_bytes)));
+    sibling.emplace_back("newer_anchor", anchor_value(saved_anchor(*newer_bytes)));
+    phase("autochat_sibling", std::move(sibling));
+
+    // 4. Refused rewrites: each ends with provider_failed and no dialogue. The provider failure is resent once. A refused
+    // voice root comes first.
+    auto refused = autochat_phase(s, autochat_voice(s, 0x22, "voice_empty", std::nullopt), "");
+    refused.emplace_back("media_id", "media/" + media_fetch::sha256_hex(autochat_wave(0x22)));
+    refused.emplace_back("case", text("voice_empty"));
+    phase("autochat_failed", std::move(refused));
+    for (const auto* label : {"empty", "incomplete", "provider", "oversized"}) {
+        intent = "LAI40 " + std::string{label};
+        auto failed = autochat_phase(s, autochat_root(s, intent, label, std::nullopt), intent);
+        if (std::string_view{label} == "provider") {
+            const auto again = resend(transport, transport.last_post());
+            evidence("autochat_replay", {{"label", text(label)}, {"status", static_cast<std::uint64_t>(again.status)}, {"body", again.body}});
+        }
+        failed.emplace_back("case", text(label));
+        phase("autochat_failed", std::move(failed));
+    }
+
+    // 5. Cancelled while the rewrite is held (before any NPC dispatch), then while the NPC call is held.
+    phase("autochat_rewrite_cancelled", autochat_held(transport, s, "LAI505 rewrite held", "autochat_rewrite", true));
+    phase("autochat_npc_cancelled", autochat_held(transport, s, "LAI606 npc held", "autochat_npc", false));
+
+    // 6. Replacement sessions restored from the co-saves before and after the generated lines; one /talk each.
+    const auto load = [&](std::string id, std::uint64_t generation, const core::SavedRecordBytes& bytes, const std::string& name) {
+        core::SaveContextStore loaded;
+        loaded.begin_load();
+        core::read_saved_context(CoSave{bytes}, loaded);
+        CHECK(loaded.finish_load(true, fill).resolution == core::IdentityResolution::restored);
+        Writer writer{transport, std::move(id), generation, loaded};
+        CHECK(writer.checkpoint.binding().loaded_context == saved_anchor(bytes));
+        const auto reply = writer.talk("Loopback autochat question from the " + name + " save?");
+        phase("autochat_" + name + "_talk", {{"session", writer.session},
+            {"loaded_context", anchor_value(writer.checkpoint.binding().loaded_context)}, {"request_id", reply.reply.request_id}});
+    };
+    load("loopback-autochat-s2", 2, *older_bytes, "older");
+    load("loopback-autochat-s3", 3, *newer_bytes, "newer");
+    std::cout << "DONE" << std::endl;
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const std::string_view scenario = argc == 3 ? argv[2] : "dialogue";
-    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness")) {
-        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness]\n";
+    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness" && scenario != "autochat")) {
+        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat]\n";
         return 2;
     }
     try {
         if (scenario == "witness") return run_witness(argv[1]);
+        if (scenario == "autochat") return run_autochat(argv[1]);
         return scenario == "companion" ? run_companion(argv[1]) : run(argv[1]);
     } catch (const std::exception& error) {
         std::cout << "FAILED " << error.what() << std::endl;

@@ -619,6 +619,37 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         self.assertIn("synth::ui::Chatbox::request_open()", entry)
         self.assertNotIn("session->submit_text(runtime->capture_snapshot(now)", entry)
 
+    def test_autochat_session_admission_and_flow_idle(self) -> None:
+        session = read("src/client/plugin_session.hpp")
+        # External Ask and submit_prompt reach Auto Chat only through queue_text_for_actor without retained controls.
+        external = session[session.index("bool submit_external(") : session.index("bool submit_prompt(")]
+        self.assertIn("return queue_text_for_actor(std::move(snapshot),std::string{request.text},target);", external)
+        prompt = session[session.index("bool submit_prompt(") : session.index("private:", session.index("bool submit_prompt("))]
+        self.assertIn("return queue_text_for_actor(std::move(snapshot),std::move(text),actor);", prompt)
+        queue = session[session.index("bool queue_text_for_actor(") : session.index("public:", session.index("bool queue_text_for_actor("))]
+        refusal = queue.index('if (!retained_controls && controls.mode == "AUTOCHAT") {')
+        # Refused visibly before enrichment, request submission or turn replacement; never rerouted to Standard.
+        self.assertLess(refusal, queue.index("enrich_selected_actor("))
+        self.assertLess(refusal, queue.index("requests_.submit_text("))
+        self.assertIn("push_notification(", queue[refusal : queue.index("return false;", refusal)])
+        self.assertNotIn('"STANDARD"', queue)
+        self.assertIn("if (retained_controls) dialogue_.watch_autochat(", queue)
+        # A text-only queued caption keeps the watched flow busy.
+        probe = session[session.index("autochat_departure_probe(") : session.index("void submit_autochat_departure(")]
+        for check in ("requests_.responses() == 0", "actions_.active() == 0", "!speech_.jobs_active()",
+                      "speech_.playback_idle()", "speech_.captions_idle()", "rechat_.try_idle()"):
+            with self.subTest(check=check):
+                self.assertIn(check, probe)
+        dialogue = read("src/client/player_dialogue.hpp")
+        observe = dialogue[dialogue.index("bool observe_autochat(") : dialogue.index("prepare_chat_target(")]
+        self.assertNotIn("departures", observe)
+        capture = read("src/adapters/commonlib_capture.hpp")
+        presence = capture[capture.index("conversation_actor_presence(") :]
+        presence = presence[: presence.index("\n}\n")]
+        # Missing player/actor cell is unavailable before any dead/disabled/deleted departure.
+        self.assertLess(presence.index("if (!player_cell || !actor_cell) return Status::unavailable;"),
+                        presence.index("IsDead(false)"))
+
     def test_pages_and_hotkeys_are_preserved(self) -> None:
         catalog = read("src/ui/settings_catalog.hpp")
         for title in ("Hotkeys", "NPC Activation", "Hearing & Awareness", "Behavior", "Sound", "Tools"):

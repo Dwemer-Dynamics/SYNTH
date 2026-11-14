@@ -2289,9 +2289,109 @@ int main() {
                 selection = control.dialogue_selection();
                 CHECK(selection.audience == AudienceIntent::everyone && selection.audience_reset_epoch == 9);
                 wire.control_audience = audience("everyone", 3);
+                // Auto Chat is a Normal target mode: typed Send keeps the retained draft's mode and exact actor, voice
+                // binding keeps the speech-admission mode, and /talk is refused visibly instead of running Standard.
+                {
+                    using Status = runtime::RuntimeConversationActorStatus;
+                    const protocol_native::ControlSelection autochat{"AUTOCHAT", 2};
+                    const client::PlayerDialogue::Controls autochat_controls = [autochat] { return autochat; };
+                    const client::PlayerDialogue::Controls standard_controls = [normal] { return normal; };
+                    const auto autochat_draft = integration::PromptTarget{session.token(), 0xA2, 0xA2, "Fallout4.esm",
+                        "Fallout4.esm", "save-e", "NPC", true, "AUTOCHAT", 2, false};
+                    const auto typed_auto = dialogue.admit_text(scene_of({distant, nearest}, distant), "ask about the caravan",
+                        &autochat_draft, true, standard_controls);
+                    CHECK(typed_auto && typed_auto->controls.mode == "AUTOCHAT" && typed_auto->controls.model_slot == 2 &&
+                          form(typed_auto->target) == 0xA2 && typed_auto->intent == protocol_native::TextIntent::unmarked);
+                    const auto before_talk = wire.requests.size();
+                    for (const auto* retained : {&autochat_draft, static_cast<const integration::PromptTarget*>(nullptr)}) {
+                        notices.clear();
+                        CHECK(!dialogue.admit_text(scene_of({nearest}, nearest), "/talk hello", retained, true, autochat_controls));
+                        CHECK(notices.size() == 1 && notices[0].find("not available in Auto Chat") != std::string::npos);
+                    }
+                    CHECK(wire.requests.size() == before_talk);
+                    const auto standard_talk = dialogue.admit_text(scene_of({nearest}, nearest), "/talk hello", nullptr, true, standard_controls);
+                    CHECK(standard_talk && standard_talk->intent == protocol_native::TextIntent::conversation &&
+                          standard_talk->controls.mode == "STANDARD");
+                    const auto voice_anchor = dialogue.prepare_chat_target(std::make_shared<const core::RuntimeSnapshot>(
+                        scene_of({distant, nearest}, nearest)), autochat_controls);
+                    CHECK(prompt(voice_anchor) == 0xA2 && voice_anchor->conversation_mode == "AUTOCHAT" &&
+                          voice_anchor->conversation_model_slot == 2);
+                    CHECK(form(dialogue.revalidate_target(scene_of({distant, nearest}, distant), autochat, *voice_anchor)) == 0xA2);
+
+                    // Departure watch: exact actor and turn retained at admission, bounded cadence, unavailable and
+                    // present non-destructive, stale frames/generations/probes ignored, and only the owned turn cancelled.
+                    const auto admitted = scene_of({distant, nearest}, nearest);
+                    const auto target = client::PlayerDialogue::identity(nearest);
+                    const auto start = core::SnapshotClock::now();
+                    const auto never_idle = [] { return false; };
+                    const auto observed = [&](Status status, std::uint64_t frame,
+                                              core::RuntimeGeneration generation = core::RuntimeGeneration::initial(),
+                                              std::optional<core::SnapshotClock::time_point> at = std::nullopt) {
+                        return runtime::RuntimeConversationActorObservation{status, generation, frame,
+                            at.value_or(core::SnapshotClock::now())};
+                    };
+                    const auto standard_turn = dialogue.replace_turn();
+                    dialogue.watch_autochat(admitted, target, normal, standard_turn);
+                    CHECK(!dialogue.autochat_probe(start, never_idle)); // Non-Auto Chat turns are never watched.
+                    const auto other_save = core::ActorSnapshot{0xA2, "NPC", {400, 0, 0}, "Fallout4.esm", "save-other"};
+                    dialogue.watch_autochat(admitted, client::PlayerDialogue::identity(other_save), autochat, standard_turn);
+                    CHECK(!dialogue.autochat_probe(start, never_idle)); // Same form, other playthrough: no retained actor.
+                    const auto turn = dialogue.replace_turn();
+                    dialogue.watch_autochat(admitted, target, autochat, turn);
+                    const auto probe = dialogue.autochat_probe(start, never_idle);
+                    CHECK(probe && probe->actor.form_id == 0xA2 && probe->actor.base_form_id == 0xA2 &&
+                          probe->actor.origin_plugin == "Fallout4.esm" && probe->actor.playthrough_id == "save-e" &&
+                          probe->actor.generation == core::RuntimeGeneration::initial());
+                    CHECK(!dialogue.autochat_probe(start + 100ms, never_idle) && dialogue.autochat_probe(start + 250ms, never_idle));
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::unavailable, 5)));
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::departed, 4))); // Admission frame is not newer.
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::present, 6)));
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::departed, 6))); // Same frame is not fresh.
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::unavailable, 7)));
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::departed, 8, core::RuntimeGeneration::from_value(2))));
+                    CHECK(!dialogue.observe_autochat(*probe, observed(Status::departed, 8, core::RuntimeGeneration::initial(),
+                        admitted.captured_at() - 1s)));
+                    CHECK(!turn.is_cancelled());
+                    // The first fresh, fenced departed frame cancels the still-owned turn; there is no grace count.
+                    CHECK(dialogue.observe_autochat(*probe, observed(Status::departed, 8)) && turn.is_cancelled());
+                    CHECK(!dialogue.autochat_probe(start + 1s, never_idle));
+                    // A pending text-only caption keeps the flow busy, so the watch survives and departure still cancels.
+                    const bool caption_pending = true;
+                    const auto flow_idle = [&] { return !caption_pending; };
+                    const auto captioned = dialogue.replace_turn();
+                    dialogue.watch_autochat(admitted, target, autochat, captioned);
+                    const auto caption_probe = dialogue.autochat_probe(start, flow_idle);
+                    CHECK(caption_probe && dialogue.autochat_probe(start + 250ms, flow_idle));
+                    CHECK(dialogue.observe_autochat(*caption_probe, observed(Status::departed, 9)) && captioned.is_cancelled());
+                    // A late observation never cancels the replacement turn, whatever mode replaced it.
+                    const auto watched = dialogue.replace_turn();
+                    dialogue.watch_autochat(admitted, target, autochat, watched);
+                    const auto stale = dialogue.autochat_probe(start, never_idle);
+                    const auto replacement = dialogue.replace_turn();
+                    CHECK(stale && !dialogue.observe_autochat(*stale, observed(Status::departed, 20)) && !replacement.is_cancelled());
+                    const auto next = dialogue.replace_turn();
+                    dialogue.watch_autochat(admitted, target, autochat, next);
+                    CHECK(!dialogue.observe_autochat(*stale, observed(Status::departed, 21)) && !next.is_cancelled());
+                    // A drained flow releases the watch at its safe end.
+                    CHECK(!dialogue.autochat_probe(start, [] { return true; }) && !dialogue.autochat_probe(start + 1s, never_idle));
+                    CHECK(!next.is_cancelled());
+                }
                 control_lane.shutdown();
             }
 #endif
+            // Auto Chat is a closed control value and encodes as the ordinary control object; it never carries Everyone
+            // and never takes the native /talk route.
+            CHECK(synth_client.send_text("ask about the caravan", {}, scene.context_binding, {"AUTOCHAT", 2}).status ==
+                  RequestStatus::complete);
+            const auto autochat_text = payload_of(wire.requests.back());
+            CHECK(protocol_native::text(protocol_native::required(autochat_text, "control"), "mode") == "AUTOCHAT" &&
+                  !autochat_text.find("audience_intent") && !autochat_text.find("intent"));
+            {
+                bool thrown{};
+                try { (void)synth_client.send_text("hello all", {}, scene.context_binding, {"AUTOCHAT", 1, AudienceIntent::everyone, 3}); }
+                catch (const std::invalid_argument&) { thrown = true; }
+                CHECK(thrown);
+            }
             // Incompatible mode resets the server audience; returning to Standard never resurrects Everyone.
             wire.control_detail = "WHISPER|1"; wire.control_audience = audience("normal", 4);
             CHECK(control.request("mode", "WHISPER")); settle();
@@ -2320,6 +2420,18 @@ int main() {
             wire.control_audience = audience("normal", 7);
             CHECK(control.request("mode", "CLOSE")); settle();
             CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);
+            wire.control_detail = "STANDARD|1";
+            CHECK(control.request("mode", "STANDARD")); settle();
+            CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);
+            // Auto Chat is an incompatible mode too: its acknowledgement resets Everyone like Whisper and Close.
+            wire.control_audience = audience("everyone", 8);
+            CHECK(control.request("audience", "everyone")); settle();
+            CHECK(control.state().everyone);
+            wire.control_detail = "AUTOCHAT|1"; wire.control_audience = audience("normal", 9);
+            CHECK(control.request("mode", "AUTOCHAT")); settle();
+            CHECK(!control.state().everyone && control.state().selection.mode == "AUTOCHAT" &&
+                  control.dialogue_selection().audience == AudienceIntent::normal);
+            CHECK(control.audience_refusal("everyone") == "Everyone needs Standard or Shout chat mode");
             wire.control_detail = "STANDARD|1";
             CHECK(control.request("mode", "STANDARD")); settle();
             CHECK(!control.state().everyone && control.dialogue_selection().audience == AudienceIntent::normal);

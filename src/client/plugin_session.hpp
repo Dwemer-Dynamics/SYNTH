@@ -710,6 +710,24 @@ public:
         rechat_.submit_capture(std::move(snapshot), target);
     }
 
+    // Auto Chat departure: the host observes outside the session and rechecks session and generation first.
+    [[nodiscard]] std::optional<PlayerDialogue::AutoChatProbe> autochat_departure_probe(core::SnapshotClock::time_point now) {
+        if (terminal_.load(std::memory_order_acquire) || runtime_paused()) return {};
+        return dialogue_.autochat_probe(now, [this] {
+            return requests_.responses() == 0 && actions_.active() == 0 && !speech_.jobs_active() &&
+                speech_.playback_idle() && speech_.captions_idle() && rechat_.try_idle();
+        });
+    }
+
+    // Confirmed departure cancels only the watched, still-owned turn and discards only already-cancelled work.
+    void submit_autochat_departure(const PlayerDialogue::AutoChatProbe& probe,
+                                   const runtime::RuntimeConversationActorObservation& observed) {
+        if (terminal_.load(std::memory_order_acquire) || !dialogue_.observe_autochat(probe, observed)) return;
+        (void)network_.discard_cancelled();
+        (void)speech_.discard_cancelled_jobs();
+        push_notification("SYNTH Auto Chat: the selected NPC left the conversation; the reply was cancelled");
+    }
+
     [[nodiscard]] bool begin_voice_capture(const Snapshot& snapshot) {
         private_voice_state_ = narrator_.talking() ? std::optional{narrator_.view().state.state_id} : std::nullopt;
         return dialogue_.begin_voice_capture(snapshot,
@@ -747,8 +765,10 @@ public:
         if (voice->target && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
+        const auto admitted = snapshot;
         if (!requests_.submit_voice(std::move(snapshot), std::move(voice->wave), target, controls, deadline, voice->turn))
             return false;
+        if (voice->target) dialogue_.watch_autochat(*admitted, target, controls, voice->turn);
         dialogue_.own_external_work(actor_key(target));
         mark_activity();
         return true;
@@ -867,11 +887,20 @@ private:
                                           std::optional<protocol_native::ControlSelection> retained_controls = {},
                                           protocol_native::TextIntent intent = protocol_native::TextIntent::unmarked) {
         const auto controls = retained_controls.value_or(server_control_.state().selection);
+        // Auto Chat watches only typed and voice turns; external Ask and prompts are refused, never rerouted.
+        if (!retained_controls && controls.mode == "AUTOCHAT") {
+            push_notification("SYNTH Auto Chat accepts only typed or voice input; the external request was not sent");
+            return false;
+        }
         if (controls.mode != "NARRATOR" && controls.mode != "INJECTION_LOG" && !enrich_selected_actor(snapshot, target)) return false;
         const auto deadline = tasks::TaskLanes::Clock::now() +
                               std::chrono::milliseconds{request_timeout_ms() * 2ULL};
+        const auto admitted = snapshot;
         if (!requests_.submit_text(std::move(snapshot), std::move(text), target, controls, intent,
                                    deadline, begin_player_turn(actor_key(target), controls.mode == "CLOSE"))) return false;
+        // Only typed player input retains its controls. Replacement is game-thread only, so the current turn here is
+        // the one just admitted.
+        if (retained_controls) dialogue_.watch_autochat(*admitted, target, controls, current_turn_token());
         claim_external_work(actor_key(target));
         mark_activity();
         return true;

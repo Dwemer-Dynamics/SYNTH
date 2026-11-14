@@ -246,6 +246,7 @@ void bind_runtime_to_game_thread() {
     runtime->set_player_inventory_pump(synth::adapters::commonlib::selected_player_inventory);
     runtime->set_capture_epoch_reader([] { return synth::adapters::FlatPickedReference::stamp(); });
     runtime->set_requested_actor_pump(synth::adapters::commonlib::requested_actor_snapshot);
+    runtime->set_conversation_actor_pump(synth::adapters::commonlib::conversation_actor_presence);
     runtime->set_facing_pump(synth::adapters::commonlib::face_speech_listener);
     runtime->set_conversation_hold_pump(synth::adapters::commonlib::FlatConversationApproach::update,
         synth::adapters::commonlib::FlatConversationApproach::actions_ready);
@@ -656,6 +657,13 @@ void pump_runtime_impl() {
             auto snapshot=runtime->capture_actor_snapshot(now,target->form_id);
             if (session.get()!=owner || runtime->generation()!=generation) return;
             session->submit_rechat_capture(std::move(snapshot),*target);
+        }
+        if (const auto probe=session->autochat_departure_probe(now)) {
+            const auto* owner=session.get();
+            const auto generation=runtime->generation();
+            const auto observed=runtime->observe_conversation_actor(now,probe->actor);
+            if (session.get()!=owner || runtime->generation()!=generation) return;
+            session->submit_autochat_departure(*probe,observed);
         }
         if (!menu_mode && !runtime_paused) {
             if (const auto observer=session->enemy_awareness_capture_target(now,player_in_combat)) {

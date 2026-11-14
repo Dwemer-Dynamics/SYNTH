@@ -69,6 +69,27 @@ public:
         return {}; // The fake has no independent loaded-actor lookup.
     }
 
+    // Unavailable unless a test names the exact actor and its status; each observation is a new frame.
+    [[nodiscard]] RuntimeConversationActorObservation observe_conversation_actor(
+        core::SnapshotClock::time_point now, const RuntimeConversationActorRequest& request) override {
+        assert_game_thread();
+        std::scoped_lock lock{state_mutex_};
+        const auto current = generation_clock_.current();
+        const auto& actor = conversation_actor_;
+        if (!actor || request.generation != current || request.playthrough_id != player_.playthrough_id() ||
+            request.form_id != actor->form_id || request.base_form_id != actor->base_form_id ||
+            request.origin_plugin != actor->origin_plugin || request.base_origin_plugin != actor->base_origin_plugin)
+            return {RuntimeConversationActorStatus::unavailable, current};
+        return {conversation_actor_status_, current, ++frame_, now};
+    }
+
+    void set_conversation_actor_status(RuntimeConversationActorRequest actor, RuntimeConversationActorStatus status) {
+        assert_game_thread();
+        std::scoped_lock lock{state_mutex_};
+        conversation_actor_ = std::move(actor);
+        conversation_actor_status_ = status;
+    }
+
     [[nodiscard]] std::shared_ptr<const core::RuntimeSnapshot> enrich_actor_snapshot(
         const std::shared_ptr<const core::RuntimeSnapshot>&, std::uint32_t) override {
         assert_game_thread();
@@ -94,6 +115,7 @@ public:
         player_pose_ = origin_pose();
         hmd_pose_.reset();
         actors_.clear();
+        conversation_actor_.reset();
         return generation_clock_.advance();
     }
 
@@ -156,6 +178,8 @@ private:
     std::optional<core::TimedPose> hmd_pose_;
     core::ActorSnapshot player_{0x14, "Sole Survivor", {}, "Fallout4.esm", "fake-playthrough"};
     std::vector<core::ActorSnapshot> actors_;
+    std::optional<RuntimeConversationActorRequest> conversation_actor_;
+    RuntimeConversationActorStatus conversation_actor_status_{RuntimeConversationActorStatus::unavailable};
     std::vector<std::string> notifications_;
 };
 

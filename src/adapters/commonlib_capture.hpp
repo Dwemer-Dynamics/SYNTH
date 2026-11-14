@@ -1455,6 +1455,34 @@ struct NearbyReferenceSnapshots final {
     return actor_snapshot(*actor, playthrough, player, false, false);
 }
 
+// Status-bearing exact-actor lookup for a retained conversation. Missing save/player/cell/3D prerequisites, an
+// unresolved form or a different identity behind the same form are unavailable; only the exact actor observed
+// dead, disabled, deleted or in a different interior/worldspace than the player is departed.
+[[nodiscard]] inline runtime::RuntimeConversationActorStatus conversation_actor_presence(
+    const runtime::RuntimeConversationActorRequest& request) {
+    using Status = runtime::RuntimeConversationActorStatus;
+    const auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+    if (manager == nullptr || manager->currentPlayerID == 0 || request.playthrough_id != playthrough_id()) return Status::unavailable;
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actor = RE::TESForm::GetFormByID<RE::Actor>(request.form_id);
+    if (player == nullptr || actor == nullptr || actor == player || origin_plugin(*actor) != request.origin_plugin)
+        return Status::unavailable;
+    auto* npc = actor->GetNPC();
+    if (npc == nullptr || npc->GetFormID() != request.base_form_id || origin_plugin(*npc) != request.base_origin_plugin)
+        return Status::unavailable;
+    // Scene prerequisites come before any conclusive departure, so a missing cell never reads as departed.
+    const auto* player_cell = player->GetParentCell();
+    const auto* actor_cell = actor->GetParentCell();
+    if (!player_cell || !actor_cell) return Status::unavailable;
+    if (actor->IsDead(false) || actor->IsDisabled() || actor->IsDeleted()) return Status::departed;
+    if (player_cell != actor_cell) {
+        if (player_cell->IsInterior() || actor_cell->IsInterior()) return Status::departed;
+        if (!player_cell->worldSpace || !actor_cell->worldSpace) return Status::unavailable;
+        if (player_cell->worldSpace != actor_cell->worldSpace) return Status::departed;
+    }
+    return actor->Get3D() ? Status::present : Status::unavailable;
+}
+
 #if !defined(SYNTH_WITH_F4SEVR)
 // Request-only player inventory capture; the caller preserves all original player facts and fences the native epoch.
 [[nodiscard]] inline std::optional<core::ActorSnapshot> selected_player_inventory(const core::ActorSnapshot& selected) {

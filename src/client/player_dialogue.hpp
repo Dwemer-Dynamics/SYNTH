@@ -9,6 +9,7 @@
 #include "input/native_microphone.hpp"
 #include "integration/external_requests.hpp"
 #include "integration/prompt_target.hpp"
+#include "runtime/fallout_runtime.hpp"
 #include "targeting/targeting.hpp"
 #include "tasks/task_lanes.hpp"
 
@@ -75,6 +76,13 @@ public:
         MicrophoneEvent event{MicrophoneEvent::none};
         bool voiced{};
     };
+
+    // One copied Auto Chat departure observation request, fenced to the watch that issued it.
+    struct AutoChatProbe final {
+        std::uint64_t watch{};
+        runtime::RuntimeConversationActorRequest actor;
+    };
+    static constexpr std::chrono::milliseconds autochat_poll_interval{250};
 
     PlayerDialogue(const config::Config& configuration, SynthClient& client, tasks::TaskLanes& control,
                    core::CancellationToken session, std::shared_ptr<diagnostics::ConversationTrace> trace,
@@ -428,6 +436,10 @@ public:
             : current;
         const auto selected = conversation_target(snapshot, controls, everyone ? nullptr : retained, nullptr);
         const auto untargeted = controls.mode == "NARRATOR" || controls.mode == "INJECTION_LOG";
+        if (intent == protocol_native::TextIntent::conversation && controls.mode == "AUTOCHAT") {
+            notify_("SYNTH /talk is not available in Auto Chat; nothing was sent");
+            return std::nullopt;
+        }
         if (intent == protocol_native::TextIntent::conversation && untargeted) {
             notify_("SYNTH /talk needs a targeted conversation mode, not " + controls.mode);
             return std::nullopt;
@@ -437,6 +449,47 @@ public:
             return std::nullopt;
         }
         return TextTurn{TextCommand::text, std::move(text), controls, intent, untargeted ? std::nullopt : selected};
+    }
+
+    // Auto Chat departure watch, game thread only: the exact actor and turn token of one successful typed/voice
+    // admission. Any later turn, Stop, load or session end cancels that token and so releases the watch.
+    void watch_autochat(const core::RuntimeSnapshot& snapshot, const protocol_native::Identity& target,
+                        const protocol_native::ControlSelection& controls, core::CancellationToken turn) {
+        if (controls.mode != "AUTOCHAT" || turn.is_cancelled() || snapshot.generation() != session_.generation()) return;
+        const auto key = actor_key(target);
+        const auto found = std::ranges::find_if(snapshot.actors(), [&](const auto& actor) { return actor_key(identity(actor)) == key; });
+        if (found == snapshot.actors().end()) return;
+        autochat_ = AutoChatWatch{++autochat_sequence_, {snapshot.generation(), found->form_id(), found->base_form_id(),
+            found->origin_plugin(), found->base_origin_plugin(), found->playthrough_id()}, std::move(turn),
+            snapshot.frame(), snapshot.captured_at()};
+    }
+
+    // Bounded cadence; `flow_idle()` is read only while a watch exists and ends it once the turn's work drains.
+    template <class FlowIdle>
+    [[nodiscard]] std::optional<AutoChatProbe> autochat_probe(core::SnapshotClock::time_point now, FlowIdle&& flow_idle) {
+        if (!autochat_) return {};
+        if (autochat_->turn.is_cancelled() || autochat_->actor.generation != session_.generation() ||
+            std::forward<FlowIdle>(flow_idle)()) {
+            autochat_.reset();
+            return {};
+        }
+        if (now < autochat_->next_poll) return {};
+        autochat_->next_poll = now + autochat_poll_interval;
+        return AutoChatProbe{autochat_->id, autochat_->actor};
+    }
+
+    // True only when the first fresh departed frame for this watch cancelled its still-owned turn.
+    // Unavailable and present samples are non-destructive; a stale probe can never cancel a replacement turn.
+    [[nodiscard]] bool observe_autochat(const AutoChatProbe& probe, const runtime::RuntimeConversationActorObservation& observed) {
+        if (!autochat_ || probe.watch != autochat_->id || observed.generation != autochat_->actor.generation ||
+            observed.generation != session_.generation() || observed.frame <= autochat_->frame ||
+            observed.captured_at < autochat_->admitted_at) return false;
+        autochat_->frame = observed.frame;
+        if (observed.status != runtime::RuntimeConversationActorStatus::departed) return false;
+        const auto turn = std::exchange(autochat_, std::nullopt)->turn;
+        if (!cancel_turn_if_owner(turn)) return false;
+        cancel_interrupted_turn();
+        return true;
     }
 
     // Retain only identity before opening the pausing UI, never the old world snapshot.
@@ -670,6 +723,15 @@ private:
         return std::move(selected.target);
     }
 
+    struct AutoChatWatch final {
+        std::uint64_t id{};
+        runtime::RuntimeConversationActorRequest actor;
+        core::CancellationToken turn;
+        std::uint64_t frame{};
+        core::SnapshotClock::time_point admitted_at{};
+        core::SnapshotClock::time_point next_poll{};
+    };
+
     const config::Config& configuration_;
     SynthClient& client_;
     tasks::TaskLanes& control_;
@@ -692,6 +754,8 @@ private:
     bool open_mic_voice_detected_{};
     bool open_mic_passive_recording_{};
     std::atomic_bool voice_active_{};
+    std::optional<AutoChatWatch> autochat_;
+    std::uint64_t autochat_sequence_{};
 };
 
 }  // namespace synth::client

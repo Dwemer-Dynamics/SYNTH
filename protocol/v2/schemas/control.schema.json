@@ -12,7 +12,7 @@
     {"if": {"properties": {"setting": {"const": "audience"}}}, "then": {"properties": {"value": {"enum": ["normal", "everyone"]}}}}
   ],
   "$defs": {
-    "mode": {"enum": ["STANDARD", "WHISPER", "CLOSE", "SHOUT", "NARRATOR", "DIRECTOR", "INJECTION_LOG", "INJECTION_CHAT", "CHEATMODE"]},
+    "mode": {"enum": ["STANDARD", "WHISPER", "CLOSE", "SHOUT", "NARRATOR", "DIRECTOR", "INJECTION_LOG", "INJECTION_CHAT", "CHEATMODE", "AUTOCHAT"]},
     "selection": {
       "type": "object", "additionalProperties": false, "required": ["mode", "model_slot"],
       "properties": {"mode": {"$ref": "#/$defs/mode"}, "model_slot": {"type": "integer", "minimum": 1, "maximum": 4}}
