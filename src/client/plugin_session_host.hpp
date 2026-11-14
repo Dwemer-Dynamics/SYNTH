@@ -75,7 +75,8 @@ public:
     [[nodiscard]] std::uint64_t request_initialize(
         Snapshot snapshot,
         runtime::GameThreadDispatcher& dispatcher, std::uint64_t save_lifetime, bool rest_events_available = false,
-        bool quest_events_available = false, bool actor_events_available = false) {
+        bool quest_events_available = false, bool actor_events_available = false,
+        bool observed_dialogue_available = false) {
         if (!snapshot) return 0;
         std::scoped_lock lock{mutex_};
         if (stopping_) return 0;
@@ -89,7 +90,8 @@ public:
             bound_save_epoch_ = save_binding.epoch;
         }
         const auto request_id = ++next_request_id_;
-        pending_ = Request{request_id, epoch_, save_lifetime, std::move(snapshot), &dispatcher, std::move(save_binding), rest_events_available, quest_events_available, actor_events_available};
+        pending_ = Request{request_id, epoch_, save_lifetime, std::move(snapshot), &dispatcher, std::move(save_binding), rest_events_available, quest_events_available, actor_events_available,
+            observed_dialogue_available};
         condition_.notify_one();
         return request_id;
     }
@@ -197,6 +199,7 @@ private:
         bool rest_events_available{};
         bool quest_events_available{};
         bool actor_events_available{};
+        bool observed_dialogue_available{};
     };
 
     // Host epoch and request id: a request invalidated or superseded after the worker popped it.
@@ -284,7 +287,8 @@ private:
                     result.session = std::make_unique<PluginSession>(
                         std::move(configuration), variant_, runtime_version_, *request->dispatcher,
                         request->snapshot->generation(), save_context_, std::move(request->save_binding),
-                        request->rest_events_available, request->quest_events_available, request->actor_events_available);
+                        request->rest_events_available, request->quest_events_available, request->actor_events_available,
+                        request->observed_dialogue_available);
                     if (request_stale(*request) || writer_lost()) {
                         retire_and_destroy(result.session);
                     } else if (!result.session->initialize(request->snapshot)) {

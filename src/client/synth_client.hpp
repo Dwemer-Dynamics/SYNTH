@@ -186,6 +186,9 @@ public:
     [[nodiscard]] bool enemy_awareness_ready() const noexcept {
         return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
     }
+    [[nodiscard]] bool observed_dialogue_ready() const noexcept {
+        return observed_dialogue_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool location_ancestry_ready() const noexcept {
         return location_ancestry_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -303,6 +306,7 @@ public:
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
             location_ancestry_negotiated_.store(false, std::memory_order_release);
+            observed_dialogue_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
             player_events_negotiated_.store(false, std::memory_order_release);
@@ -366,6 +370,11 @@ public:
                 std::ranges::find(options_.capabilities,"context.combat_targets")!=options_.capabilities.end() &&
                 std::ranges::find(options_.capabilities,"dialogue.turn_ownership")!=options_.capabilities.end(),std::memory_order_release);
             // An older server never acknowledges ancestry, so its closed world schema never receives it.
+            // Older servers and VR never acknowledge it, so no observed_dialogue key reaches a closed schema.
+            observed_dialogue_negotiated_.store(supported_init && options_.runtime_variant == "flat" &&
+                status->code.starts_with("init_") && status->code.ends_with("_accepted") && status->observed_dialogue &&
+                std::ranges::find(options_.capabilities,"context.observed_dialogue")!=options_.capabilities.end(),
+                std::memory_order_release);
             location_ancestry_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->location_ancestry &&
                 std::ranges::find(options_.capabilities,"context.location_ancestry")!=options_.capabilities.end() &&
@@ -452,7 +461,8 @@ public:
         std::string audience_observation = {},
         const std::optional<protocol_native::NativeQuestBatch>& quest_events = std::nullopt,
         const std::optional<protocol_native::NativePlayerEvent>& player_event = std::nullopt,
-        const std::optional<protocol_native::NativeActorBatch>& actor_events = std::nullopt) {
+        const std::optional<protocol_native::NativeActorBatch>& actor_events = std::nullopt,
+        const std::optional<protocol_native::NativeDialogueObservation>& observed_dialogue = std::nullopt) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id;
         std::string turn_id;
@@ -477,6 +487,8 @@ public:
                 throw std::invalid_argument{"server did not acknowledge native player event support"};
             if (actor_events && !actor_events_ready())
                 throw std::invalid_argument{"server did not acknowledge native actor event support"};
+            if (observed_dialogue && !observed_dialogue_ready())
+                throw std::invalid_argument{"server did not acknowledge observed dialogue support"};
             if (cancellation.generation().valid() && cancellation.generation().value() != generation_)
                 throw std::invalid_argument{"context owner belongs to another runtime generation"};
             if (sequence == 0) sequence = publication_sequence_ + 1;
@@ -525,7 +537,8 @@ public:
                     publication_context, playthrough_id, sequence, player, target,
                     audience, negotiated_states, negotiated_world, negotiated_quests, nearby_items, points_of_interest, loaded_context,
                     active_quests_observation, nearby_items_observation,
-                    points_of_interest_observation, audience_observation, quest_events, negotiated_player_event, actor_events);
+                    points_of_interest_observation, audience_observation, quest_events, negotiated_player_event, actor_events,
+                    observed_dialogue);
                 if (body.size() <= 1'048'576) break;
             } catch (const json::ByteLimitError&) {
                 // The bounded writer stops before allocating an oversized body. Other errors propagate.
@@ -538,7 +551,7 @@ public:
         }
         auto outcome = send_event(request_id, turn_id, generation, std::move(body),
                                   std::move(callback), true, "/main.php", {generation, 0, cancellation});
-        if ((player_event || actor_events) && outcome.status == RequestStatus::complete && !context_accepted(outcome)) {
+        if ((player_event || actor_events || observed_dialogue) && outcome.status == RequestStatus::complete && !context_accepted(outcome)) {
             outcome.status = RequestStatus::malformed_response;
             outcome.detail = "native event context acknowledgement is missing";
         }
@@ -1399,6 +1412,7 @@ private:
     std::atomic_bool combat_contacts_negotiated_{};
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
+    std::atomic_bool observed_dialogue_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};

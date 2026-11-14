@@ -2,6 +2,7 @@
 
 #include "client/actor_event_delivery.hpp"
 #include "client/actor_state_combat.hpp"
+#include "client/dialogue_observation_delivery.hpp"
 #include "client/dialogue_requests.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
@@ -119,7 +120,8 @@ public:
 
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available,
-                                                             bool companion_comments = false) {
+                                                             bool companion_comments = false,
+                                                             bool observed_dialogue_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
@@ -162,6 +164,8 @@ public:
             result.push_back("dialogue.player_reactions");
             // Advertised only for the INI opt-in, so opt-out sessions keep the previous wire contract.
             if (companion_comments) result.push_back("dialogue.companion_combat_comments");
+            // Only an audited flat sampler offers first-observed vanilla dialogue; VR never does.
+            if (observed_dialogue_available) result.push_back("context.observed_dialogue");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
         }
@@ -354,8 +358,12 @@ public:
                                          const std::optional<protocol_native::NativePlayerEvent>& player_event = std::nullopt,
                                          const std::shared_ptr<const ActorEventDelivery::Prepared>& actor_events = {},
                                          const protocol_native::ControlSelection& controls = {},
-                                         const runtime::SocialTaskDescriptor* social_pair = nullptr) {
+                                         const runtime::SocialTaskDescriptor* social_pair = nullptr,
+                                         const DialogueObservationDelivery::Prepared& observed_dialogue = {}) {
         const auto& snapshot = *owned_snapshot;
+        if (observed_dialogue && (observed_dialogue->scene != owned_snapshot || target || quest_events || player_event ||
+            actor_events || social_pair))
+            throw std::invalid_argument{"observed dialogue context does not own this scene"};
         const auto checkpoint_revision=checkpoint_.revision();
         if (actor_events && (actor_events->capture->scene!=owned_snapshot || target || quest_events || player_event ||
             actor_events->actors.empty() || actor_events->actors.size()>ActorEventDelivery::actor_capacity))
@@ -471,7 +479,13 @@ public:
             ? std::function<bool(const core::ActorSnapshot&)>{[&](const auto& actor) {
                   return actor_key(identity(actor)) == selected_actor_key;
               }} : std::function<bool(const core::ActorSnapshot&)>{};
-        if (actor_events) {
+        if (observed_dialogue) {
+            // Exactly the speaker and the witnesses granted at first observation; nobody is added later.
+            for (const auto& actor : snapshot.actors()) {
+                audience.push_back(identity(actor));
+                actor_states.push_back(make_state(actor));
+            }
+        } else if (actor_events) {
             // This audience carries exact source identities, not a new hearing/visibility or witness claim.
             for (const auto* resolved:actor_events->resolve_actor_states()) {
                 if (resolved==&snapshot.player()) continue;
@@ -559,7 +573,10 @@ public:
                                        snapshot.nearby_items_observation(), snapshot.points_of_interest_observation(),
                                        protocol_native::retained_collection_observation(
                                            snapshot.actors_observation(), snapshot.actors().size(), audience.size()), quest_events, player_event,
-                                       actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt);
+                                       actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt,
+                                       observed_dialogue ? std::optional{protocol_native::NativeDialogueObservation{
+                                           observed_dialogue->observation, observation_age_ms(*observed_dialogue->scene)}}
+                                                         : std::nullopt);
         if (!cancellation.is_cancelled() && !save_writer_current()) {
             outcome.status = RequestStatus::stale_response;
             outcome.detail = "save writer revoked";
@@ -608,6 +625,14 @@ public:
     }
 
 private:
+    // Retries keep the original capture, so the age grows; a backwards clock is a validation failure.
+    [[nodiscard]] static std::uint64_t observation_age_ms(const core::RuntimeSnapshot& scene) {
+        const auto now = core::SnapshotClock::now();
+        if (now < scene.captured_at()) throw std::invalid_argument{"observed dialogue clock moved backwards"};
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - scene.captured_at()).count());
+    }
+
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {
         return PlayerDialogue::identity(actor);
     }

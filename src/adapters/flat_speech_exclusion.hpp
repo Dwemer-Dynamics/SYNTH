@@ -74,6 +74,23 @@ public:
         return true;
     }
 
+    // Read-only corroboration for vanilla dialogue capture: the audio manager reports the actor's index-0
+    // dialogue sound as playing. Audited 1.11.240 IsPlaying (ID 2267046, RVA 162DE60): with assumeSuccess
+    // clear on a local copy it skips the cached handle state and returns the manager's tracked-sound playing
+    // flag (+24) for that sound ID. That is engine playback state, not proof of audibility or of a voice start.
+    [[nodiscard]] static bool native_dialogue_playing(RE::Actor& actor) {
+        if (!supported() || !playing_supported() || !actor.currentProcess) return false;
+        const auto* native = dialogue_handle()(actor.currentProcess, 0);
+        if (!native || native->soundID == std::numeric_limits<std::uint32_t>::max()) return false;
+        auto sound = *native;
+        sound.assumeSuccess = false;
+        sound.state = static_cast<std::uint8_t>(RE::BSSoundHandle::ASSUMED_STATE::kInitialized);
+        return playing()(&sound);
+    }
+    [[nodiscard]] static std::optional<std::uint32_t> owned_speaker() noexcept {
+        return owner_ ? std::optional{owner_->speaker.form_id} : std::nullopt;
+    }
+
 private:
     [[nodiscard]] static bool same_owner(const runtime::RuntimeSpeechOwner& a, const runtime::RuntimeSpeechOwner& b) {
         return a.generation == b.generation && a.request_id == b.request_id && a.turn_id == b.turn_id &&
@@ -108,6 +125,23 @@ private:
         return true;
     }
 
+    // Separate from supported(): an IsPlaying mismatch disables only vanilla dialogue corroboration.
+    [[nodiscard]] static bool playing_supported() {
+        if (playing_attempted_) return playing_verified_;
+        playing_attempted_ = true;
+        const auto base = REX::FModule::GetExecutingModule().GetBaseAddress();
+        constexpr std::array<unsigned char, 32> playing_entry{
+            0x40,0x53,0x48,0x83,0xEC,0x20,0x8B,0x19,0x83,0xFB,0xFF,0x74,0x27,0x80,0x79,0x04,
+            0x00,0x74,0x0D,0x80,0x79,0x05,0x01,0x0F,0x94,0xC0,0x48,0x83,0xC4,0x20,0x5B,0xC3};
+        if (playing().address() != base + 0x162DE60 ||
+            std::memcmp(reinterpret_cast<const void*>(playing().address()), playing_entry.data(), playing_entry.size()) != 0) {
+            REX::WARN("SYNTH vanilla dialogue unavailable: native dialogue playback-state ABI differs");
+            return false;
+        }
+        playing_verified_ = true;
+        return true;
+    }
+
     // No engine writes or native object resolution are needed on release/load.
     static void forget(bool discard) {
         if (owner_) REX::INFO("SYNTH speech ownership: released speaker={:08X} utterance={} stops={} discard={}",
@@ -130,11 +164,15 @@ private:
         static REL::Relocation<bool (*)(RE::BSSoundHandle*)> value{REL::ID(2267048)};
         return value;
     }
+    static REL::Relocation<bool (*)(const RE::BSSoundHandle*)>& playing() {
+        static REL::Relocation<bool (*)(const RE::BSSoundHandle*)> value{REL::ID(2267046)};
+        return value;
+    }
     static inline std::optional<runtime::RuntimeSpeechOwner> owner_;
     static inline RE::ObjectRefHandle handle_;
     static inline std::uint64_t stop_requests_{};
     static inline std::uint32_t last_sound_id_{std::numeric_limits<std::uint32_t>::max()};
-    static inline bool attempted_{}, verified_{};
+    static inline bool attempted_{}, verified_{}, playing_attempted_{}, playing_verified_{};
 };
 
 } // namespace synth::adapters

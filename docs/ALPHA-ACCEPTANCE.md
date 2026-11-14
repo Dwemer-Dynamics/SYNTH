@@ -1,5 +1,16 @@
 # SYNTH open-alpha acceptance
 
+## Vanilla dialogue witnesses
+
+- [ ] Flat in game: the load-time ABI checks pass. An eligible NPC line is admitted exactly once,
+  with only same-cell witnesses within 1000 units. Baseline, repeated, player and ineligible
+  lines are not admitted. Load and main menu discard pending captures.
+- [ ] Provider prompt probe: witnesses' ordinary and `/talk` answers reflect the line and
+  non-witnesses' answers do not.
+- [ ] VR: builds, but capture is unavailable; implement and verify separately.
+
+See [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md). No gameplay or deployment proof.
+
 ## NPC biography and actor stats
 
 - [ ] Flat in game: compare all seven SPECIAL base/current values with the next provider request, including an older-save load.

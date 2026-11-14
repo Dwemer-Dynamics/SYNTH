@@ -5,6 +5,7 @@
 #include "core/enemy_awareness.hpp"
 #include "core/quest_event_mailbox.hpp"
 #include "core/player_event_sampler.hpp"
+#include "core/event_witness.hpp"
 #include "client/actor_event_binding.hpp"
 #include "runtime/social_task_codec.hpp"
 
@@ -127,6 +128,11 @@ struct NativeActorBatch {
     std::uint64_t serial{}, age_ms{};
     std::shared_ptr<const client::BoundActorEventScene> capture;
 };
+// One first-observed vanilla line with its immutable witness grant; age is first observation to encoding.
+struct NativeDialogueObservation {
+    core::DialogueObservation observation;
+    std::uint64_t age_ms{};
+};
 struct NearbyItemState {
     std::string reference_id, base_form_id, cell_form_id;
     std::optional<std::string> reference_origin_plugin;
@@ -176,7 +182,7 @@ struct Dialogue {
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
 };
-struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}; };
+struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -438,7 +444,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -451,7 +457,8 @@ inline Line decode_line(std::string_view wire) {
             payload.find("actor_stats") ? required(payload,"actor_stats").as_bool() : false,
             payload.find("companion_combat_comments") ? required(payload,"companion_combat_comments").as_bool() : false,
             payload.find("location_ancestry") ? required(payload,"location_ancestry").as_bool() : false,
-            payload.find("private_narrator") ? required(payload,"private_narrator").as_bool() : false};
+            payload.find("private_narrator") ? required(payload,"private_narrator").as_bool() : false,
+            payload.find("observed_dialogue") ? required(payload,"observed_dialogue").as_bool() : false};
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -1202,6 +1209,42 @@ inline json::Value actor_events_value(const NativeActorBatch& batch,const EventC
     return json::Value{object({{"batch_id","actor:"+std::to_string(batch.serial)},{"age_ms",batch.age_ms},{"events",std::move(events)}})};
 }
 
+// Speaker, INFO and text are copied source evidence; witnesses are granted once at first observation
+// under the named policy. Neither field is a voice-start, line-of-sight or hearing claim.
+inline json::Value observed_dialogue_value(const NativeDialogueObservation& value, const EventContext& context,
+                                           const Identity& player) {
+    const auto& observed = value.observation;
+    if (!observed.valid() || value.age_ms > core::RuntimeGeneration::maximum_wire_value ||
+        context.protocol_version != 2 || context.runtime_variant != "flat" ||
+        observed.line.speaker.playthrough_id != player.playthrough_id ||
+        std::ranges::find(context.capabilities, "context.observed_dialogue") == context.capabilities.end())
+        throw std::invalid_argument{"invalid or unnegotiated observed dialogue"};
+    const auto form = [](std::uint32_t id) { char text[11]{}; std::snprintf(text, sizeof(text), "0x%08X", id); return std::string{text}; };
+    const auto reference = [&](std::uint32_t id, const std::string& plugin) {
+        return json::Value{object({{"form_id", form(id)}, {"origin_plugin", plugin}})};
+    };
+    const auto actor = [&](const core::WitnessIdentity& identity) {
+        return identity_value(Identity{form(identity.form_id), identity.origin_plugin, identity.playthrough_id, identity.display_name});
+    };
+    const auto& evidence = observed.witnesses;
+    json::Value::Array witnesses;
+    for (const auto& witness : evidence.actors) witnesses.emplace_back(actor(witness));
+    return json::Value{object({
+        {"observation_id", "dialogue:" + std::to_string(observed.serial)},
+        {"source", "flat_subtitle_selection"},
+        {"speaker", actor(observed.line.speaker)},
+        {"topic_info", reference(observed.line.topic_info_form_id, observed.line.topic_info_plugin)},
+        {"text", observed.line.text},
+        {"witnesses", json::Value{object({
+            {"basis", std::string{core::EventWitnessSet::basis}},
+            {"policy", std::string{core::EventWitnessSet::policy}},
+            {"frame", evidence.frame}, {"game_time_ticks", evidence.game_time_ticks}, {"age_ms", value.age_ms},
+            {"scene", json::Value{object({
+                {"cell", reference(evidence.scene.cell_form_id, evidence.scene.cell_origin_plugin)},
+                {"worldspace", evidence.interior ? json::Value{nullptr}
+                    : reference(evidence.scene.worldspace_form_id, evidence.scene.worldspace_origin_plugin)}})}},
+            {"actors", std::move(witnesses)}})}}})};
+}
 inline std::string encode_context(const EventContext& context, std::string playthrough_id,
                                   std::uint64_t sequence, const Identity& player,
                                   const std::optional<Identity>& target,
@@ -1218,7 +1261,8 @@ inline std::string encode_context(const EventContext& context, std::string playt
                                   std::string audience_observation = {},
                                   const std::optional<NativeQuestBatch>& quest_events = std::nullopt,
                                   const std::optional<NativePlayerEvent>& player_event = std::nullopt,
-                                  const std::optional<NativeActorBatch>& actor_events = std::nullopt) {
+                                  const std::optional<NativeActorBatch>& actor_events = std::nullopt,
+                                  const std::optional<NativeDialogueObservation>& observed_dialogue = std::nullopt) {
     if (quest_events && (context.protocol_version != 2 || context.runtime_variant != "flat" ||
         std::ranges::find(context.capabilities, "context.quest_events") == context.capabilities.end()))
         throw std::invalid_argument{"native quest batches require negotiated v2 flat capability"};
@@ -1236,6 +1280,7 @@ inline std::string encode_context(const EventContext& context, std::string playt
     if (quest_events) payload.emplace_back("quest_events", quest_events_value(*quest_events, sequence));
     if (actor_events) payload.emplace_back("actor_events",actor_events_value(*actor_events,context,player));
     if (player_event) payload.emplace_back("player_event", player_event_value(*player_event, context, player));
+    if (observed_dialogue) payload.emplace_back("observed_dialogue", observed_dialogue_value(*observed_dialogue, context, player));
     if (loaded_context) payload.emplace_back("loaded_context", json::Value{object({
         {"playthrough_id", loaded_context->playthrough_id}, {"session_id", loaded_context->session_id},
         {"generation", loaded_context->generation}, {"context_sequence", loaded_context->context_sequence}})});

@@ -1,5 +1,13 @@
 # SYNTH developer handoff
 
+## Vanilla dialogue witnesses candidate
+
+Flat-only `context.observed_dialogue` grants canonical witnesses for a vanilla NPC line at the
+first sampled observation (policy `same_cell_speaker_radius_1000_v1`). It does not prove a voice
+start or audibility. VR does not offer it. Native tests, protocol fixtures and the flat and VR x64
+builds pass. Packaging validation is blocked by missing generated wait-script output. There is no game run, no provider prompt probe and no migration. See
+[VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md).
+
 ## NPC biography and SPECIAL candidate
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).

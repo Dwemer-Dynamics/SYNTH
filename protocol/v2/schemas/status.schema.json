@@ -48,6 +48,9 @@
     },
     "private_narrator": {
       "type": "boolean"
+    },
+    "observed_dialogue": {
+      "type": "boolean"
     }
   }
 }
