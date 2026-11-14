@@ -33,6 +33,7 @@
 #include "adapters/flat_speech_exclusion.hpp"
 #include "adapters/commonlib_speech_facing.hpp"
 #include "adapters/flat_menu_pause.hpp"
+#include "adapters/flat_readable_notes.hpp"
 #include "adapters/native_fault_recorder.hpp"
 #include "ui/menu_framework_ui.hpp"
 #include "ui/settings_store.hpp"
