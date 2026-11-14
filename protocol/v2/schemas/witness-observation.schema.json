@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/witness-observation.schema.json",
+  "title": "Canonical witnesses granted once at the first qualified observation; not voice-start, line-of-sight or hearing proof",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "basis",
+    "policy",
+    "frame",
+    "game_time_ticks",
+    "age_ms",
+    "scene",
+    "actors"
+  ],
+  "properties": {
+    "basis": {
+      "const": "first_observed"
+    },
+    "policy": {
+      "enum": [
+        "same_cell_speaker_radius_1000_v1"
+      ]
+    },
+    "frame": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "game_time_ticks": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "age_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cell",
+        "worldspace"
+      ],
+      "properties": {
+        "cell": {
+          "$ref": "#/$defs/reference"
+        },
+        "worldspace": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/reference"
+            }
+          ]
+        }
+      }
+    },
+    "actors": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/actor"
+      }
+    }
+  },
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "origin_plugin"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$",
+          "not": {
+            "pattern": "^0x(?:00000000|[Ff]{8})$"
+          }
+        },
+        "origin_plugin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "origin_plugin",
+        "playthrough_id",
+        "display_name"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$",
+          "not": {
+            "pattern": "^0x(?:00000000|00000014|[Ff]{2}[0-9A-Fa-f]{6})$"
+          }
+        },
+        "origin_plugin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+        },
+        "playthrough_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    }
+  }
+}

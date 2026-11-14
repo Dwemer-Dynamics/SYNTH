@@ -723,6 +723,35 @@
           },
           "payload": {
             "required": [
+              "observed_dialogue"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "capabilities": {
+            "contains": {
+              "const": "context.observed_dialogue"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
               "actor_events"
             ]
           }

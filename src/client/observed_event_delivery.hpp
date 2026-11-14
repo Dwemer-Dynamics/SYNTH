@@ -2,6 +2,7 @@
 
 #include "client/actor_event_delivery.hpp"
 #include "client/context_publication.hpp"
+#include "client/dialogue_observation_delivery.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
 #include "client/synth_client.hpp"
@@ -75,6 +76,7 @@ public:
         core::RuntimeVariant variant;
         bool quest_events_available;
         bool actor_events_available;
+        bool observed_dialogue_available;
         Busy busy;
         CurrentTurn current_turn;
         Notify notify;
@@ -99,6 +101,8 @@ public:
           quest_events_{dependencies.quest_events},
           actor_events_enabled_{dependencies.variant == core::RuntimeVariant::flat && dependencies.actor_events_available},
           actor_events_{client_.runtime_session_id(),session_.generation()},
+          observed_dialogue_enabled_{dependencies.variant == core::RuntimeVariant::flat && dependencies.observed_dialogue_available},
+          dialogue_observations_{session_.generation()},
           player_events_{session_.generation(), dependencies.variant} {
         if (!busy_ || !current_turn_ || !notify_)
             throw std::invalid_argument{"observed event delivery requires busy, turn and notification sinks"};
@@ -115,6 +119,7 @@ public:
         clear_enemy_awareness();
         quest_events_.stop();
         actor_events_.stop();
+        dialogue_observations_.stop();
     }
 
     void clear_enemy_awareness() noexcept {
@@ -221,6 +226,55 @@ public:
                 } catch (const std::exception&) {
                     if (!actor_event_failure_reported_.exchange(true,std::memory_order_acq_rel))
                         notify_("SYNTH actor event delivery failed; retaining original capture for retry");
+                }
+            }));
+    }
+
+    [[nodiscard]] bool observed_dialogue_ready() const noexcept {
+        return observed_dialogue_enabled_ && client_.observed_dialogue_ready() && !terminal_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool observed_dialogue_capture_ready() const noexcept { return observed_dialogue_ready() && !dialogue_observations_.full(); }
+    [[nodiscard]] std::uint64_t dropped_observed_dialogue() const noexcept { return dialogue_observations_.dropped(); }
+    // Game pump only: one serial per first observation of this session, consumed even if capture fails.
+    [[nodiscard]] std::uint64_t next_observed_dialogue_serial() noexcept { return ++observed_dialogue_serial_; }
+    [[nodiscard]] bool observe_dialogue(DialogueObservationDelivery::Prepared capture) {
+        return observed_dialogue_capture_ready() && dialogue_observations_.enqueue(std::move(capture));
+    }
+
+    // Same delivery rules as actor events: only a complete exact ACK or a definitive rejection retires the capture.
+    void pump_observed_dialogue() {
+        if (!observed_dialogue_ready() || !dialogue_observations_.pending() || paused_.load(std::memory_order_acquire) ||
+            busy_() || observed_dialogue_tasks_.load(std::memory_order_acquire)!=0) return;
+        const auto now=tasks::TaskLanes::Clock::now();
+        if (now<next_observed_dialogue_attempt_) return;
+        next_observed_dialogue_attempt_=now+std::chrono::seconds{5};
+        (void)network_.try_submit("network",tasks::TaskClass::background,
+            now+std::chrono::milliseconds{request_timeout_ms()},current_turn_(),
+            tasks::TaskLanes::track_activity(observed_dialogue_tasks_,[this](const core::CancellationToken& cancellation) {
+                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                    paused_.load(std::memory_order_acquire)) return;
+                DialogueObservationDelivery::Prepared capture;
+                try {
+                    capture=dialogue_observations_.prepare();if (!capture) return;
+                    const auto context_turn=client_.begin_context_turn();
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    const auto result=context_.publish(capture->scene,std::nullopt,cancellation,nullptr,std::nullopt,std::nullopt,
+                        {},{},nullptr,capture);
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    if (result.status==RequestStatus::complete) {
+                        (void)dialogue_observations_.finish(capture,true);observed_dialogue_failure_reported_.store(false,std::memory_order_release);
+                    } else if (result.status==RequestStatus::http_failure && result.http_status>=400 &&
+                        result.http_status<500 && result.http_status!=408 && result.http_status!=429) {
+                        (void)dialogue_observations_.finish(capture,false);
+                        notify_("SYNTH observed dialogue rejected; check logs");
+                    } else if (!observed_dialogue_failure_reported_.exchange(true,std::memory_order_acq_rel))
+                        notify_("SYNTH observed dialogue not acknowledged; retaining original capture for retry");
+                } catch (const std::invalid_argument&) {
+                    (void)dialogue_observations_.finish(capture,false);
+                    notify_("SYNTH observed dialogue failed validation and was not sent");
+                } catch (const std::exception&) {
+                    if (!observed_dialogue_failure_reported_.exchange(true,std::memory_order_acq_rel))
+                        notify_("SYNTH observed dialogue delivery failed; retaining original capture for retry");
                 }
             }));
     }
@@ -392,6 +446,12 @@ private:
     std::atomic_size_t actor_event_tasks_{};
     std::atomic_bool actor_event_failure_reported_{};
     tasks::TaskLanes::Deadline next_actor_event_attempt_{};
+    const bool observed_dialogue_enabled_;
+    DialogueObservationDelivery dialogue_observations_;
+    std::atomic_size_t observed_dialogue_tasks_{};
+    std::atomic_bool observed_dialogue_failure_reported_{};
+    tasks::TaskLanes::Deadline next_observed_dialogue_attempt_{};
+    std::uint64_t observed_dialogue_serial_{};
     core::PlayerEventSampler player_events_;
     std::optional<core::CancellationSource> player_event_owner_;
     core::SnapshotClock::time_point next_player_event_attempt_{};

@@ -17,6 +17,7 @@
 #include "adapters/flat_pickup_package.hpp" // Compile preparation only; pickup installation/dispatch remains disabled.
 #include "adapters/flat_pickup_inspection.hpp" // Read-only preparation; not a pickup capability.
 #include "adapters/flat_actor_event_capture.hpp"
+#include "adapters/flat_vanilla_dialogue.hpp"
 #include "adapters/commonlib_actions.hpp"
 #include "adapters/commonlib_capture.hpp"
 #include "adapters/commonlib_external_requests.hpp"
@@ -60,6 +61,10 @@ std::unique_ptr<synth::client::PluginSessionHost> session_host;
 std::unique_ptr<synth::client::ActorEventSceneBinder> actor_event_binder;
 std::uint64_t actor_event_epoch{};
 std::uint64_t actor_event_binding_losses{};
+// Game-pump-owned residency for the first-observed vanilla dialogue sampler; re-armed per session and generation.
+synth::core::DialogueResidencyTracker vanilla_dialogue_tracker;
+const void* vanilla_dialogue_session{};
+std::uint64_t vanilla_dialogue_generation{}, vanilla_dialogue_epoch{}, vanilla_dialogue_losses{};
 synth::core::PlayerInventoryRefresh player_inventory_refresh;
 std::uint64_t inventory_change_revision{};
 std::uint64_t pending_session_request{};
@@ -340,6 +345,7 @@ void retire_session(bool discard_speech = false) noexcept {
     synth::adapters::FlatInventoryChanges::invalidate();
     inventory_change_revision = 0;
     player_inventory_refresh = {};
+    vanilla_dialogue_tracker.invalidate();vanilla_dialogue_session=nullptr;
     synth::adapters::FlatActorEvents::invalidate();
     actor_event_binder.reset();actor_event_epoch=0;
     synth::adapters::FlatQuestEvents::invalidate();
@@ -399,7 +405,7 @@ void queue_session_initialization(
     }
     pending_session_request = session_host->request_initialize(snapshot, *dispatcher, lifetime,
         synth::adapters::FlatRestEvents::available(), synth::adapters::FlatQuestEvents::available(),
-        synth::adapters::FlatActorEvents::available());
+        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported());
     if (pending_session_request != 0) {
         REX::INFO("SYNTH runtime: session initialization queued off the game thread");
     }
@@ -794,6 +800,50 @@ void pump_runtime_impl() {
                 REX::WARN("SYNTH actor observation losses: native {}, unresolved {}, binding {}, delivery {}",current[0],current[1],current[2],current[3]);
             }
         }
+        trace_pump_phase("vanilla dialogue");
+        if (!session->observed_dialogue_ready()) {
+            vanilla_dialogue_tracker.invalidate();vanilla_dialogue_session=nullptr;
+        } else {
+            const auto* owner_session=session.get();const auto generation=runtime->generation();
+            if (vanilla_dialogue_session!=owner_session || vanilla_dialogue_generation!=generation.value()) {
+                vanilla_dialogue_session=owner_session;vanilla_dialogue_generation=generation.value();
+                vanilla_dialogue_tracker.arm(++vanilla_dialogue_epoch);
+            }
+            // At most one read lease per pump; the witness scan and scene capture run only on a new eligible line.
+            const auto sample=synth::adapters::FlatVanillaDialogue::sample();
+            const auto owner=vanilla_dialogue_tracker.owner();
+            using Status=synth::adapters::FlatVanillaDialogue::Status;
+            if (sample.status==Status::absent) vanilla_dialogue_tracker.absent(owner);
+            else if (sample.status==Status::excluded) vanilla_dialogue_tracker.excluded(owner);
+            else if (sample.status==Status::present && vanilla_dialogue_tracker.present(owner,sample.line) && sample.eligible) {
+                const auto serial=session->next_observed_dialogue_serial();
+                bool accepted=false;
+                if (session->observed_dialogue_capture_ready()) {
+                    auto granted=synth::adapters::FlatVanillaDialogue::witnesses(sample.line);
+                    auto scene=granted ? runtime->capture_snapshot(now,synth::runtime::RuntimeCapturePurpose::actor_events) : nullptr;
+                    // Capture can re-enter lifecycle callbacks; a superseded owner keeps nothing.
+                    if (session.get()!=owner_session || runtime->generation()!=generation) return;
+                    // Witnesses keep the cell copied at collection; a different capture scene or epoch grants nothing.
+                    if (scene && vanilla_dialogue_tracker.owner()==owner && scene->generation()==generation &&
+                        scene->world() && scene->world()->scene && *scene->world()->scene==granted->scene &&
+                        scene->world()->interior==granted->interior &&
+                        scene->player().playthrough_id()==granted->line.speaker.playthrough_id) {
+                        try {
+                            auto capture=std::make_shared<synth::client::DialogueObservationDelivery::Capture>();
+                            capture->observation={serial,granted->line,{granted->scene,granted->interior,
+                                scene->frame(),scene->game_time_ticks(),granted->witnesses}};
+                            capture->scene=std::make_shared<const synth::core::RuntimeSnapshot>(
+                                scene->with_event_actors(std::move(granted->actors)));
+                            accepted=session->observe_dialogue(std::move(capture));
+                        } catch (const std::invalid_argument&) {}
+                    }
+                }
+                if (!accepted) ++vanilla_dialogue_losses;
+                REX::INFO("SYNTH vanilla dialogue: first observation {} speaker {:08X} info {:08X} admitted {} losses {}",
+                    serial,sample.line.speaker.form_id,sample.line.topic_info_form_id,accepted,vanilla_dialogue_losses);
+            }
+        }
+        session->pump_observed_dialogue();
         if (!menu_mode && session->player_event_sample_due(now)) {
             trace_pump_phase("player event sample");
             const auto* owner_session = session.get();

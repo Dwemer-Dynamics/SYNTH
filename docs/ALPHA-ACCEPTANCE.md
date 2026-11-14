@@ -18,6 +18,24 @@ microphone or in a headset.
 - [ ] VR in headset: select Everyone in the dashboard, press SYNTH Control, confirm the audience notification, then repeat
   the voice checks with room-scale movement (fresh HMD pose, body-range anchor).
 - [ ] With the paired server: one reply only, captured hearers and their history; no witness replies.
+- [ ] Combined with vanilla dialogue witnesses: these results and the witness results below predate that merge;
+  rerun both on the combined pair.
+
+## Vanilla dialogue witnesses
+
+- [ ] Flat in game: the load-time ABI checks pass. An eligible NPC line is admitted exactly once,
+  with only same-cell witnesses within 1000 units. Baseline, repeated, player and ineligible
+  lines are not admitted. Load and main menu discard pending captures.
+- [ ] Flat in game, manual: a voiced line whose audio starts after its subtitle is still captured,
+  and fast multi-speaker scenes show how many lines the delivery cadence and 4-capture queue drop.
+- [x] Disposable loopback prompt check (fake provider, synthetic state): the line reaches the
+  granted witness's ordinary and `/talk` prompts once each, and never a non-witness, a same-name
+  actor or a save loaded from before the observation.
+- [ ] Model answers: witnesses' ordinary and `/talk` answers reflect the line and non-witnesses'
+  answers do not.
+- [ ] VR: builds, but capture is unavailable; implement and verify separately.
+
+See [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md). No gameplay or deployment proof.
 
 ## NPC biography and actor stats
 

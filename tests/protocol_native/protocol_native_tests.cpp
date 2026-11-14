@@ -223,6 +223,34 @@ void enemy_awareness_tests() {
     state.enemy_awareness->current.clear();(void)encode(envelope,state);
 }
 
+// First-observed vanilla dialogue: mirrored wire shape, negotiated only, and the speaker is never a witness.
+void observed_dialogue_tests(const std::string& root) {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    std::ifstream in{root+"/protocol/v2/fixtures/valid/context-observed-dialogue.json"};
+    const auto fixture=json::parse(std::string{std::istreambuf_iterator<char>{in},{}});
+    const core::WitnessIdentity piper{0x2F1E,"Fallout4.esm","save-001","Piper"},preston{0x1A4D7,"Fallout4.esm","save-001","Preston Garvey"};
+    protocol_native::NativeDialogueObservation observed{{1,{piper,0xF1A2B,"Fallout4.esm","Diamond City's finest paper. Get it while it's hot."},
+        {{0x1F2A3,0,"Fallout4.esm",""},true,4411,834000000123,{preston}}},35};
+    protocol_native::EventContext context{"session-flat-001","request-context-dialogue-001","turn-context-dialogue-001","flat","0.1.0","1.11.240",7,
+        {"context.observed_dialogue"},2,0};
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm","save-001","Sole Survivor"};
+    require(json::write(protocol_native::observed_dialogue_value(observed,context,player))==
+        json::write(protocol_native::required(protocol_native::required(fixture,"payload"),"observed_dialogue")),
+        "observed dialogue does not match the mirrored fixture");
+    const auto rejected=[&](protocol_native::NativeDialogueObservation value,protocol_native::EventContext owner){
+        try{(void)protocol_native::observed_dialogue_value(value,owner,player);}catch(const std::invalid_argument&){return true;}
+        return false;};
+    auto unnegotiated=context;unnegotiated.capabilities.clear();
+    auto vr=context;vr.runtime_variant="vr";
+    auto speaker_witness=observed;speaker_witness.observation.witnesses.actors.push_back(piper);
+    auto late=observed;late.observation.witnesses.actors.assign(9,preston);
+    require(rejected(observed,unnegotiated) && rejected(observed,vr) && rejected(speaker_witness,context) && rejected(late,context),
+        "unnegotiated, VR, speaker-as-witness or unbounded observation was encoded");
+    const auto status=protocol_native::decode_line(R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"code":"init_accepted","observed_dialogue":true},"context_sequence":0})");
+    require(std::get<protocol_native::Status>(status.payload).observed_dialogue,"observed_dialogue ACK lost");
+}
+
 // Native-turn receipts: exact owner encoding, first terminal outcome only, bounded copy-only outbox.
 void native_turn_receipt_tests(const std::string& root) {
     using namespace synth;
@@ -326,6 +354,7 @@ int main(int argc,char** argv){
   actor_stats_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
+  if(argc==2) observed_dialogue_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};
