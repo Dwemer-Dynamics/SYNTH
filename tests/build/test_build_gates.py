@@ -942,6 +942,23 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         drain = delivery.split("void flush_speech_receipts(", 1)[1].split("void queue_speech(", 1)[0]
         self.assertIn("exchange_speech_receipt(client_, value, cancellation, terminal_, heard_receipt_);", drain)
         self.assertIn("return speech_receipt_hook(speech_receipts_, line, dialogue, client_.native_turn_ready());", delivery)
+        # Ordinary delivery receipts: only an explicitly marked line gets a hook, with the snapshot's canonical player,
+        # and only the exchanged (validated) outcome settles a gated rechat parent.
+        hook = delivery.split("TerminalHook receipt_hook(", 1)[1].split("std::optional<bool> receipt_settled(", 1)[0]
+        self.assertLess(hook.index("if (dialogue.receipt_required)"), hook.index("ordinary_speech_receipt_hook(speech_receipts_, line, dialogue, wire_identity(snapshot->player()),"))
+        self.assertIn("client_.delivery_receipts_ready()", hook)
+        self.assertLess(drain.index("exchange_speech_receipt(client_, value, cancellation, terminal_, heard_receipt_);"),
+                        drain.index("speech_receipts_->settle(value, exchange.heard);"))
+        ordinary = receipts.split("ordinary_speech_receipt_hook(", 1)[1].split("accepted_receipt_state(", 1)[0]
+        self.assertIn("!dialogue.receipt_required", ordinary)
+        self.assertIn("if (!dialogue->receipt_required) context_.note_dialogue_history(snapshot->variant(), cancellation);", session)
+        # A dispatched player input raises its own possible-history frontier from the exact input outcome.
+        requests = read("src/client/dialogue_requests.hpp")
+        self.assertEqual(requests.count("input_outcome_(outcome);"), 2)
+        self.assertIn("context_.note_possible_input_history(*possible, cancellation_.token());", session)
+        rechat = read("src/client/rechat_continuation.hpp")
+        self.assertIn("pending_->receipt_gated = said && said->receipt_required && client_.delivery_receipts_ready();", rechat)
+        self.assertIn("speech_.receipt_settled(rechat.binding.generation, rechat.parent.request_id,", rechat)
         self.assertNotIn("send_speech_receipt(", delivery)
         self.assertIn("context_.note_heard_receipt(generation, cancellation);", session)
         # The loopback driver runs the same shared receipt path and checkpoint, never a copied facsimile.
@@ -1011,7 +1028,7 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         promote = rechat.split('bool promote_playing_parent() {', 1)[1].split('bool pump_delivered_parent(', 1)[0]
         self.assertIn('playing->caption == pending_->caption && pending_->response_complete', promote)
         self.assertIn('return actions_.while_idle([&] {', promote)
-        self.assertIn('if (!capture_ && pending_ && playing &&', promote)
+        self.assertIn('if (!capture_ && pending_ && !pending_->receipt_gated && playing &&', promote)
         self.assertIn('if (rechat_.pump_prefetched()) return;', session)
         self.assertIn('if (rechat_.promote_playing_parent()) return;', session)
         self.assertIn('return actions_.try_while_idle([&] {', rechat)

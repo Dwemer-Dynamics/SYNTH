@@ -124,6 +124,7 @@ public:
                                                              bool observed_dialogue_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
+            "dialogue.delivery_receipts",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
@@ -339,6 +340,10 @@ public:
 
     void note_heard_receipt(std::uint64_t generation, const core::CancellationToken& cancellation) {
         checkpoint_.note_heard_receipt(generation, cancellation);
+    }
+
+    void note_possible_input_history(std::uint64_t generation, const core::CancellationToken& cancellation) {
+        checkpoint_.note_possible_input_history(generation, cancellation);
     }
 
     void note_wait_outcome(const core::CancellationToken& cancellation) { checkpoint_.note_wait_outcome(cancellation); }

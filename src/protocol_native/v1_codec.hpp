@@ -181,11 +181,13 @@ struct Dialogue {
     std::optional<Speech> speech;
     std::optional<Identity> listener;
     bool native_turn{}; // Explicit server marker: this line is a receipt-owned native-turn utterance.
+    // Explicit server marker: this ordinary NPC line was enrolled for a delivery receipt (dialogue.delivery_receipts).
+    bool receipt_required{};
 };
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -371,7 +373,7 @@ inline Line decode_line(std::string_view wire) {
         line.payload=Start{text(payload,"server_version")};
     }
     else if(type=="dialogue") {
-        if (version == 2) closed_object(payload, {"speaker", "text", "media", "speech", "listener", "native_turn"});
+        if (version == 2) closed_object(payload, {"speaker", "text", "media", "speech", "listener", "native_turn", "receipt_required"});
         else closed_object(payload, {"speaker", "text", "media", "speech"});
         Dialogue d{speaker(required(payload,"speaker")), text(payload,"text"), std::nullopt,
                    std::nullopt};
@@ -381,6 +383,11 @@ inline Line decode_line(std::string_view wire) {
             if(!marker->as_bool() || !std::holds_alternative<Identity>(d.speaker))
                 throw std::invalid_argument{"native_turn marker requires an identified speaker"};
             d.native_turn=true;
+        }
+        if(const auto* marker=payload.find("receipt_required")) {
+            if(!marker->as_bool() || d.native_turn || line.context_sequence==0 || !std::holds_alternative<Identity>(d.speaker))
+                throw std::invalid_argument{"receipt_required marker requires a bound ordinary NPC line"};
+            d.receipt_required=true;
         }
         if (const auto* listener=payload.find("listener")) {
             d.listener=identity(*listener);
@@ -447,7 +454,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -470,6 +477,8 @@ inline Line decode_line(std::string_view wire) {
                 throw std::invalid_argument{"invalid control audience"};
             std::get<Status>(line.payload).control_audience = ControlAudience{intent == "everyone", epoch};
         }
+        if (payload.find("delivery_receipts"))
+            std::get<Status>(line.payload).delivery_receipts = required(payload, "delivery_receipts").as_bool();
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -914,7 +923,9 @@ inline std::string encode_speech_receipt(const EventContext& context, const Spee
     const auto prefix = receipt.dialogue_request_id + ":dialogue:";
     const auto ordinal = receipt.line_id.size() > prefix.size() && receipt.line_id.starts_with(prefix)
         ? std::string_view{receipt.line_id}.substr(prefix.size()) : std::string_view{};
-    if (context.protocol_version != 2 || !has("dialogue.native_turn") || !has("dialogue.turn_ownership") ||
+    // Either receipt contract owns a line receipt: /talk (native_turn) or ordinary NPC delivery receipts.
+    if (context.protocol_version != 2 || (!has("dialogue.native_turn") && !has("dialogue.delivery_receipts")) ||
+        !has("dialogue.turn_ownership") ||
         !runtime::social_id(receipt.dialogue_request_id) || receipt.line_id.size() > 160 || ordinal.empty() || ordinal.size() > 6 ||
         ordinal.front() == '0' || !std::ranges::all_of(ordinal, [](char value) { return value >= '0' && value <= '9'; }) ||
         !placed_reference_form(receipt.character.form_id) || receipt.character.origin_plugin.empty() ||

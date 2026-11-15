@@ -98,6 +98,35 @@ lines are never heard. The client sends `audio_completed` only after native audi
 finishes. The reading timer is not renderer evidence, so the client never sends
 `text_presented` in this slice. Receipts are not retried.
 
+## Ordinary NPC delivery receipts
+
+`dialogue.delivery_receipts` is optional, requires v2 and `dialogue.turn_ownership`
+and is independent of `dialogue.native_turn`. Only the init whose status carries
+`delivery_receipts: true` grants it; flat and VR may both ask. It never selects the
+`/talk` route: unmarked typed text, server-transcribed voice, action results and
+owned rechat keep their existing pipelines.
+
+For such an origin that carries the capability, the server may mark one emitted
+NPC `dialogue` line with `payload.receipt_required: true`. The marker is present
+only when the final routed line (its exact bytes and hash, speaker, listener and
+text) and a generated utterance for it were stored in one transaction. The line's
+speech `utterance_id` may differ from its `line_id`. Ordinary enrollment requires
+speech that is pending or ready when routed. Known text-only or failed speech
+keeps emission-time history. If enrolled speech fails later, the line remains
+unheard unless a valid presentation receipt commits. Narrator lines, generated player speech (`speech_role` player, including
+Auto Chat, whose accepted input stays `received`), the captured player, `/talk`
+lines, unregistered identities and dynamic `0xFF` references are never marked and
+keep the existing emission-time history. A marked line has no history until an
+accepted receipt: the client reports it with the existing `speech_receipt`, using
+either receipt contract's capability, and only `spoken` or `presented` adds one
+heard history row. Its text, speaker label, listener, mode, scene and hearers come
+from the stored line and its origin, never from the receipt or the live scene.
+Owned rechat may reserve a continuation of an enrolled parent only after that
+exact line has an accepted heard receipt. The client also waits for that receipt.
+An accepted receipt survives cancellation. Cancellation can revoke a pending
+line before its first receipt commits. The marker is rejected without a bound identified speaker or
+together with `native_turn`. Older clients and servers see no change.
+
 ## Player caps payment contract foundation (2026-09-08)
 
 The flat client advertises this contract and requires its own acknowledgement

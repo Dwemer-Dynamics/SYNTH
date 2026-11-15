@@ -166,7 +166,7 @@ public:
             holds.add(facing->speaker,cancellation);
             holds.add(facing->listener,cancellation);
         }
-        auto on_terminal = private_terminal ? std::move(private_terminal) : receipt_hook(line, dialogue);
+        auto on_terminal = private_terminal ? std::move(private_terminal) : receipt_hook(line, dialogue, snapshot);
         return std::make_shared<const presentation::DialogueCaption>(presentation::DialogueCaption{
             .generation = line.generation,
             .speaker = std::visit([](const auto& value) {
@@ -208,9 +208,20 @@ public:
         flush_speech_receipts(generation);
     }
 
-    // Terminal caption hook for native v2 turns. Only completed native audio becomes audio_completed.
-    [[nodiscard]] TerminalHook receipt_hook(const protocol_native::Line& line, const protocol_native::Dialogue& dialogue) {
+    // Terminal caption hook for native v2 turns and enrolled ordinary NPC lines (receipt_required, with the
+    // response snapshot's canonical player). Only completed native audio becomes audio_completed.
+    [[nodiscard]] TerminalHook receipt_hook(const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
+                                            const Snapshot& snapshot = {}) {
+        if (dialogue.receipt_required)
+            return snapshot ? ordinary_speech_receipt_hook(speech_receipts_, line, dialogue, wire_identity(snapshot->player()),
+                client_.delivery_receipts_ready()) : TerminalHook{};
         return speech_receipt_hook(speech_receipts_, line, dialogue, client_.native_turn_ready());
+    }
+
+    // Rechat release gate for an enrolled parent line: its exchanged receipt outcome, nullopt until then.
+    [[nodiscard]] std::optional<bool> receipt_settled(std::uint64_t generation, const std::string& request_id,
+                                                      const std::string& line_id) const {
+        return speech_receipts_->settled(generation, request_id, line_id);
     }
 
     // Text-only and failed speech go straight to captions; ready/pending speech joins the ordered lane.
@@ -254,7 +265,7 @@ private:
         auto lease = SpeechReceiptOutbox::try_begin_drain(speech_receipts_);
         if (!lease) return;
         auto pending = speech_receipts_->take(generation);
-        if (pending.empty() || !client_.native_turn_ready()) return;
+        if (pending.empty() || (!client_.native_turn_ready() && !client_.delivery_receipts_ready())) return;
         const auto deadline = tasks::TaskLanes::Clock::now() + std::chrono::seconds{10};
         (void)network_.try_submit("network", tasks::TaskClass::background, deadline, session_,
             [this, lease = std::move(lease), pending = std::move(pending)](const core::CancellationToken& cancellation) {
@@ -263,10 +274,12 @@ private:
                     try {
                         // Each terminal hook pushes once and receipts are never retried, so heard fires once per line.
                         const auto exchange = exchange_speech_receipt(client_, value, cancellation, terminal_, heard_receipt_);
+                        speech_receipts_->settle(value, exchange.heard);
                         trace_->record(exchange.accepted_state
                             ? diagnostics::ConversationStage::receipt_accepted : diagnostics::ConversationStage::receipt_rejected,
                             value.generation, value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
                     } catch (const std::exception&) {
+                        speech_receipts_->settle(value, false);
                         trace_->record(diagnostics::ConversationStage::receipt_rejected, value.generation,
                             value.context_sequence, value.receipt.dialogue_request_id, value.receipt.line_id);
                     }

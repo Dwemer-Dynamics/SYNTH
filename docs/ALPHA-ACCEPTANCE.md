@@ -415,3 +415,17 @@ Saved follower errands additionally require:
 - [ ] Stop, combat, unreachable target, scene change and a player action on the same performer cleanly release only the visit aliases and restore native follow AI.
 
 - [ ] NPC-to-NPC reply and fresh saved relationship publication pass after the exact paired update is installed.
+
+## Ordinary dialogue delivery receipts
+
+The optional protocol v2 grant requires turn ownership. Ordinary NPC lines with pending
+or ready speech can be enrolled. Check the stored exact line and confirm that only
+an accepted heard receipt adds its history. Known text-only responses keep their
+existing history. If enrolled audio fails later, the line stays unheard without an
+explicit accepted presentation receipt. A caption timer supplies no receipt.
+
+Exercise cancellation both before and after receipt commit. An accepted heard row
+survives cancellation. When cancellation revokes a pending line first, a late receipt
+cannot promote it. Owned rechat waits for the exact enrolled parent to be accepted
+as heard before reserving the child. For Whisper and Close, verify hearers against
+the frozen origin capture.
