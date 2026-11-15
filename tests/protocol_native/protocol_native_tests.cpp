@@ -346,6 +346,60 @@ void native_turn_receipt_tests(const std::string& root) {
     const auto taken=outbox->take(2);
     require(taken.size()==1 && taken.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::audio_completed
         && outbox->dropped()==2 && outbox->take(2).empty(),"stale or overflow receipts survived");
+    // Ordinary delivery receipts: a separate ACK, an explicit per-line marker and the same receipt encoder.
+    std::istringstream ordinary_ack{read("valid/response-init-delivery-receipts.ndjson")};
+    lines.clear();
+    while(std::getline(ordinary_ack,raw)) lines.push_back(protocol_native::decode_line(raw));
+    const auto& granted=std::get<protocol_native::Status>(lines[1].payload);
+    require(lines.size()==3 && granted.delivery_receipts && !granted.native_turn,"delivery_receipts ACK lost or implied native_turn");
+    const auto ordinary_fixture=json::parse(read("valid/speech-receipt-ordinary.json"));
+    protocol_native::EventContext ordinary_context{"session:flat:fixture","receipt:2:3","turn-text-2","flat","0.1.0","1.10.163",2,
+        {"dialogue.text","dialogue.turn_ownership","dialogue.delivery_receipts"},2,7};
+    protocol_native::SpeechReceipt ordinary{"req-text-2","req-text-2:dialogue:1",character,protocol_native::SpeechReceiptOutcome::audio_completed};
+    require(json::write(json::parse(protocol_native::encode_speech_receipt(ordinary_context,ordinary)))==json::write(ordinary_fixture),
+        "ordinary speech receipt does not match the mirrored fixture");
+    auto unowned=ordinary_context; unowned.capabilities={"dialogue.text","dialogue.delivery_receipts"};
+    require(rejects(unowned,ordinary),"ordinary receipt encoded without turn ownership");
+    require(protocol_native::encode_input_text(ordinary_context,"Hi").find("\"intent\"")==std::string::npos,
+        "delivery receipts selected the native route");
+    std::istringstream marked{read("valid/response-delivery-receipts.ndjson")};
+    std::vector<protocol_native::Line> dialogue_lines;
+    while(std::getline(marked,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload))
+        dialogue_lines.push_back(line);
+    require(dialogue_lines.size()==2,"marked fixture lines lost");
+    const auto player=protocol_native::Identity{"0x00000014","Fallout4.esm","save-1","Nora"};
+    const auto& first_line=dialogue_lines.front();
+    const auto& spoken=std::get<protocol_native::Dialogue>(first_line.payload);
+    require(spoken.receipt_required && !spoken.native_turn,"receipt_required marker lost");
+    require(static_cast<bool>(client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,true))
+        && !client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,false)
+        && !client::speech_receipt_hook(outbox,first_line,spoken,true),"ordinary hook not bound to the marker and its own negotiation");
+    const auto& text_line=dialogue_lines.back();
+    const auto& text_only=std::get<protocol_native::Dialogue>(text_line.payload);
+    require(!text_only.receipt_required && !text_only.speech
+        && !client::ordinary_speech_receipt_hook(outbox,text_line,text_only,player,true),"text-only fixture owned a receipt");
+    require(std::get<protocol_native::Dialogue>(first_line.payload).speech->utterance_id!=first_line.line_id,
+        "fixture must keep speech utterance distinct from the line");
+    // An unmarked ordinary line, or the captured player speaking (a generated player line), never owns a receipt.
+    auto plain=std::get<protocol_native::Dialogue>(first_line.payload); plain.receipt_required=false;
+    auto as_player=std::get<protocol_native::Dialogue>(first_line.payload);
+    as_player.speaker=protocol_native::Identity{"0x00000014","FALLOUT4.ESM","save-1","Nora"};
+    require(!client::ordinary_speech_receipt_hook(outbox,first_line,plain,player,true)
+        && !client::ordinary_speech_receipt_hook(outbox,first_line,as_player,player,true),"unmarked or player line owned a receipt");
+    auto marked_raw=read("valid/response-delivery-receipts.ndjson");
+    marked_raw=marked_raw.substr(marked_raw.find(10)+1); marked_raw=marked_raw.substr(0,marked_raw.find(10));
+    const auto marker_at=marked_raw.find("\"receipt_required\":true");
+    const auto bad_marker=[&](std::string value){try{(void)protocol_native::decode_line(value);return false;}catch(const std::invalid_argument&){return true;}};
+    auto falsy_marker=marked_raw; falsy_marker.replace(marker_at,23,"\"receipt_required\":false");
+    auto both_markers=marked_raw; both_markers.replace(marker_at,23,"\"receipt_required\":true,\"native_turn\":true");
+    auto unbound_marker=marked_raw; unbound_marker.replace(unbound_marker.rfind("\"context_sequence\":7"),20,"\"context_sequence\":0");
+    require(bad_marker(falsy_marker) && bad_marker(both_markers) && bad_marker(unbound_marker),"invalid receipt marker accepted");
+    // Only an exchanged outcome settles a gated parent; a retired generation never answers for its replacement.
+    client::PendingSpeechReceipt settled_value{2,7,"turn-text-2",ordinary};
+    require(!outbox->settled(2,"req-text-2","req-text-2:dialogue:1"),"unsent receipt already settled");
+    outbox->settle(settled_value,true);
+    require(outbox->settled(2,"req-text-2","req-text-2:dialogue:1")==true && !outbox->settled(3,"req-text-2","req-text-2:dialogue:1"),
+        "settled outcome not generation scoped");
 }
 }
 

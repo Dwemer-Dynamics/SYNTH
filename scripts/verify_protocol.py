@@ -221,6 +221,7 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         payload_schema = dict(payload_schema)
         payload_schema["properties"] = dict(payload_schema["properties"])
         payload_schema["properties"]["native_turn"] = {"const": True}
+        payload_schema["properties"]["receipt_required"] = {"const": True}
     if value.get("schema") == "synth.event.v2" and payload_type == "context":
         catalog_path = PROTOCOL / "v2/schemas/context.schema.json"
         payload_schema = load_json(catalog_path)
@@ -252,14 +253,20 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         raise ValidationError(f"{path}: no payload schema for {payload_type!r}")
     validate(value.get("payload"), payload_schema, catalog_path, f"{path}:payload")
     payload = value.get("payload", {})
+    if payload_type == "dialogue" and payload.get("receipt_required") is True:
+        if "native_turn" in payload or not payload.get("speaker", {}).get("form_id") or value.get("context_sequence", 0) < 1:
+            raise ValidationError(f"{path}: ordinary receipt marker requires a bound NPC dialogue line")
     if payload_type in {"social_task_request", "social_task_progress"}:
         if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or not {
             "social.tasks.v1", "context.saved_anchor", "dialogue.turn_ownership"
         }.issubset(value.get("capabilities", [])):
             raise ValidationError(f"{path}: social tasks require negotiated saved v2 flat ownership")
     if payload_type == "speech_receipt":
-        if not {"dialogue.native_turn", "dialogue.turn_ownership"}.issubset(value.get("capabilities", [])) or                 not payload["line_id"].startswith(payload["dialogue_request_id"] + ":dialogue:"):
-            raise ValidationError(f"{path}: speech receipt requires native-turn ownership of its exact line")
+        capabilities = set(value.get("capabilities", []))
+        if ("dialogue.turn_ownership" not in capabilities
+                or not {"dialogue.native_turn", "dialogue.delivery_receipts"} & capabilities
+                or not payload["line_id"].startswith(payload["dialogue_request_id"] + ":dialogue:")):
+            raise ValidationError(f"{path}: speech receipt requires negotiated ownership of its exact line")
     if payload_type in {"narrator_command", "narrator_turn", "narrator_receipt"}:
         if value.get("protocol_version") != 2 or int(value.get("context_sequence", 0)) < 1 or not {
             "narrator.private.v1", "context.saved_anchor", "dialogue.turn_ownership"

@@ -1432,9 +1432,18 @@
           "capabilities": {
             "allOf": [
               {
-                "contains": {
-                  "const": "dialogue.native_turn"
-                }
+                "anyOf": [
+                  {
+                    "contains": {
+                      "const": "dialogue.native_turn"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "dialogue.delivery_receipts"
+                    }
+                  }
+                ]
               },
               {
                 "contains": {

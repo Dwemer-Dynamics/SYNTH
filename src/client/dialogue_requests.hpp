@@ -56,6 +56,8 @@ public:
     using RouteLine = std::function<void(const protocol_native::Line&, const Snapshot&, const core::CancellationToken&)>;
     // Reports social-task acceptance or rejection; true when a rejection notice was already shown.
     using SocialInput = std::function<bool(const RequestOutcome&)>;
+    // Receives every exact input outcome, including cancelled and failed ones; the sink decides possible history.
+    using InputOutcome = std::function<void(const RequestOutcome&)>;
 
     struct Dependencies final {
         SynthClient& client;
@@ -66,6 +68,7 @@ public:
         RouteLine route_line;
         SocialInput social_input;
         Notify notify;
+        InputOutcome input_outcome;
     };
 
     explicit DialogueRequests(Dependencies dependencies)
@@ -76,8 +79,9 @@ public:
           publish_{std::move(dependencies.publish)},
           route_line_{std::move(dependencies.route_line)},
           social_input_{std::move(dependencies.social_input)},
-          notify_{std::move(dependencies.notify)} {
-        if (!publish_ || !route_line_ || !social_input_ || !notify_)
+          notify_{std::move(dependencies.notify)},
+          input_outcome_{std::move(dependencies.input_outcome)} {
+        if (!publish_ || !route_line_ || !social_input_ || !notify_ || !input_outcome_)
             throw std::invalid_argument{"dialogue requests require publication, line, social and notification sinks"};
     }
 
@@ -121,6 +125,7 @@ public:
                         std::move(text), [this, snapshot, cancellation](const protocol_native::Line& line) {
                             route_line_(line, snapshot, cancellation);
                         }, context_outcome.context_binding, controls, intent);
+                    input_outcome_(outcome);
                     const bool social_rejected=social_input_(outcome);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
                         if(!social_rejected)notify_("SYNTH text request failed: " + outcome.detail);
@@ -178,6 +183,7 @@ public:
                         media, [this, snapshot, cancellation](const protocol_native::Line& line) {
                             route_line_(line, snapshot, cancellation);
                         }, context_outcome.context_binding, controls);
+                    input_outcome_(outcome);
                     const bool social_rejected=social_input_(outcome);
                     if (outcome.status != RequestStatus::complete && outcome.status != RequestStatus::cancelled) {
                         holds_.suspend(cancellation);
@@ -212,6 +218,7 @@ private:
     RouteLine route_line_;
     SocialInput social_input_;
     Notify notify_;
+    InputOutcome input_outcome_;
     std::atomic_size_t responses_{};
 };
 

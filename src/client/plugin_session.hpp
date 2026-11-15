@@ -111,7 +111,14 @@ public:
                      [this](const protocol_native::Line& line, const Snapshot& snapshot,
                             const core::CancellationToken& cancellation) { handle_line(line, snapshot, cancellation); },
                      [this](const RequestOutcome& outcome) { return social_.notify_input(outcome); },
-                     [this](std::string message) { push_notification(std::move(message)); }}},
+                     [this](std::string message) { push_notification(std::move(message)); },
+                     // Enrolled reply lines raise no emission frontier, so a dispatched input raises its own under the
+                     // session token: the server may have stored it even if its turn later failed or was cancelled.
+                     [this](const RequestOutcome& outcome) {
+                         if (!client_.delivery_receipts_ready()) return;
+                         if (const auto possible = possible_input_history_generation(outcome))
+                             context_.note_possible_input_history(*possible, cancellation_.token());
+                     }}},
           speech_{configuration_, {client_, network_, cancellation_.token(), terminal_, trace_,
                                    [this](std::string message) { push_notification(std::move(message)); },
                                    // Invoked only by network-lane receipt drains, which the destructor joins first.
@@ -1119,7 +1126,8 @@ private:
             return;
         }
         if (const auto* dialogue = std::get_if<protocol_native::Dialogue>(&line.payload)) {
-            context_.note_dialogue_history(snapshot->variant(), cancellation);
+            // An enrolled line has no emission-time server history; only its accepted heard receipt raises the frontier.
+            if (!dialogue->receipt_required) context_.note_dialogue_history(snapshot->variant(), cancellation);
             mark_activity();
             // VR shows this caption from its subtitle frame, so a cancelled or replaced turn never displays.
             const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_,

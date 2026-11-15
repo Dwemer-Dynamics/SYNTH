@@ -185,8 +185,8 @@ verified in game. See ALPHA-ACCEPTANCE.md.
 
 Whether a heard line is visible after a later load depends on four separate events:
 
-1. **Receipt commit (server).** An `audio_completed` receipt for an emitted line, from its exact
-   speaker, stores the line's state and inserts its heard history row in one transaction under
+1. **Receipt commit (server).** An `audio_completed` or explicit `text_presented` receipt for
+   an emitted line, from its exact speaker, stores the line's state and inserts its heard history row in one transaction under
    the session lock. Repeating the stored state is idempotent and adds no row. Any other outcome
    for that line is `receipt_conflict`, and an owner mismatch writes nothing.
 2. **Snapshot capture (server).** When a context commits, the server stores an immutable snapshot.
@@ -206,11 +206,18 @@ A row is covered only by the cutoff of the last acknowledged snapshot. When the 
 or the save happened does not decide it.
 
 **What makes a publication due.** The client keeps a history frontier that a later exact ACK must
-cover. A speech receipt raises it only when the receipt sent was `audio_completed` and the reply is
-an exact `speech_receipt_accepted` that stored `spoken`. The session must also be uncancelled and
+cover. A speech receipt raises it only on an exact `speech_receipt_accepted` for
+`audio_completed` stored as `spoken`, or explicit `text_presented` stored as `presented`.
+Ordinary enrollment requires pending or ready speech. Known text-only lines keep their existing
+history path. A caption reading timer produces no presentation receipt. The session must also be uncancelled and
 not terminal, in the same generation, with its writer current. Other sources raise the frontier
 too. On flat, an accepted dialogue line raises it when it arrives, before presentation. That is not
-a heard signal. In either lane, a delivered Wait action result raises it. A raised frontier makes a
+a heard signal. With delivery receipts negotiated, every dispatched typed or voice input raises it
+once from its exact input outcome, because the server may store input before a failed or cancelled
+response completes: a failure, cancellation, timeout or `speech_not_recognized` without a reply is
+still possible history. This conservative dirtiness proves no acceptance or delivery. Only an input
+cancelled before send claims nothing. A possibly dispatched action result also raises it with
+delivery receipts negotiated. The Wait checkpoint path remains available. A raised frontier makes a
 world publication due. A publication clears it only if it was raised before the publication started
 and the publication received an exact ACK in the current generation. Due is not a schedule: the
 next publication comes from the ordinary observation gate, and nothing guarantees one before a save.

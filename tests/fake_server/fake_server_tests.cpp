@@ -295,7 +295,8 @@ int main() {
             client::ConversationHolds holds;
             client::DialogueRequests requests{{narrator, lanes, terminal, holds,
                 [](const auto&, const auto&, core::CancellationToken, const auto&) { return client::RequestOutcome{}; },
-                [](const auto&, const auto&, const auto&) {}, [](const auto&) { return false; }, [](std::string) {}}};
+                [](const auto&, const auto&, const auto&) {}, [](const auto&) { return false; }, [](std::string) {},
+                [](const client::RequestOutcome&) {}}};
             core::CancellationSource session{core::RuntimeGeneration::initial()};
             std::promise<void> entered, release;
             const auto gate = release.get_future().share();

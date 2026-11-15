@@ -90,7 +90,8 @@ public:
           dialogue_{dependencies.dialogue},
           context_{dependencies.context},
           terminal_{dependencies.terminal},
-          wait_lifetime_{std::move(dependencies.session)},
+          session_{std::move(dependencies.session)},
+          wait_lifetime_{session_},
           route_line_{std::move(dependencies.route_line)},
           end_conversation_{std::move(dependencies.end_conversation)},
           release_social_{std::move(dependencies.release_social)},
@@ -605,6 +606,10 @@ private:
                             route_line_(continuation, continuation_snapshot, cancellation);
                         }, pending.binding, std::move(inventory), std::move(transfer),
                         action.name=="give_caps_to" || action.name=="take_caps_from_player", action.name=="take_caps_from_player", action.name=="take_item_from_player", action.name=="open_inventory");
+                    if (client_.delivery_receipts_ready()) {
+                        if (const auto possible=possible_input_history_generation(outcome))
+                            context_.note_possible_input_history(*possible, session_);
+                    }
                     if (outcome.status != RequestStatus::complete) {
                         notify_("SYNTH action result delivery failed: " + outcome.detail);
                     } else if(action.name=="wait_here"||action.name=="release_wait") {
@@ -651,6 +656,7 @@ private:
     PlayerDialogue& dialogue_;
     ContextPublication& context_;
     const std::atomic_bool& terminal_;
+    core::CancellationToken session_;
     WaitActionLifetime wait_lifetime_;
     WaitActionReplayGuard wait_replays_;
     RouteLine route_line_;

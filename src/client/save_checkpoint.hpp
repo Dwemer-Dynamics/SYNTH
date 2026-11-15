@@ -6,14 +6,26 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 namespace synth::client {
 
+// The server may store an ordinary or /talk player input before a failed or cancelled response completes, so neither
+// a missing reply, a failure, a cancellation, a transport error nor speech_not_recognized proves the input left no
+// history. Only a request the client cancelled before send is certainly undispatched. Any other outcome may have left
+// input history and returns its binding's generation. This is never proof of durable acceptance or of a heard line: it
+// only asks a later context publication to cover the possible input, at worst once more than needed.
+[[nodiscard]] inline std::optional<std::uint64_t> possible_input_history_generation(const RequestOutcome& outcome) {
+    if (outcome.status == RequestStatus::cancelled && outcome.http_status == 0 && outcome.lines.empty() &&
+        outcome.detail == request_cancelled_before_send) return std::nullopt;
+    return outcome.context_binding.generation;
+}
+
 // Engine-free save checkpoint of one runtime session's writer binding: the history frontier that accepted
-// flat dialogue, accepted heard receipts and wait outcomes raise, and the exact context ACK that covers a
+// flat dialogue, possible player input history, accepted heard receipts and wait outcomes raise, and the exact context ACK that covers a
 // revision of it. ContextPublication owns one; the loopback dialogue driver drives the same object.
 // Every method is nonblocking and thread-safe. The borrowed store and terminal flag outlive this object.
 class SaveCheckpoint final {
@@ -64,6 +76,12 @@ public:
     // A committed private narrator change (selection, recorded input or an accepted completed reply) is captured only
     // by a later context publication, so it raises the same frontier under the same owner checks as a heard receipt.
     void note_private_narrator(std::uint64_t generation, const core::CancellationToken& cancellation) {
+        note_heard_receipt(generation, cancellation);
+    }
+
+    // A dispatched player input may be server history whether or not any reply arrives or is heard, and its context was
+    // published before the input was sent. It raises the frontier once per request under the same owner checks.
+    void note_possible_input_history(std::uint64_t generation, const core::CancellationToken& cancellation) {
         note_heard_receipt(generation, cancellation);
     }
 

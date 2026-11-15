@@ -61,6 +61,9 @@ enum class RequestStatus : unsigned char {
     stale_response,
 };
 
+// The detail of the only outcome that certainly never reached the transport.
+inline constexpr std::string_view request_cancelled_before_send{"request cancelled before send"};
+
 struct RequestOutcome final {
     RequestStatus status{RequestStatus::transport_failure};
     std::string request_id;
@@ -137,6 +140,15 @@ public:
     }
     [[nodiscard]] bool native_turn_ready() const noexcept {
         return native_turn_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    // Ordinary NPC delivery receipts are a separate grant of this init; they never select the /talk route.
+    [[nodiscard]] bool uses_delivery_receipts_contract() const noexcept {
+        return options_.protocol_version == 2 &&
+            std::ranges::find(options_.capabilities, "dialogue.delivery_receipts") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "dialogue.turn_ownership") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool delivery_receipts_ready() const noexcept {
+        return delivery_receipts_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
     [[nodiscard]] bool actor_stats_ready() const noexcept {
         return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
@@ -310,6 +322,7 @@ public:
             rechat_scene_negotiated_.store(false, std::memory_order_release);
             social_tasks_negotiated_.store(false, std::memory_order_release);
             native_turn_negotiated_.store(false, std::memory_order_release);
+            delivery_receipts_negotiated_.store(false, std::memory_order_release);
             actor_stats_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
@@ -357,6 +370,9 @@ public:
                 std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
+                std::memory_order_release);
+            delivery_receipts_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->delivery_receipts && uses_delivery_receipts_contract(),
                 std::memory_order_release);
             private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
@@ -629,7 +645,9 @@ public:
         {
             std::scoped_lock state_lock{state_mutex_};
             require_ready();
-            if (!native_turn_ready() || binding.generation != generation_ || binding.sequence == 0 || binding.turn_id.empty())
+            // Either negotiated receipt contract (/talk or ordinary delivery receipts) may send; the encoder rechecks it.
+            if ((!native_turn_ready() && !delivery_receipts_ready()) || binding.generation != generation_ || binding.sequence == 0 ||
+                binding.turn_id.empty())
                 throw std::invalid_argument{"speech receipt owner is not current"};
             request_id = next_id("receipt");
             turn_id = binding.turn_id;
@@ -1446,6 +1464,7 @@ private:
     std::atomic_bool rechat_scene_negotiated_{};
     std::atomic_bool social_tasks_negotiated_{};
     std::atomic_bool native_turn_negotiated_{};
+    std::atomic_bool delivery_receipts_negotiated_{};
     std::atomic_bool actor_stats_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
     std::atomic_bool everyone_negotiated_{};

@@ -64,9 +64,15 @@ struct ScriptedTransport final : client::IHttpTransport {
     std::deque<std::vector<protocol_native::Status>> statuses;
     std::deque<std::string> ends;
     bool empty_body{};
+    bool delivery_receipts{}; // The init ACK grants only ordinary delivery receipts instead of native_turn.
+    bool reply{}; // Input requests stream one enrolled NPC line before their scripted statuses.
+    std::function<void()> dispatched; // Simulates a player cancellation while an input request is in flight.
+    bool timeout{}; // Simulates a dispatched input request whose response never arrives.
     client::HttpResult send(const client::HttpRequest& request, const client::Cancelled&) override {
         const auto event=json::parse(request.body);
         types.push_back(protocol_native::text(event,"type"));
+        if(dispatched && types.back()=="input_text") dispatched();
+        if(timeout && types.back()=="input_text") return {client::TransportFailure::timeout,{}};
         if(empty_body && types.back()!="init") return {client::TransportFailure::none,{200,"application/json","{}"}};
         const auto line=[&](std::string type,json::Value payload) {
             return json::write(json::Value{protocol_native::object({
@@ -78,9 +84,14 @@ struct ScriptedTransport final : client::IHttpTransport {
         };
         auto body=line("response_start",json::Value{protocol_native::object({{"server_version","test"}})});
         std::string end{"complete"};
-        if(types.back()=="init") body+=line("status",json::Value{protocol_native::object({{"code","init_accepted"},{"native_turn",true}})});
+        if(types.back()=="init") body+=line("status",json::Value{protocol_native::object({{"code","init_accepted"},
+            {delivery_receipts ? "delivery_receipts" : "native_turn",true}})});
         else {
             CHECK(!statuses.empty() && !ends.empty());
+            if(reply && (types.back()=="input_text" || types.back()=="input_audio"))
+                body+=line("dialogue",json::Value{protocol_native::object({{"speaker",json::Value{protocol_native::object({
+                    {"form_id","0x00002F25"},{"origin_plugin","Fallout4.esm"},{"playthrough_id","save-001"},{"display_name","Piper"}})}},
+                    {"text","Line"},{"receipt_required",true}})});
             for(std::size_t index=0;const auto& status:statuses.front()) {
                 auto payload=protocol_native::object({{"code",status.code}});
                 if(!status.detail.empty()) payload.emplace_back("detail",status.detail);
@@ -587,6 +598,171 @@ int main() try {
         session.cancel(); finish(false);
         CHECK(drain(current.value()).empty() && receipts()==11 && heard.size()==5); // Retired session sends nothing.
 
+        network.shutdown(tasks::ShutdownMode::cancel_pending);
+    }
+    {
+        // Ordinary delivery receipts through the production SpeechDelivery: only a server-marked NPC line of a session that
+        // negotiated dialogue.delivery_receipts gets a hook; only its exact accepted heard ACK raises the frontier and
+        // settles a gated rechat parent. The reading timer, interrupted audio and refusals never do.
+        runtime::FakeFalloutRuntime fallout{core::RuntimeVariant::flat};
+        const auto snapshot=fallout.capture_snapshot(core::SnapshotClock::now());
+        const auto current=snapshot->generation();
+        ScriptedTransport wire; wire.delivery_receipts=true;
+        client::SynthClient synth{wire,client::SessionOptions{.runtime_session_id="session:flat:ordinary-receipts",
+            .runtime_variant="flat",.client_version="test",.runtime_version="1.10.163",
+            .capabilities={"dialogue.delivery_receipts","dialogue.turn_ownership"},.protocol_version=2}};
+        CHECK(synth.initialize(current.value(),false).status==client::RequestStatus::complete
+            && synth.delivery_receipts_ready() && !synth.native_turn_ready());
+        tasks::TaskLanes network{{tasks::LaneConfig{"network",4,1,3}},0};
+        std::atomic_bool terminal{};
+        core::CancellationSource session{current};
+        auto trace=std::make_shared<diagnostics::ConversationTrace>();
+        core::SaveContextStore store;
+        CHECK(store.start_new_game([] { core::PlaythroughUuid bytes{}; bytes.fill(0x5b); return std::optional{bytes}; }).resolution==
+            core::IdentityResolution::new_game);
+        client::SaveCheckpoint checkpoint{&store,*store.bind(*store.playthrough_id(),store.lifetime()),session.token(),terminal};
+        std::vector<std::uint64_t> heard;
+        client::SpeechDelivery speech{config::Config{},{synth,network,session.token(),terminal,trace,[](std::string){},
+            [&](std::uint64_t value,const core::CancellationToken& token) {
+                if(!token.is_cancelled()) heard.push_back(value);
+                checkpoint.note_heard_receipt(value,token);
+            }}};
+        const auto player=client::wire_identity(snapshot->player());
+        unsigned ordinal{};
+        const auto line_for=[&](protocol_native::Dialogue dialogue) {
+            return protocol_native::Line{"ordinary:dialogue:"+std::to_string(++ordinal),"ordinary","turn:ordinary","flat",
+                current.value(),std::move(dialogue),2,1};
+        };
+        const auto marked=[&](protocol_native::Speaker speaker) {
+            protocol_native::Dialogue dialogue{std::move(speaker),"Line"}; dialogue.receipt_required=true; return dialogue;
+        };
+        const protocol_native::Identity piper{"0x00002F25","Fallout4.esm","save-001","Piper"};
+        // No hook: an unmarked ordinary line, a marked line spoken by the captured player, or no response snapshot.
+        const protocol_native::Dialogue plain{piper,"Line"};
+        CHECK(!speech.receipt_hook(line_for(plain),plain,snapshot));
+        const auto self=marked(player);
+        CHECK(!speech.receipt_hook(line_for(self),self,snapshot));
+        const auto a=marked(piper);
+        CHECK(!speech.receipt_hook(line_for(a),a,{}));
+        const auto finish=[&](presentation::DialogueDelivery terminal_state,bool cancelled,unsigned callbacks=1) {
+            const auto line=line_for(a);
+            core::CancellationSource owner{session.token()};
+            if(cancelled) owner.cancel();
+            const presentation::DialogueCaption caption{.generation=current.value(),.cancellation=owner.token(),
+                .on_terminal=speech.receipt_hook(line,a,snapshot)};
+            CHECK(caption.on_terminal);
+            caption.mark_delivery(presentation::DialogueDelivery::playing);
+            for(unsigned i=0;i<callbacks;++i) caption.mark_delivery(terminal_state);
+            return line;
+        };
+        const auto drain=[&](std::uint64_t generation) {
+            speech.pump(generation,fallout); (void)network.run_until_idle();
+            std::vector<diagnostics::ConversationStage> stages;
+            while(const auto record=trace->take()) stages.push_back(record->stage);
+            return stages;
+        };
+        const auto script=[&](std::vector<protocol_native::Status> statuses,std::string end="complete") {
+            wire.statuses.push_back(std::move(statuses)); wire.ends.push_back(std::move(end));
+        };
+        using Stage=diagnostics::ConversationStage;
+        using Delivery=presentation::DialogueDelivery;
+        const auto receipts=[&] { return std::ranges::count(wire.types,"speech_receipt"); };
+        // Receipts bind to an acknowledged context of this generation, as on a live session.
+        script({{"context_accepted",""}});
+        CHECK(synth.context_accepted(synth.publish_context(0,"save-001",player,std::nullopt,{},{},std::nullopt,{},{},{})));
+        script({{"speech_receipt_accepted","spoken"}});
+        const auto first=finish(Delivery::spoken,false,3); // A: completed audio, repeated terminal callbacks.
+        CHECK(!speech.receipt_settled(current.value(),first.request_id,first.line_id)); // Not settled before the exchange.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==1 && heard==std::vector{current.value()});
+        CHECK(checkpoint.revision()==1 && speech.receipt_settled(current.value(),first.request_id,first.line_id)==true);
+        CHECK(!speech.receipt_settled(current.value()+1,first.request_id,first.line_id));
+        script({{"speech_receipt_accepted","interrupted"}});
+        const auto second=finish(Delivery::spoken,true); // B: interrupted mid-line.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==2 && heard.size()==1);
+        CHECK(checkpoint.revision()==1 && speech.receipt_settled(current.value(),second.request_id,second.line_id)==false);
+        script({{"receipt_owner_mismatch",""}},"error");
+        const auto refused=finish(Delivery::spoken,false);
+        CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && heard.size()==1
+            && speech.receipt_settled(current.value(),refused.request_id,refused.line_id)==false);
+        const auto reading=finish(Delivery::text_complete,false); // The reading timer is not a renderer ACK.
+        CHECK(drain(current.value()).empty() && receipts()==3 && !speech.receipt_settled(current.value(),reading.request_id,reading.line_id));
+        (void)finish(Delivery::spoken,false);
+        CHECK(drain(current.value()+1).empty() && receipts()==3 && heard.size()==1); // A replaced generation sends nothing.
+
+        // Possible player input history: enrolled replies raise no emission frontier and none is heard here, so the exact
+        // input outcome (PluginSession's DialogueRequests sink) raises it, once per request, under the session token. The
+        // server may store the input before a failed or cancelled response completes, so every dispatched outcome, even
+        // without a reply, may be history. This conservative dirtiness proves no acceptance or delivery.
+        const auto playthrough=*store.playthrough_id();
+        const auto saved_player=protocol_native::Identity{"0x00000014","Fallout4.esm",playthrough,"Sole Survivor"};
+        const auto covering=[&](client::SaveCheckpoint& owner) {
+            const auto revision=owner.revision();
+            script({{"context_accepted",""}});
+            return owner.acknowledge(synth,synth.publish_context(0,playthrough,saved_player,std::nullopt,{},{},std::nullopt,{},{},{}),
+                                     playthrough,revision,current,session.token());
+        };
+        CHECK(covering(checkpoint) && !checkpoint.due());
+        const auto input=[&](bool reply,std::vector<protocol_native::Status> statuses,std::string end,
+                             const core::CancellationToken& turn) {
+            script({{"context_accepted",""}});
+            auto binding=synth.publish_context(0,playthrough,saved_player,std::nullopt,{},{},std::nullopt,{},{},{}).context_binding;
+            binding.cancellation=turn;
+            script(std::move(statuses),std::move(end)); wire.reply=reply;
+            auto outcome=synth.send_text("Hello",{},binding);
+            wire.reply=false;
+            if(const auto possible=client::possible_input_history_generation(outcome))
+                checkpoint.note_possible_input_history(*possible,session.token());
+            return outcome;
+        };
+        // Each simulated dispatched outcome without any dialogue line is due, and the next exact context ACK covers it.
+        const auto due_once=[&](client::RequestStatus status,const client::RequestOutcome& outcome,std::uint64_t before) {
+            CHECK(outcome.status==status && std::ranges::none_of(outcome.lines,[](const auto& line) {
+                return std::holds_alternative<protocol_native::Dialogue>(line.payload); }));
+            CHECK(checkpoint.revision()==before+1 && checkpoint.due() && receipts()==3 && heard.size()==1);
+            CHECK(covering(checkpoint) && !checkpoint.due());
+        };
+        core::CancellationSource turn{session.token()};
+        auto revision=checkpoint.revision();
+        // Unrecognized speech is conservatively due too; it is not called accepted.
+        due_once(client::RequestStatus::complete,input(false,{{"speech_not_recognized",""}},"complete",turn.token()),revision++);
+        due_once(client::RequestStatus::server_failure,input(false,{},"error",turn.token()),revision++); // Provider error.
+        due_once(client::RequestStatus::cancelled,input(false,{},"cancelled",turn.token()),revision++); // Server cancel.
+        wire.timeout=true; const auto lost=input(false,{},"complete",turn.token());
+        wire.timeout=false; wire.statuses.clear(); wire.ends.clear(); // The timed-out request consumed no script.
+        due_once(client::RequestStatus::transport_failure,lost,revision++);
+        script({{"context_accepted",""}});
+        auto bare=synth.publish_context(0,playthrough,saved_player,std::nullopt,{},{},std::nullopt,{},{},{}).context_binding;
+        wire.empty_body=true; auto malformed=synth.send_text("Hello",{},bare); wire.empty_body=false;
+        if(const auto possible=client::possible_input_history_generation(malformed))
+            checkpoint.note_possible_input_history(*possible,session.token());
+        due_once(client::RequestStatus::malformed_response,malformed,revision++);
+        {   // The player cancels after dispatch and before the first reply line.
+            core::CancellationSource inflight{session.token()};
+            wire.dispatched=[&] { inflight.cancel(); };
+            due_once(client::RequestStatus::cancelled,input(true,{},"complete",inflight.token()),revision++);
+            wire.dispatched={};
+        }
+        // A complete input with its enrolled, unheard reply and no player echo makes the publication due exactly once.
+        CHECK(input(true,{},"complete",turn.token()).status==client::RequestStatus::complete);
+        CHECK(checkpoint.revision()==++revision && checkpoint.due() && receipts()==3 && heard.size()==1);
+        CHECK(covering(checkpoint) && !checkpoint.due());
+        // A later heard receipt after that ACK raises the frontier again.
+        script({{"speech_receipt_accepted","spoken"}}); (void)finish(Delivery::spoken,false);
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && heard.size()==2 && checkpoint.due());
+        CHECK(covering(checkpoint) && !checkpoint.due());
+        // A pre-cancelled turn is never sent, so it claims nothing.
+        turn.cancel(); revision=checkpoint.revision();
+        const auto unsent=input(true,{},"complete",turn.token());
+        CHECK(unsent.status==client::RequestStatus::cancelled && unsent.detail==client::request_cancelled_before_send
+            && !client::possible_input_history_generation(unsent) && checkpoint.revision()==revision);
+        CHECK(wire.statuses.size()==1); wire.statuses.clear(); wire.ends.clear(); // Its unsent script.
+        // A stale generation, then a retired writer, leave the frontier and the newer binding untouched.
+        checkpoint.note_possible_input_history(current.value()+1,session.token());
+        CHECK(checkpoint.revision()==revision && !checkpoint.due());
+        client::SaveCheckpoint replacement{&store,*store.bind(playthrough,store.lifetime()),session.token(),terminal};
+        core::CancellationSource later{session.token()};
+        CHECK(input(false,{},"error",later.token()).status==client::RequestStatus::server_failure);
+        CHECK(checkpoint.revision()==revision && !checkpoint.due() && replacement.revision()==0 && !replacement.due());
         network.shutdown(tasks::ShutdownMode::cancel_pending);
     }
     std::cout<<"native playback tests passed: deferred spatial start/resume, sample preservation, text timeout/failure fallback, destination-major channel mixing, heard receipt ACKs and lifecycle fences\n";

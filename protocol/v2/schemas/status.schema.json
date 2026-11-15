@@ -37,6 +37,9 @@
     "native_turn": {
       "type": "boolean"
     },
+    "delivery_receipts": {
+      "type": "boolean"
+    },
     "actor_stats": {
       "type": "boolean"
     },

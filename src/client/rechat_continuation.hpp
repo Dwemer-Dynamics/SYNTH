@@ -187,6 +187,9 @@ public:
             pending_ = PendingRechat{actor, snapshot,
                 std::move(binding),
                 {line.request_id, line.line_id}, caption};
+            // An enrolled parent releases its child only on its exact accepted heard receipt, not caption delivery.
+            const auto* said = std::get_if<protocol_native::Dialogue>(&line.payload);
+            pending_->receipt_gated = said && said->receipt_required && client_.delivery_receipts_ready();
             pending_->target={cancellation,current_actor->form_id(),current_actor->base_form_id(),
                 current_actor->origin_plugin(),current_actor->base_origin_plugin(),current_actor->playthrough_id(),
                 current_actor->name(),true};
@@ -201,7 +204,9 @@ public:
         const auto now = tasks::TaskLanes::Clock::now();
         if (deferred.prefetch->invalid(now)) prefetched_.reset();
         else if (runtime_paused() || dialogue_.voice_active()) return true;
-        else if (auto lines = deferred.prefetch->take(now)) {
+        else if (const auto released = parent_released(deferred); released != true) {
+            if (released == false) { deferred.prefetch->cancel(); prefetched_.reset(); }
+        } else if (auto lines = deferred.prefetch->take(now)) {
             deferred.prefetched_lines = std::move(*lines);
             capture_ = std::move(deferred);
             prefetched_.reset();
@@ -219,7 +224,7 @@ public:
         // Lock order is action queue, then rechat; no action may be queued while the parent is promoted.
         return actions_.while_idle([&] {
             std::scoped_lock lock{mutex_};
-            if (!capture_ && pending_ && playing &&
+            if (!capture_ && pending_ && !pending_->receipt_gated && playing &&
                 playing->caption == pending_->caption && pending_->response_complete &&
                 !pending_->binding.cancellation.is_cancelled() &&
                 pending_->caption->delivery->load(std::memory_order_acquire) == presentation::DialogueDelivery::playing) {
@@ -244,7 +249,14 @@ public:
                 pending_.reset();
                 capture_.reset();
             }
-            if (pending_ && pending_->response_complete && pending_->caption->delivered()) {
+            const auto released = pending_ && pending_->response_complete ? parent_released(*pending_) : std::optional<bool>{};
+            if (pending_ && released.has_value() && !*released) {
+                trace_.record(diagnostics::ConversationStage::continuation_scene_rejected,pending_->binding.generation,
+                    pending_->binding.sequence,pending_->parent.request_id,pending_->parent.line_id);
+                pending_.reset();
+                capture_.reset();
+            }
+            if (pending_ && released == true) {
                 rechat = std::move(pending_);
                 pending_.reset();
                 capture_.reset();
@@ -364,9 +376,25 @@ private:
         unsigned scene_retries{};
         std::shared_ptr<RechatPrefetch> prefetch;
         std::optional<std::vector<protocol_native::Line>> prefetched_lines;
+        bool receipt_gated{};
+        std::optional<tasks::TaskLanes::Clock::time_point> delivered_at;
     };
 
     [[nodiscard]] bool runtime_paused() const noexcept { return paused_.load(std::memory_order_acquire); }
+
+    // Under mutex_. An ungated parent is released by its delivered caption, as before. A receipt-gated parent waits
+    // (nullopt) for its exchanged receipt after delivery and is released only by an accepted heard outcome; any other
+    // settled outcome, or no exchange within the response timeout, retires it (false) without fabricating delivery.
+    [[nodiscard]] std::optional<bool> parent_released(PendingRechat& rechat) {
+        if (!rechat.caption->delivered()) return std::nullopt;
+        if (!rechat.receipt_gated) return true;
+        if (const auto settled = speech_.receipt_settled(rechat.binding.generation, rechat.parent.request_id,
+                rechat.parent.line_id)) return *settled;
+        const auto now = tasks::TaskLanes::Clock::now();
+        if (!rechat.delivered_at) rechat.delivered_at = now;
+        if (now - *rechat.delivered_at > std::chrono::milliseconds{request_timeout_ms()}) return false;
+        return std::nullopt;
+    }
 
     [[nodiscard]] std::uint64_t request_timeout_ms() const noexcept {
         return static_cast<std::uint64_t>(configuration_.behavior.ai_response_timeout_seconds) * 1000ULL;
