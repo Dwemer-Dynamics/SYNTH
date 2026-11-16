@@ -6,6 +6,7 @@
 #include "core/actor_event_mailbox.hpp"
 #include "core/player_inventory_refresh.hpp"
 #include "core/inventory_change_mailbox.hpp"
+#include "core/readable_note_gate.hpp"
 #include <algorithm>
 #include <functional>
 #include <optional>
@@ -821,10 +822,123 @@ void test_inventory_refresh_cadence() {
     CHECK(!refresh.due(2, start + 90s, 99));
 }
 
+// BookMenu admission: a fresh visible open of the exact staged candidate, never pickup/stale/ABA.
+void test_readable_note_gate() {
+    using synth::core::ReadableNoteGate;
+    using namespace std::chrono_literals;
+    const auto t = ReadableNoteGate::Clock::now();
+    const auto visible = [](std::uint64_t generation, std::uint32_t book, std::string_view body) {
+        return ReadableNoteGate::Display{generation, true, true, book, body};
+    };
+    ReadableNoteGate gate;
+    auto attempt = gate.begin_attempt();
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "Dear Piper", t));
+    CHECK(!gate.admit(visible(7, 0x01000800, "Dear Piper"), t)); // No subsequent open yet: keep pending.
+    CHECK(gate.pending());
+    gate.observe_menu(true);
+    auto read = gate.admit(visible(7, 0x01000800, "Dear Piper"), t + 1ms);
+    CHECK(read && read->epoch == attempt.epoch && read->body == "Dear Piper" && read->generation == 7);
+    CHECK(!gate.pending() && !gate.admit(visible(7, 0x01000800, "Dear Piper"), t + 2ms)); // Exactly once.
+    gate.observe_menu(false);
+    // Already on stack at the attempt is ambiguous and fails closed.
+    attempt = gate.begin_attempt();
+    CHECK(!gate.stage(attempt, 7, true, 0x01000800, "Dear Piper", t));
+    // Reentrancy: a nested attempt during the original call wins; the outer cannot republish.
+    const auto outer = gate.begin_attempt();
+    const auto nested = gate.begin_attempt();
+    CHECK(gate.stage(nested, 7, false, 0x01000800, "new", t));
+    CHECK(!gate.stage(outer, 7, false, 0x01000800, "old", t));
+    CHECK(gate.pending());
+    gate.observe_menu(true);
+    CHECK(!gate.admit(visible(7, 0x01000800, "old"), t)); // Body mismatch drops.
+    CHECK(!gate.pending());
+    gate.observe_menu(false);
+    // An off-thread attempt only advances the epoch, which supersedes the staged candidate.
+    attempt = gate.begin_attempt();
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "body", t));
+    (void)gate.begin_attempt();
+    gate.observe_menu(true);
+    CHECK(!gate.admit(visible(7, 0x01000800, "body"), t) && !gate.pending());
+    gate.observe_menu(false);
+    // Close ABA between ticks, double open, wrong generation, hidden, wrong BOOK and timeout all drop.
+    for (int variant = 0; variant < 6; ++variant) {
+        attempt = gate.begin_attempt();
+        CHECK(gate.stage(attempt, 7, false, 0x01000800, "body", t));
+        gate.observe_menu(true);
+        auto display = visible(7, 0x01000800, "body");
+        auto now = t + 1ms;
+        if (variant == 0) { gate.observe_menu(false); gate.observe_menu(true); }
+        if (variant == 1) gate.observe_menu(true);
+        if (variant == 2) display.generation = 8;
+        if (variant == 3) display.display_enabled = false;
+        if (variant == 4) display.book_form_id = 0x01000801;
+        if (variant == 5) now = t + ReadableNoteGate::admission_window;
+        CHECK(!gate.admit(display, now));
+        CHECK(!gate.pending());
+        gate.observe_menu(false);
+    }
+    // A close observed before staging (menu flashed during the original call) also drops.
+    attempt = gate.begin_attempt();
+    gate.observe_menu(true);
+    gate.observe_menu(false);
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "x", t));
+    CHECK(!gate.admit(visible(7, 0x01000800, "x"), t) && !gate.pending());
+    // Load/ownership-loss invalidation, temporary/zero IDs and unsafe bodies never admit.
+    attempt = gate.begin_attempt();
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "x", t));
+    gate.invalidate();
+    gate.observe_menu(true);
+    CHECK(!gate.admit(visible(7, 0x01000800, "x"), t));
+    gate.observe_menu(false);
+    attempt = gate.begin_attempt();
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "x", t));
+    gate.invalidate();
+    CHECK(!gate.stage(attempt, 7, false, 0x01000800, "x", t)); // Invalidated during the original call.
+    attempt = gate.begin_attempt();
+    CHECK(!gate.stage(attempt, 7, false, 0xFF000800, "x", t));
+    CHECK(!gate.stage(attempt, 7, false, 0, "x", t));
+    CHECK(!gate.stage(attempt, 7, false, 0x01000800, "\xC0\xAF", t));
+    CHECK(!gate.stage(attempt, 7, false, 0x01000800, "", t));
+    CHECK(!gate.stage(attempt, 7, false, 0x01000800, std::string(ReadableNoteGate::max_body_bytes + 1, 'a'), t));
+    CHECK(gate.stage(attempt, 7, false, 0x01000800, "y", t));
+    gate.drop();
+    CHECK(!gate.pending());
+    CHECK(ReadableNoteGate::valid_utf8("caf\xC3\xA9 \xF0\x9F\x93\x9C"));
+    CHECK(!ReadableNoteGate::valid_utf8("\xED\xA0\x80"));
+    // Patch ownership is the complete call plus the complete shared JMP14 stub; rollback is exact.
+    using Patch = synth::core::ReadableNotePatch;
+    const std::uintptr_t site = 0x1404657F0, stub = 0x140000100, hook = 0x7FF612345678;
+    const auto call = Patch::call(site, stub);
+    CHECK(call && (*call)[0] == 0xE8);
+    std::int32_t displacement{};
+    std::memcpy(&displacement, call->data() + 1, sizeof(displacement));
+    CHECK(site + 5 + static_cast<std::int64_t>(displacement) == stub);
+    CHECK(!Patch::call(site, site + 5 + 0x80000000ULL) && Patch::call(site, site + 5 + 0x7FFFFFFFULL));
+    const auto installed = Patch::stub(hook);
+    CHECK(installed[0] == 0xFF && installed[1] == 0x25 && installed[2] == 0 && installed[5] == 0 &&
+          installed[6] == 0x78 && installed[11] == 0x7F && installed[13] == 0x00);
+    const Patch::Call original{0xE8, 0x8B, 0xE6, 0xBC, 0x00};
+    CHECK(Patch::owned(*call, *call, installed, installed));
+    auto retargeted = installed;
+    retargeted[2] = 0x01; // A changed JMP14 displacement with the old slot left intact.
+    CHECK(!Patch::owned(*call, *call, retargeted, installed));
+    retargeted = installed;
+    retargeted[0] = 0xE9; // A changed stub opcode.
+    CHECK(!Patch::owned(*call, *call, retargeted, installed));
+    auto chained = *call;
+    chained[1] ^= 0x10; // A collaborator rewrote our call.
+    CHECK(!Patch::owned(chained, *call, installed, installed));
+    CHECK(Patch::restore(*call, original, *call, installed, installed) == Patch::Restore::write_original);
+    CHECK(Patch::restore(original, original, *call, installed, installed) == Patch::Restore::already_original);
+    CHECK(Patch::restore(chained, original, *call, installed, installed) == Patch::Restore::foreign);
+    CHECK(Patch::restore(*call, original, *call, retargeted, installed) == Patch::Restore::foreign);
+}
+
 }  // namespace
 
 int main() {
     try {
+        test_readable_note_gate();
         synth::core::RestEventMailbox rest;
         using synth::core::RestStart;
         CHECK(!rest.record(rest.stamp(), RestStart::sleep));
