@@ -131,3 +131,7 @@ Limits of the Auto Chat scenario:
 - A rechat continuation is not covered. The server README explains why. The voice roots stand in
   for the microphone with fixed WAV bytes. No recording, playback or game audio is involved.
 - The resends are duplicate-delivery probes. Production never retries a request.
+
+## Conversation scenario
+
+`loopback_dialogue_driver URL conversation` drives `dialogue.conversation` on both dialogue lanes against a fixture companion (Piper, SYNTHETIC captured state): three turns (ordinary, `/talk`, ordinary) in one conversation whose id every response echoes; a heard, an interrupted and a skipped line reported through the shipped caption hooks and receipt exchange; the next prompt on each lane; a cell change that starts a new conversation (the driver calls `observe_cell` as `ContextPublication` does); a scoped cancel of a request held at the provider; and a client without the capability. The hotkey and `PluginSession::cancel_conversation` need Windows headers and are covered only by the flat build.
