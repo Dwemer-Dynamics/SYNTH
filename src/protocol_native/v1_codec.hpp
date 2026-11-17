@@ -190,13 +190,21 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}; bool location_catalog{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}; bool location_catalog{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
 struct NarratorRef { std::string definition_id; std::uint64_t revision_id{}; std::string display_name; };
 struct NarratorReply { NarratorRef narrator; std::uint64_t parent_state_id{}; std::string text; Speech speech; };
 struct NarratorTranscriptEntry { bool narrator{}; std::string display_name, text; };
+// Talking-object identity (narrator.object.v1): exactly the wire form, normalised by the sender. A null plugin names a
+// runtime-created reference; core/talking_object.hpp builds it from the snapshot.
+struct NarratorObjectRef {
+    std::optional<std::string> ref_plugin;
+    std::string ref_id, base_plugin, base_id;
+    [[nodiscard]] bool operator==(const NarratorObjectRef&) const = default;
+};
+struct NarratorObjectBinding { std::string definition_id; NarratorObjectRef object; };
 struct NarratorState {
     std::uint64_t state_id{};
     std::optional<NarratorRef> selected;
@@ -204,6 +212,8 @@ struct NarratorState {
     std::vector<NarratorTranscriptEntry> transcript;
     std::vector<NarratorRef> available;
     std::string next_cursor;
+    std::vector<NarratorRef> object_definitions;
+    std::vector<NarratorObjectBinding> objects;
 };
 using Payload = std::variant<Start, Dialogue, Action, Status, End, SocialTaskOffer, NarratorReply, NarratorState>;
 struct Line {
@@ -324,8 +334,39 @@ inline NarratorRef narrator_ref(const json::Value& value) {
     if (!narrator_definition_id(out.definition_id)) throw std::invalid_argument{"invalid narrator definition"};
     return out;
 }
+inline bool narrator_plugin_name(std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 255 && value.find_first_of("/\\") == std::string_view::npos &&
+        value.size() > 4 && [&] {
+            const auto lower = [](char ch) { return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch); };
+            const std::string suffix{lower(value[value.size() - 3]), lower(value[value.size() - 2]), lower(value[value.size() - 1])};
+            return value[value.size() - 4] == '.' && (suffix == "esm" || suffix == "esp" || suffix == "esl");
+        }();
+}
+// 0x followed by eight upper-case hexadecimal digits.
+inline bool narrator_wire_id(std::string_view value) noexcept {
+    return value.size() == 10 && value.starts_with("0x") && std::ranges::all_of(value.substr(2), [](char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F'); });
+}
+inline bool narrator_object_valid(const NarratorObjectRef& value) noexcept {
+    const auto local = [](std::string_view id) { return narrator_wire_id(id) && id.substr(2, 2) == "00" && id != "0x00000000"; };
+    const auto reference = value.ref_plugin ? narrator_plugin_name(*value.ref_plugin) && local(value.ref_id)
+        : narrator_wire_id(value.ref_id) && value.ref_id.substr(2, 2) == "FF" && value.ref_id != "0xFF000000";
+    return reference && narrator_plugin_name(value.base_plugin) && local(value.base_id);
+}
+inline json::Value narrator_object_value(const NarratorObjectRef& value) {
+    return json::Value{json::Value::Object{{"ref_plugin", value.ref_plugin ? json::Value{*value.ref_plugin} : json::Value{nullptr}},
+        {"ref_id", value.ref_id}, {"base_plugin", value.base_plugin}, {"base_id", value.base_id}}};
+}
+inline NarratorObjectRef narrator_object(const json::Value& value) {
+    closed_object(value, {"ref_plugin", "ref_id", "base_plugin", "base_id"});
+    const auto& plugin = required(value, "ref_plugin");
+    NarratorObjectRef out{plugin.is_null() ? std::nullopt : std::optional<std::string>{text(value, "ref_plugin")},
+        text(value, "ref_id"), text(value, "base_plugin"), text(value, "base_id")};
+    if (!narrator_object_valid(out)) throw std::invalid_argument{"invalid narrator object"};
+    return out;
+}
 inline NarratorState narrator_state(const json::Value& value) {
-    closed_object(value, {"state_id", "selected", "definitions", "transcript", "available", "next_cursor"});
+    closed_object(value, {"state_id", "selected", "definitions", "transcript", "available", "next_cursor", "object_definitions", "objects"});
     NarratorState out{narrator_record_id(value, "state_id", 0), std::nullopt, {}, {}, {}, {}};
     if (const auto* selected = value.find("selected")) out.selected = narrator_ref(*selected);
     const auto& definitions = required(value, "definitions");
@@ -338,6 +379,19 @@ inline NarratorState narrator_state(const json::Value& value) {
         if (!available->is_array() || available->as_array().size() > 16) throw std::invalid_argument{"invalid narrator library"};
         for (const auto& definition : available->as_array()) out.available.push_back(narrator_ref(definition));
     } else out.available = out.definitions;
+    if (const auto* library = value.find("object_definitions")) {
+        if (!library->is_array() || library->as_array().size() > 16) throw std::invalid_argument{"invalid narrator object library"};
+        for (const auto& definition : library->as_array()) out.object_definitions.push_back(narrator_ref(definition));
+    }
+    if (const auto* bound = value.find("objects")) {
+        if (!bound->is_array() || bound->as_array().size() > 16) throw std::invalid_argument{"invalid narrator objects"};
+        for (const auto& binding : bound->as_array()) {
+            closed_object(binding, {"definition_id", "object"});
+            NarratorObjectBinding entry{text(binding, "definition_id"), narrator_object(required(binding, "object"))};
+            if (!narrator_definition_id(entry.definition_id)) throw std::invalid_argument{"invalid narrator object definition"};
+            out.objects.push_back(std::move(entry));
+        }
+    }
     if (value.find("next_cursor")) {
         out.next_cursor = text(value, "next_cursor");
         if (out.next_cursor.size() != 64 || !std::ranges::all_of(out.next_cursor, [](char ch) {
@@ -457,7 +511,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "location_catalog"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "narrator_object", "location_catalog"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -482,6 +536,8 @@ inline Line decode_line(std::string_view wire) {
         }
         if (payload.find("delivery_receipts"))
             std::get<Status>(line.payload).delivery_receipts = required(payload, "delivery_receipts").as_bool();
+        if (payload.find("narrator_object"))
+            std::get<Status>(line.payload).narrator_object = required(payload, "narrator_object").as_bool();
         if (payload.find("location_catalog"))
             std::get<Status>(line.payload).location_catalog = required(payload, "location_catalog").as_bool();
     }
@@ -1020,7 +1076,7 @@ inline std::string encode_location_catalog(const EventContext& context, const Lo
 }
 // Private narrator requests (protocol/v2/schemas/narrator.schema.json). All three are bound to an acknowledged
 // context and require the negotiated capability set; a receipt names its exact reply and checkpoint.
-enum class NarratorAction { state, select, cancel, transcript };
+enum class NarratorAction { state, select, cancel, transcript, bind_object };
 enum class NarratorTurnKind { typed, voice, scene };
 struct NarratorTurn {
     NarratorTurnKind kind{NarratorTurnKind::typed};
@@ -1028,6 +1084,9 @@ struct NarratorTurn {
     std::uint64_t state_id{};
     std::string text;
     std::optional<Media> media;
+    // Talking object: definition_id above is the object's, and its exact identity is repeated. Never a scene turn.
+    std::optional<NarratorObjectRef> object;
+    std::string object_name;
 };
 enum class NarratorReceiptOutcome { audio_completed, interrupted, failed };
 struct NarratorReceipt {
@@ -1042,18 +1101,28 @@ inline void require_private_narrator(const EventContext& context) {
         !has("context.saved_anchor") || !has("dialogue.turn_ownership"))
         throw std::invalid_argument{"private narrator requires a bound, negotiated v2 context"};
 }
-inline std::string encode_narrator_command(const EventContext& context, NarratorAction action, std::string definition_id = {}, std::string cursor = {}) {
+inline void require_private_narrator_object(const EventContext& context) {
     require_private_narrator(context);
-    if ((action == NarratorAction::select) != narrator_definition_id(definition_id))
+    if (std::ranges::find(context.capabilities, "narrator.object.v1") == context.capabilities.end())
+        throw std::invalid_argument{"talking objects require the negotiated narrator.object.v1 capability"};
+}
+inline std::string encode_narrator_command(const EventContext& context, NarratorAction action, std::string definition_id = {}, std::string cursor = {},
+                                           std::optional<NarratorObjectRef> bound_object = std::nullopt) {
+    require_private_narrator(context);
+    const auto binds = action == NarratorAction::bind_object;
+    if (binds) require_private_narrator_object(context);
+    if (((action == NarratorAction::select) || binds) != narrator_definition_id(definition_id) ||
+        binds != bound_object.has_value() || (binds && !narrator_object_valid(*bound_object)))
         throw std::invalid_argument{"invalid narrator command"};
     auto payload = object({{"action", action == NarratorAction::state ? "state" : action == NarratorAction::select ? "select" :
-        action == NarratorAction::transcript ? "transcript" : "cancel"}});
+        action == NarratorAction::transcript ? "transcript" : binds ? "bind_object" : "cancel"}});
     if (!cursor.empty()) {
         if (action != NarratorAction::transcript || cursor.size() != 64 || !std::ranges::all_of(cursor, [](char ch) {
             return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); })) throw std::invalid_argument{"invalid narrator cursor"};
         payload.emplace_back("cursor", json::Value{std::move(cursor)});
     }
-    if (action == NarratorAction::select) payload.emplace_back("definition_id", json::Value{std::move(definition_id)});
+    if (action == NarratorAction::select || binds) payload.emplace_back("definition_id", json::Value{std::move(definition_id)});
+    if (binds) payload.emplace_back("object", narrator_object_value(*bound_object));
     return encode_event(context, "narrator_command", json::Value{std::move(payload)});
 }
 inline std::string encode_narrator_turn(const EventContext& context, const NarratorTurn& turn) {
@@ -1066,6 +1135,16 @@ inline std::string encode_narrator_turn(const EventContext& context, const Narra
         {"state_id", turn.state_id}});
     if (typed) payload.emplace_back("text", json::Value{turn.text});
     if (voice) payload.emplace_back("media", media_value(*turn.media));
+    if (turn.object) {
+        require_private_narrator_object(context);
+        if (turn.kind == NarratorTurnKind::scene || !narrator_object_valid(*turn.object) || turn.object_name.size() > 256)
+            throw std::invalid_argument{"invalid narrator object turn"};
+        payload.emplace_back("object", narrator_object_value(*turn.object));
+        // The copied name is prompt context only; one over 64 bytes is dropped rather than cut inside a character.
+        // A blank or whitespace-only name is omitted, because the server refuses it.
+        const auto named = turn.object_name.find_first_not_of(" \t\r\n") != std::string::npos;
+        if (named && turn.object_name.size() <= 64) payload.emplace_back("object_name", json::Value{turn.object_name});
+    } else if (!turn.object_name.empty()) throw std::invalid_argument{"invalid narrator object turn"};
     return encode_event(context, "narrator_turn", json::Value{std::move(payload)});
 }
 inline std::string encode_narrator_receipt(const EventContext& context, const NarratorReceipt& receipt) {
