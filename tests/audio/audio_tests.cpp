@@ -1,7 +1,10 @@
 #include "audio/dialogue_audio.hpp"
 #include "audio/speech_animation.hpp"
 #include "audio/speech_lease.hpp"
+#include "audio/wave_silence.hpp"
+#include <cstdint>
 #include <limits>
+#include <vector>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -109,5 +112,27 @@ int main() try {
     CHECK(!scene.has_listener()); CHECK(!scene.distance_to("npc"));
     stale_hmd.sample = 5; CHECK(scene.update_listener(RuntimeView::vr, flat, stale_hmd, 5) == ListenerResult::accepted);
     CHECK(std::abs(*scene.distance_to("npc") - std::sqrt(65.0)) < 1e-9);
+    // Digital silence is not playable speech; any non-zero sample, bad container or missing data is not "silent".
+    {
+        const auto wave = [](std::uint16_t tag, std::uint16_t bits, std::size_t samples, std::uint8_t fill) {
+            std::vector<std::byte> out;
+            const auto put = [&out](std::uint64_t value, int count) { for (int i = 0; i < count; ++i) out.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFFU)); };
+            const auto text = [&out](const char* value) { for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::byte>(value[i])); };
+            const auto bytes = samples * (bits / 8U);
+            text("RIFF"); put(36 + bytes, 4); text("WAVE"); text("fmt "); put(16, 4); put(tag, 2); put(1, 2); put(8000, 4);
+            put(8000U * (bits / 8U), 4); put(bits / 8U, 2); put(bits, 2); text("data"); put(bytes, 4);
+            out.insert(out.end(), bytes, static_cast<std::byte>(fill));
+            return out;
+        };
+        using synth::audio::wave_is_silent;
+        CHECK(wave_is_silent(wave(1, 16, 2000, 0)) && wave_is_silent(wave(1, 24, 1000, 0)) && wave_is_silent(wave(3, 32, 1000, 0)));
+        CHECK(wave_is_silent(wave(1, 8, 2000, 0x80)) && !wave_is_silent(wave(1, 8, 2000, 0)));
+        auto quiet = wave(1, 16, 2000, 0); quiet[quiet.size() - 2] = static_cast<std::byte>(1);
+        CHECK(!wave_is_silent(quiet));
+        auto tail = wave(1, 8, 2000, 0x80); tail.back() = static_cast<std::byte>(0x81);
+        CHECK(!wave_is_silent(tail));
+        auto truncated = wave(1, 16, 2000, 0); truncated.resize(truncated.size() - 1);
+        CHECK(!wave_is_silent(truncated) && !wave_is_silent({}) && !wave_is_silent(wave(1, 16, 0, 0)));
+    }
     std::cout << "audio tests passed\n";
 } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

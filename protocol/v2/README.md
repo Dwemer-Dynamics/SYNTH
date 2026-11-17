@@ -93,8 +93,9 @@ modes), `target_missing`, `target_not_placed_reference` (dynamic `0xFF`),
 `npc_not_registered` (no `actor_identity`-bound profile),
 `llm_connector_unsupported` (non-`openaijson`, reasoning or quickstart-managed),
 `load_order_identity_ambiguous` (a second identity row for the same plugin-local
-reference) or `tts_profile_unsupported` (the profile's own TTS connector is absent
-or not portable; there is no server-wide or other-provider fallback). Once
+reference). Voice is optional: a profile whose own TTS connector is absent or not portable is
+still admitted, and a line whose speech cannot be queued is still delivered (see "Voice is
+optional" below). There is no server-wide or other-provider fallback. Once
 admitted, failure, empty, oversized (more than 12 lines, a line over 1000
 characters, or 16 KiB total) or incomplete provider output ends the turn with a
 terminal error; nothing is truncated. The route emits no actions; audio/STT,
@@ -115,8 +116,26 @@ the stored state; a different outcome conflicts. Wrong request, line, character,
 turn, generation, context or a retired session is rejected. Only spoken and
 presented lines enter conversation history; generated, interrupted and failed
 lines are never heard. The client sends `audio_completed` only after native audio
-finishes. The reading timer is not renderer evidence, so the client never sends
-`text_presented` in this slice. Receipts are not retried.
+finishes. Receipts are not retried.
+
+### Voice is optional
+
+A `/talk` turn does not need a working voice. When the speaking profile has no portable TTS
+connector, or one line's speech cannot be queued, the server emits that line's `dialogue`
+without a `speech` block (the schema has always allowed this: text only) and the turn
+completes normally. The same fallback applies to a line whose speech is queued but later
+reports `failed`, never becomes ready before its deadline, or decodes to digital silence
+(every PCM sample at zero level; the server refuses to publish such audio and the client
+refuses to play it). No new field, capability or status code is involved. Cancellation still
+ends the turn as before.
+
+The client shows the caption of a text-only line for its reading window (about 1.5 s plus
+55 ms per character, 3 to 30 s) and, once that window completes uncancelled, sends
+`text_presented`. A caption that was replaced, cancelled, discarded or never reached its
+reading window sends nothing, so the line stays unheard. The server stores `text_presented`
+as `presented`, which inserts the same heard history row as `audio_completed` stores as
+`spoken`. The reading window is the client's evidence that the line was shown, not an
+acknowledgement from the renderer.
 
 ## Ordinary NPC delivery receipts
 

@@ -391,13 +391,32 @@ void native_turn_receipt_tests(const std::string& root) {
     require(client::speech_receipt_outcome(DialogueDelivery::spoken,false)==protocol_native::SpeechReceiptOutcome::audio_completed,"spoken");
     require(client::speech_receipt_outcome(DialogueDelivery::discarded,true)==protocol_native::SpeechReceiptOutcome::interrupted,"interrupted");
     require(client::speech_receipt_outcome(DialogueDelivery::discarded,false)==protocol_native::SpeechReceiptOutcome::failed,"failed");
-    require(!client::speech_receipt_outcome(DialogueDelivery::text_complete,false),"reading timer claimed text_presented");
+    // A caption shown for its whole reading window (text-only, failed or silent voice) is text_presented; one still
+    // queued or reading, or cancelled, claims nothing.
+    require(client::speech_receipt_outcome(DialogueDelivery::text_complete,false)==protocol_native::SpeechReceiptOutcome::text_presented,"shown text reported no receipt");
+    require(!client::speech_receipt_outcome(DialogueDelivery::text_complete,true),"cancelled text claimed text_presented");
+    require(!client::speech_receipt_outcome(DialogueDelivery::reading,false) && !client::speech_receipt_outcome(DialogueDelivery::pending,false) &&
+        !client::speech_receipt_outcome(DialogueDelivery::playing,false),"unfinished caption claimed a receipt");
     // Receipts follow the explicit server marker only; a legacy typed line without it never owns one.
     std::istringstream native_lines{read("valid/response-native-turn.ndjson")};
     std::vector<bool> markers;
     while(std::getline(native_lines,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload))
         markers.push_back(std::get<protocol_native::Dialogue>(line.payload).native_turn);
     require(markers==std::vector<bool>{true,true},"native-turn marker lost");
+    // Voice is optional: a turn whose lines carry no speech block decodes as text-only native lines.
+    std::istringstream text_only_lines{read("valid/response-native-turn-text-only.ndjson")};
+    int text_only_count{};
+    while(std::getline(text_only_lines,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload)) {
+        const auto& dialogue=std::get<protocol_native::Dialogue>(line.payload);
+        require(dialogue.native_turn && !dialogue.speech && !dialogue.text.empty(),"text-only native line lost its text or gained speech");
+        ++text_only_count;
+    }
+    require(text_only_count==2,"text-only native turn lost a line");
+    // The presented receipt fixture is exactly what the client encodes for a fully shown text-only line.
+    auto presented=receipt; presented.line_id="req-text-1:dialogue:2"; presented.outcome=protocol_native::SpeechReceiptOutcome::text_presented;
+    const auto presented_fixture=json::parse(read("valid/speech-receipt-text-presented.json"));
+    auto presented_context=context; presented_context.request_id="receipt:2:2";
+    require(json::write(json::parse(protocol_native::encode_speech_receipt(presented_context,presented)))==json::write(presented_fixture),"text_presented receipt differs from its fixture");
     auto legacy=read("valid/response-native-turn.ndjson");
     legacy=legacy.substr(legacy.find(10)+1); legacy=legacy.substr(0,legacy.find(10));
     const auto marker=legacy.find(",\"native_turn\":true");
@@ -470,6 +489,21 @@ void native_turn_receipt_tests(const std::string& root) {
     require(static_cast<bool>(client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,true))
         && !client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,false)
         && !client::speech_receipt_hook(outbox,first_line,spoken,true),"ordinary hook not bound to the marker and its own negotiation");
+    // An enrolled ordinary line whose speech fails keeps its caption timer out of history: a shown caption sends no
+    // text_presented, while completed audio and an interruption still report (only /talk lines may report presented).
+    {
+        const auto ordinary_outbox=std::make_shared<client::SpeechReceiptOutbox>();
+        const auto report=[&](presentation::DialogueDelivery terminal,bool cancelled) {
+            auto hook=client::ordinary_speech_receipt_hook(ordinary_outbox,first_line,spoken,player,true);
+            hook(terminal,cancelled);
+            return ordinary_outbox->take(first_line.generation);
+        };
+        require(report(presentation::DialogueDelivery::text_complete,false).empty(),"ordinary caption timer sent text_presented");
+        const auto done=report(presentation::DialogueDelivery::spoken,false);
+        require(done.size()==1 && done.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::audio_completed,"ordinary audio receipt lost");
+        const auto cut=report(presentation::DialogueDelivery::discarded,true);
+        require(cut.size()==1 && cut.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::interrupted,"ordinary interrupted receipt lost");
+    }
     const auto& text_line=dialogue_lines.back();
     const auto& text_only=std::get<protocol_native::Dialogue>(text_line.payload);
     require(!text_only.receipt_required && !text_only.speech

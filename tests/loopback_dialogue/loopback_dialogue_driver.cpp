@@ -35,7 +35,10 @@
 // runs. Two replacement sessions restored from co-saves before and after the generated lines then make one /talk each.
 // The PlayerDialogue departure watch that decides to cancel needs Windows headers and is not compiled here.
 //
-// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat]   (any non-loopback address is refused)
+// The opt-in "voice" scenario is one /talk to a target whose profile has no TTS connector: its line has no speech block,
+// a cancelled caption sends no receipt, and a fully shown caption sends one text_presented receipt the server must store.
+//
+// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice]   (any non-loopback address is refused)
 #include "client/http.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/speech_receipts.hpp"
@@ -780,6 +783,63 @@ int run_witness(std::string_view base) {
     return 0;
 }
 
+// ---- Voice-optional scenario (opt-in) ----
+// One /talk to a target whose profile has no TTS connector: the line arrives without a speech block, and the shared
+// terminal-delivery hook turns a fully shown caption into one text_presented receipt (a cancelled caption sends
+// nothing). The receipt is sent to the server, which must store it as presented and add one heard history row.
+int run_voice(std::string_view base) {
+    LoopbackHttpTransport transport{base};
+    core::SaveContextStore store;
+    const auto fill = [] { core::PlaythroughUuid bytes{}; bytes.fill(0x5b); return std::optional{bytes}; };
+    CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
+    Writer first{transport, "loopback-voice", 1, store};
+    first.capture_stats(4);
+    const auto initial = first.publish();
+    phase("context", {{"session", first.session}, {"playthrough_id", first.playthrough},
+        {"target_form", std::string{target_form}}, {"sequence", initial.context_binding.sequence}});
+
+    const auto shown = first.talk("Loopback voiceless question?");
+    const auto& said = std::get<protocol_native::Dialogue>(shown.line.payload);
+    CHECK(!said.speech && !said.text.empty());
+    evidence("voiceless", {{"line_id", shown.line.line_id}, {"speech", json::Value{false}}, {"text", said.text}});
+
+    const auto outbox = std::make_shared<client::SpeechReceiptOutbox>();
+    // A caption cancelled before its reading window completes claims nothing.
+    {
+        core::CancellationSource gone{first.generation};
+        presentation::DialogueCaption caption{.generation = shown.line.generation, .text = said.text, .cancellation = gone.token(),
+            .request_id = shown.line.request_id, .line_id = shown.line.line_id, .context_sequence = shown.line.context_sequence,
+            .on_terminal = client::speech_receipt_hook(outbox, shown.line, said, first.synth.native_turn_ready())};
+        CHECK(caption.on_terminal);
+        caption.mark_delivery(presentation::DialogueDelivery::reading);
+        gone.cancel();
+        caption.mark_delivery(presentation::DialogueDelivery::text_complete);
+    }
+    CHECK(outbox->take(first.generation.value()).empty());
+    // The shown caption: one text_presented receipt, however often the terminal state is reported.
+    {
+        presentation::DialogueCaption caption{.generation = shown.line.generation, .text = said.text, .cancellation = first.owner.token(),
+            .request_id = shown.line.request_id, .line_id = shown.line.line_id, .context_sequence = shown.line.context_sequence,
+            .on_terminal = client::speech_receipt_hook(outbox, shown.line, said, first.synth.native_turn_ready())};
+        caption.mark_delivery(presentation::DialogueDelivery::reading);
+        caption.mark_delivery(presentation::DialogueDelivery::text_complete);
+        caption.mark_delivery(presentation::DialogueDelivery::text_complete);
+    }
+    auto pending = outbox->take(first.generation.value());
+    CHECK(pending.size() == 1 && pending.front().receipt.outcome == protocol_native::SpeechReceiptOutcome::text_presented);
+    const auto exchange = client::exchange_speech_receipt(first.synth, pending.front(), first.owner.token(), first.terminal,
+        client::HeardReceipt{std::bind_front(&client::SaveCheckpoint::note_heard_receipt, &first.checkpoint)});
+    evidence("receipt", {{"request_id", exchange.outcome.request_id}, {"line_id", pending.front().receipt.line_id},
+        {"accepted_state", text(exchange.accepted_state.value_or(""))}});
+    CHECK(exchange.accepted_state == "presented" && exchange.heard && first.checkpoint.due());
+    const auto checkpoint = first.publish();
+    CHECK(!first.checkpoint.due());
+    phase("receipt", {{"session", first.session}, {"dialogue_request_id", shown.line.request_id}, {"line_id", shown.line.line_id},
+        {"heard_text", said.text}, {"receipt_request_id", exchange.outcome.request_id}, {"checkpoint_sequence", checkpoint.context_binding.sequence}});
+    std::cout << "DONE" << std::endl;
+    return 0;
+}
+
 // ---- Auto Chat scenario (opt-in) ----
 
 // Raw intents carry LAI tokens and generated lines LAC/LG tokens, so the harness can tell which text reached which
@@ -1021,13 +1081,14 @@ int run_autochat(std::string_view base) {
 
 int main(int argc, char** argv) {
     const std::string_view scenario = argc == 3 ? argv[2] : "dialogue";
-    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness" && scenario != "autochat")) {
-        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat]\n";
+    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness" && scenario != "autochat" && scenario != "voice")) {
+        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice]\n";
         return 2;
     }
     try {
         if (scenario == "witness") return run_witness(argv[1]);
         if (scenario == "autochat") return run_autochat(argv[1]);
+        if (scenario == "voice") return run_voice(argv[1]);
         return scenario == "companion" ? run_companion(argv[1]) : run(argv[1]);
     } catch (const std::exception& error) {
         std::cout << "FAILED " << error.what() << std::endl;
