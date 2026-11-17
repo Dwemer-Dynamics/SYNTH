@@ -109,12 +109,14 @@ private:
     std::atomic_bool draining_{};
 };
 
-// Only completed native audio proves a heard line. The text reading timer is not a renderer
-// acknowledgement, so text_complete produces no receipt and the server keeps the line unheard.
+// Completed native audio proves a heard line. A text-only line (no TTS, failed or silent TTS) is heard once its
+// caption has been shown for the whole reading window: text_complete (uncancelled) is text_presented. A caption
+// that was only queued, replaced, cancelled or discarded never claims presentation.
 [[nodiscard]] inline std::optional<protocol_native::SpeechReceiptOutcome> speech_receipt_outcome(
     presentation::DialogueDelivery terminal, bool cancelled) noexcept {
     using presentation::DialogueDelivery;
     if (terminal == DialogueDelivery::spoken && !cancelled) return protocol_native::SpeechReceiptOutcome::audio_completed;
+    if (terminal == DialogueDelivery::text_complete && !cancelled) return protocol_native::SpeechReceiptOutcome::text_presented;
     if (terminal == DialogueDelivery::discarded || terminal == DialogueDelivery::spoken)
         return cancelled ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::failed;
     return std::nullopt;
@@ -136,7 +138,7 @@ private:
 }
 
 // Terminal caption hook for a native v2 turn line; empty for any other line. Its first terminal delivery
-// pushes one copied receipt; only completed native audio becomes audio_completed.
+// pushes one copied receipt: completed native audio is audio_completed, a fully shown text-only caption text_presented.
 [[nodiscard]] inline std::function<void(presentation::DialogueDelivery, bool)> speech_receipt_hook(
     std::weak_ptr<SpeechReceiptOutbox> outbox, const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
     bool native_turn_ready) {

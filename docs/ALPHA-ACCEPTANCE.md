@@ -91,7 +91,11 @@ See [the feature note](COMPANION-COMBAT-COMMENTS.md). No gameplay or deployment 
   and no late audio plays.
 - [ ] Unmarked typed text (Wait, Follow, gifts, Jev) still uses its existing routes;
   `/talk` with no message or to an ineligible NPC shows a useful failure.
-- [ ] Subtitles-only or voice failure: text appears but the line stays unheard.
+- [ ] Voice optional, flat and VR separately: with the speaking profile's TTS connector removed or unreachable,
+  `/talk` still shows each line as a subtitle (flat) or HUD message (VR) for its reading window,
+  records one `presented` row per fully shown line, and the NPC recalls it after a covering ACK. A
+  line replaced by a new request or cancelled mid-window stays unheard. Voice that returns silent
+  audio is shown as text and plays nothing. In-game behaviour is unverified.
 
 ## Session ownership composition
 
@@ -422,7 +426,8 @@ The optional protocol v2 grant requires turn ownership. Ordinary NPC lines with 
 or ready speech can be enrolled. Check the stored exact line and confirm that only
 an accepted heard receipt adds its history. Known text-only responses keep their
 existing history. If enrolled audio fails later, the line stays unheard without an
-explicit accepted presentation receipt. A caption timer supplies no receipt.
+explicit accepted presentation receipt. A text-only caption that completes its reading window
+uncancelled sends `text_presented`; a queued or cancelled one sends nothing.
 
 Exercise cancellation both before and after receipt commit. An accepted heard row
 survives cancellation. When cancellation revokes a pending line first, a late receipt
