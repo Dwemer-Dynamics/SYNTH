@@ -59,7 +59,7 @@ GameThreadDispatcher <- typed command <- strict response router
 |---|---|---|
 | `src/core/`, `src/json/`, `src/protocol_native/`, `src/transport/`, `src/tasks/`, `src/context/`, `src/config/`, `src/actions/`, `src/targeting/`, `src/presentation/`, `src/audio/`, `src/voice/`, `src/diagnostics/` | Engine-free logic: snapshots, mailboxes, generation and cancellation, protocol, tasks, typed actions, presentation policy | No |
 | `src/runtime/` | `IFalloutRuntime`, `GameThreadDispatcher` and the other engine-facing interfaces | No |
-| `src/client/` | Session composition and feature delivery code (`PluginSession`, dialogue, speech, observed events, rechat); 37 flat headers today | No |
+| `src/client/` | Session composition and feature delivery code (`PluginSession`, dialogue, speech, observed events, rechat); dozens of flat headers today | No |
 | `src/adapters/` | `Flat*` and `Vr*` runtimes and the CommonLib/F4SE bindings (`flat_*`, `commonlib_*`) | **Yes, the only place** |
 | `src/flat/`, `src/vr/` | Per-lane `plugin_entry.cpp` | Yes |
 | `src/integration/`, `src/input/`, `src/ui/`, `src/lifecycle/`, `src/media_*/`, `src/radio/` | Support areas for other mods, input, menus, lifecycle, media and the radio prototype | Only where already present |
