@@ -1,3 +1,5 @@
+#include "client/connection_notice.hpp"
+#include "client/fake_http.hpp"
 #include "tasks/task_lanes.hpp"
 
 #include <chrono>
@@ -6,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -328,6 +331,175 @@ void test_ordered_speech_delivery_keeps_network_independent() {
     CHECK(activity.load()==0);
 }
 
+using synth::client::ConnectionMonitor;
+using synth::client::ConnectionNotice;
+using synth::client::ConnectionWatch;
+using synth::client::FakeHttpServer;
+using synth::client::FakeHttpTransport;
+using synth::client::FakeScenario;
+
+ConnectionNotice::Clock::time_point after(std::chrono::milliseconds offset) {
+    return ConnectionNotice::Clock::time_point{} + 1000s + offset;
+}
+
+void test_connection_notice_reports_each_change_once_and_backs_off() {
+    ConnectionNotice notice;
+    auto now = after(0ms);
+    CHECK(notice.probe_due(now));
+    notice.probe_started();
+    CHECK(!notice.probe_due(now + 1h)); // One probe at a time.
+    CHECK(!notice.probe_finished(true, now)); // Starting up healthy is silent.
+    CHECK(!notice.probe_due(now + 19999ms) && notice.probe_due(now + 20s));
+
+    now += 20s;
+    // One dropped probe between two good ones is not an outage.
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now));
+    CHECK(!notice.probe_due(now + 5s - 1ms) && notice.probe_due(now + 5s));
+    now += 5s;
+    notice.probe_started();
+    CHECK(!notice.probe_finished(true, now));
+    now += 20s;
+    // Two in a row are: the second failure reports the loss.
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now));
+    now += 5s;
+    notice.probe_started();
+    const auto lost = notice.probe_finished(false, now);
+    CHECK(lost && *lost == ConnectionNotice::lost);
+    // Failure backoff doubles up to the 60 s cap and then stays there.
+    const std::chrono::seconds delays[] = {10s, 20s, 40s, 60s, 60s, 60s};
+    for (std::size_t index = 0; index < std::size(delays); ++index) {
+        // The delay counts from the failure just recorded (the first one is the "lost" probe above).
+        CHECK(!notice.probe_due(now + delays[index] - 1ms) && notice.probe_due(now + delays[index]));
+        now += delays[index];
+        notice.probe_started();
+        CHECK(!notice.probe_finished(false, now)); // Repeated failures stay silent.
+    }
+    notice.probe_started();
+    const auto restored = notice.probe_finished(true, now);
+    CHECK(restored && *restored == ConnectionNotice::restored);
+    notice.probe_started();
+    CHECK(!notice.probe_finished(true, now)); // Repeated successes stay silent.
+    CHECK(!notice.down_reported());
+
+    ConnectionNotice never_up;
+    never_up.probe_started();
+    CHECK(!never_up.probe_finished(false, now));
+    never_up.probe_started();
+    const auto first = never_up.probe_finished(false, now);
+    CHECK(first && *first == ConnectionNotice::unreachable);
+}
+
+void test_connection_notice_reminds_once_after_a_load() {
+    ConnectionNotice notice;
+    auto now = after(0ms);
+    notice.probe_started();
+    CHECK(!notice.probe_finished(true, now));
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now));
+    notice.probe_started();
+    CHECK(notice.probe_finished(false, now).has_value()); // lost
+    // The load probes at once, whatever the backoff, and reminds exactly once if the outage continues.
+    notice.game_loaded(now + 1s);
+    CHECK(notice.probe_due(now + 1s));
+    notice.probe_started();
+    const auto reminder = notice.probe_finished(false, now + 1s);
+    CHECK(reminder && *reminder == ConnectionNotice::still_down);
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now + 10s));
+    notice.probe_started();
+    CHECK(notice.probe_finished(true, now + 20s).has_value()); // restored
+    // A load while up, then a failure, is a new outage: one lost notice and no reminder after it.
+    notice.game_loaded(now + 30s);
+    notice.probe_started();
+    CHECK(!notice.probe_finished(true, now + 30s));
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now + 60s));
+    notice.probe_started();
+    CHECK(notice.probe_finished(false, now + 65s).has_value()); // lost
+    notice.probe_started();
+    CHECK(!notice.probe_finished(false, now + 70s));
+    // A load whose probe finds the server back reports the restoration and no reminder.
+    notice.game_loaded(now + 80s);
+    notice.probe_started();
+    const auto back = notice.probe_finished(true, now + 80s);
+    CHECK(back && *back == ConnectionNotice::restored);
+}
+
+// Runs one probe through the real monitor and waits for it; `step` moves the virtual game clock far past any delay.
+std::vector<std::string> probe_once(ConnectionMonitor& monitor, std::chrono::hours step) {
+    monitor.pump(ConnectionNotice::Clock::now() + step);
+    const auto deadline = ConnectionNotice::Clock::now() + 5s;
+    while (!monitor.notice().probe_due(ConnectionNotice::Clock::now() + step + 24h) &&
+           ConnectionNotice::Clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    std::vector<std::string> shown;
+    monitor.drain([&](const std::string& text) { shown.push_back(text); });
+    return shown;
+}
+
+void test_connection_monitor_gives_one_lost_and_one_restored_notice_per_outage() {
+    FakeHttpServer server;
+    ConnectionMonitor monitor{std::make_unique<FakeHttpTransport>(server)};
+    std::vector<std::string> shown;
+    const auto cycle = [&](bool up, std::chrono::hours step) {
+        if (up) {
+            server.start();
+            server.enqueue(FakeScenario{});
+        } else {
+            server.stop();
+        }
+        for (auto& text : probe_once(monitor, step)) shown.push_back(std::move(text));
+    };
+    for (int index = 1; index <= 3; ++index) cycle(true, std::chrono::hours{index});   // up
+    for (int index = 4; index <= 8; ++index) cycle(false, std::chrono::hours{index});  // down for five probes
+    for (int index = 9; index <= 12; ++index) cycle(true, std::chrono::hours{index});  // back up for four
+    CHECK(shown == (std::vector<std::string>{ConnectionNotice::lost, ConnectionNotice::restored}));
+    CHECK(server.requests().size() == 12);
+    for (const auto& request : server.requests()) {
+        CHECK(request.target == "/health.php?check=live");
+        CHECK(request.method == synth::client::HttpMethod::get && request.body.empty());
+        CHECK(request.timeout_ms == 3000);
+    }
+
+    // A second outage across a game load: one lost, one reminder (the load), one restored.
+    shown.clear();
+    cycle(false, 13h);
+    cycle(false, 14h);
+    monitor.game_loaded(ConnectionNotice::Clock::now() + 15h);
+    cycle(false, 15h);
+    cycle(false, 16h);
+    cycle(true, 17h);
+    CHECK(shown == (std::vector<std::string>{ConnectionNotice::lost, ConnectionNotice::still_down,
+                                             ConnectionNotice::restored}));
+}
+
+void test_connection_watch_follows_the_toggle_and_the_server_settings() {
+    FakeHttpServer server;
+    int built = 0;
+    ConnectionWatch watch{[&](const synth::config::ServerConfig&) {
+        ++built;
+        return std::make_unique<FakeHttpTransport>(server);
+    }};
+    synth::config::ServerConfig settings;
+    const auto present = [](const std::string&) {};
+    const auto now = ConnectionNotice::Clock::now();
+    settings.connection_notice = false;
+    watch.pump(settings, now, present);
+    CHECK(built == 0 && server.requests().empty()); // Off: no monitor and no traffic.
+    settings.connection_notice = true;
+    server.enqueue(FakeScenario{});
+    watch.pump(settings, now, present);
+    watch.pump(settings, now, present);
+    CHECK(built == 1);
+    settings.base_url = "http://127.0.0.1:9/other/";
+    watch.pump(settings, now, present);
+    CHECK(built == 2); // A new server address is a new monitor.
+    settings.connection_notice = false;
+    watch.pump(settings, now, present);
+    watch.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -340,6 +512,10 @@ int main() {
         test_configuration_validation();
         test_activity_lifetime_on_every_exit();
         test_ordered_speech_delivery_keeps_network_independent();
+        test_connection_notice_reports_each_change_once_and_backs_off();
+        test_connection_notice_reminds_once_after_a_load();
+        test_connection_monitor_gives_one_lost_and_one_restored_notice_per_outage();
+        test_connection_watch_follows_the_toggle_and_the_server_settings();
         std::cout << "task lane tests passed (" << assertions << " assertions)\n";
         return 0;
     } catch (const std::exception& error) {

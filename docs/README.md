@@ -45,6 +45,7 @@ in the handoff, matrix or source comments.
 | Diaries | [MANUAL-DIARY-TEST.md](MANUAL-DIARY-TEST.md) | `src/client/diary_requests.hpp`, `src/core/automatic_diary_queue.hpp` | `tests/fake_server`, `tests/input` |
 | Visual capture | No dedicated note; [PROTOCOL.md](PROTOCOL.md) | `src/client/visual_capture.hpp`, `src/media_capture/window_capture.hpp` | `tests/context`, `tests/fake_server`; window capture untested |
 | Voice samples | [VOICE-CLONING.md](VOICE-CLONING.md) | `src/voice/` | `tests/native` |
+| Server connection notice | [CONNECTION-NOTICE.md](CONNECTION-NOTICE.md) | `src/client/connection_notice.hpp`, `src/flat/plugin_entry.cpp`, `src/vr/plugin_entry.cpp` | `tests/tasks`, `tests/config` |
 | Configuration, Control menu and settings pages | [README](../README.md#configuration), [CONTROL-MENU-PARITY.md](CONTROL-MENU-PARITY.md), [F4SEMENUFRAMEWORK.md](../provenance/F4SEMENUFRAMEWORK.md) | `config/SYNTH.ini`, `src/config/config.hpp`, `src/ui/`, `src/client/server_control.hpp` | `tests/config`, `tests/input`, `tests/build` |
 | Native and Papyrus APIs for other mods | [NATIVE-EVENT-API.md](NATIVE-EVENT-API.md), [PAPYRUS-API.md](PAPYRUS-API.md) | `src/integration/synth_external_api.h`, `src/integration/`, `scripts/papyrus/` | `tests/input`, `scripts/verify_papyrus.py` |
 | Gameplay records (`SYNTH.esp`) | [ESP-DEFERRED-SETUP.md](ESP-DEFERRED-SETUP.md), [WAIT-HERE.md](WAIT-HERE.md) | `scripts/build_gameplay.py`, `scripts/build_wait_script.py`, `scripts/papyrus/` | `tests/build`, `tests/packaging` |
