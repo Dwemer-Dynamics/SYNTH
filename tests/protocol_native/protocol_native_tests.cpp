@@ -284,6 +284,11 @@ void talking_object_tests(const std::string& root) {
     require(refused([&]{return pn::encode_narrator_command(without,pn::NarratorAction::bind_object,definition,{},fixture_object);}),"bind without grant");
     auto scene=turn; scene.kind=pn::NarratorTurnKind::scene; scene.text.clear();
     require(refused([&]{return pn::encode_narrator_turn(context,scene);}),"object scene turn");
+    auto blank=turn; blank.object_name=" \t ";
+    require(pn::required(pn::required(json::parse(pn::encode_narrator_turn(context,blank)),"payload"),"object").is_object() &&
+        !pn::required(json::parse(pn::encode_narrator_turn(context,blank)),"payload").find("object_name"),"blank object name is omitted");
+    auto upper=turn; upper.object->ref_plugin="Foo.ESP"; upper.object->base_plugin="BASE.Esm";
+    require(!refused([&]{return pn::encode_narrator_turn(context,upper);}),"upper-case plugin suffix");
     auto lower=turn; lower.object->ref_id="0x000a1b2c";
     require(refused([&]{return pn::encode_narrator_turn(context,lower);}),"lower-case object id");
     auto named=turn; named.object.reset();

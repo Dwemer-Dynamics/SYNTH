@@ -108,6 +108,16 @@ struct TalkingObjectScan final {
     std::erase_if(candidates, [](const TalkingObjectCandidate& value) {
         return !value.held && !(value.looking_at && value.distance <= talking_object_look_range);
     });
+    // One reference can appear in both nearby lists; it is still one object. Keep its held/nearest copy.
+    std::ranges::stable_sort(candidates, [](const TalkingObjectCandidate& left, const TalkingObjectCandidate& right) {
+        if (left.held != right.held) return left.held;
+        return left.distance < right.distance;
+    });
+    std::vector<TalkingObjectCandidate> unique;
+    for (auto& value : candidates)
+        if (std::ranges::none_of(unique, [&](const TalkingObjectCandidate& seen) { return seen.identity == value.identity; }))
+            unique.push_back(std::move(value));
+    candidates = std::move(unique);
     if (candidates.empty()) return {};
     std::ranges::sort(candidates, [](const TalkingObjectCandidate& left, const TalkingObjectCandidate& right) {
         if (left.held != right.held) return left.held;

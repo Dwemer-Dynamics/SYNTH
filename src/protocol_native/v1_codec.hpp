@@ -333,7 +333,11 @@ inline NarratorRef narrator_ref(const json::Value& value) {
 }
 inline bool narrator_plugin_name(std::string_view value) noexcept {
     return !value.empty() && value.size() <= 255 && value.find_first_of("/\\") == std::string_view::npos &&
-        (value.ends_with(".esm") || value.ends_with(".esp") || value.ends_with(".esl"));
+        value.size() > 4 && [&] {
+            const auto lower = [](char ch) { return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch); };
+            const std::string suffix{lower(value[value.size() - 3]), lower(value[value.size() - 2]), lower(value[value.size() - 1])};
+            return value[value.size() - 4] == '.' && (suffix == "esm" || suffix == "esp" || suffix == "esl");
+        }();
 }
 // 0x followed by eight upper-case hexadecimal digits.
 inline bool narrator_wire_id(std::string_view value) noexcept {
@@ -1057,7 +1061,9 @@ inline std::string encode_narrator_turn(const EventContext& context, const Narra
             throw std::invalid_argument{"invalid narrator object turn"};
         payload.emplace_back("object", narrator_object_value(*turn.object));
         // The copied name is prompt context only; one over 64 bytes is dropped rather than cut inside a character.
-        if (!turn.object_name.empty() && turn.object_name.size() <= 64) payload.emplace_back("object_name", json::Value{turn.object_name});
+        // A blank or whitespace-only name is omitted, because the server refuses it.
+        const auto named = turn.object_name.find_first_not_of(" \t\r\n") != std::string::npos;
+        if (named && turn.object_name.size() <= 64) payload.emplace_back("object_name", json::Value{turn.object_name});
     } else if (!turn.object_name.empty()) throw std::invalid_argument{"invalid narrator object turn"};
     return encode_event(context, "narrator_turn", json::Value{std::move(payload)});
 }

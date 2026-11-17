@@ -497,6 +497,10 @@ int main() {
             CHECK(talking_object_identity(0xFE123ABC, std::string{"Mod.esl"}, 0x00014E3A, "Fallout4.esm", plugins)->ref_id == 0xABC);
             CHECK(!talking_object_identity(0x05000001, std::string{"Missing.esp"}, 0x00014E3A, "Fallout4.esm", plugins));
             CHECK(!talking_object_identity(0xFF000001, std::nullopt, 0xFF000002, "Fallout4.esm", plugins));
+            // The same reference listed as an item and as a point of interest is one object, not an ambiguity.
+            const auto duplicate = make({item(0xFF001234, std::nullopt, 1, false, true)},
+                {PointOfInterestSnapshot{0xFF001234, 0x00004822, 0x00018AA2, std::nullopt, "Fallout4.esm", "Fallout4.esm", "Holotape", "activator", {5, 0, 0}, 80.0, false, true}});
+            CHECK(scan_talking_object(duplicate).status == TalkingObjectScanStatus::found);
             // Re-locating requires the exact identity; another terminal with the same base is never adopted.
             CHECK(locate_talking_object(one, found.object->identity));
             auto other = found.object->identity;

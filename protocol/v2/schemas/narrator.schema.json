@@ -436,7 +436,7 @@
             {
               "type": "string",
               "maxLength": 255,
-              "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+              "pattern": "^[^/\\\\]+\\.([eE][sS][mMpPlL])$"
             }
           ]
         },
@@ -447,7 +447,7 @@
         "base_plugin": {
           "type": "string",
           "maxLength": 255,
-          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+          "pattern": "^[^/\\\\]+\\.([eE][sS][mMpPlL])$"
         },
         "base_id": {
           "type": "string",
