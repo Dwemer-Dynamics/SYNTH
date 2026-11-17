@@ -214,6 +214,10 @@ public:
     [[nodiscard]] bool location_ancestry_ready() const noexcept {
         return location_ancestry_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Granted by an init acknowledgement that carried location_catalog, for a session that listed the capability.
+    [[nodiscard]] bool location_catalog_ready() const noexcept {
+        return location_catalog_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool action_inventory_ready() const noexcept {
         return action_inventory_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -330,6 +334,7 @@ public:
             combat_contacts_negotiated_.store(false, std::memory_order_release);
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
             location_ancestry_negotiated_.store(false, std::memory_order_release);
+            location_catalog_negotiated_.store(false, std::memory_order_release);
             observed_dialogue_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
@@ -409,6 +414,9 @@ public:
                 status->code.ends_with("_accepted") && status->location_ancestry &&
                 std::ranges::find(options_.capabilities,"context.location_ancestry")!=options_.capabilities.end() &&
                 std::ranges::find(options_.capabilities,"context.location_identity")!=options_.capabilities.end(),std::memory_order_release);
+            location_catalog_negotiated_.store(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->location_catalog &&
+                std::ranges::find(options_.capabilities,"world.location_catalog")!=options_.capabilities.end(),std::memory_order_release);
             rechat_scene_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->rechat_scene && uses_rechat_scene_contract(),
                 std::memory_order_release);
@@ -655,6 +663,24 @@ public:
             body = protocol_native::encode_speech_receipt(context(request_id, turn_id, binding), receipt);
         }
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", binding, false, 5000);
+    }
+
+    // Network worker: one location catalog batch or first-entry upsert. Unbound to a context, so it needs only the
+    // negotiated capability and a live generation. Never retried here: the export decides what to do with a failed batch.
+    [[nodiscard]] RequestOutcome send_location_catalog(const protocol_native::LocationCatalogRequest& request) {
+        std::scoped_lock request_lock{request_mutex_};
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            if (!location_catalog_ready()) throw std::invalid_argument{"location catalog is not negotiated"};
+            request_id = next_id("locations");
+            turn_id = next_id("turn");
+            generation = generation_;
+            body = protocol_native::encode_location_catalog(context(request_id, turn_id), request);
+        }
+        return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 15000);
     }
 
     // Worker-only private narrator request bound to an acknowledged context of this generation. Narrator lines are
@@ -1448,6 +1474,7 @@ private:
     std::atomic_bool combat_contacts_negotiated_{};
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
+    std::atomic_bool location_catalog_negotiated_{};
     std::atomic_bool observed_dialogue_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};

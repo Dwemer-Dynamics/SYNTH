@@ -240,6 +240,9 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") == "synth.event.v2" and payload_type == "speech_receipt":
         catalog_path = PROTOCOL / "v2/schemas/speech-receipt.schema.json"
         payload_schema = load_json(catalog_path)
+    if value.get("schema") == "synth.event.v2" and payload_type == "location_catalog":
+        catalog_path = PROTOCOL / "v2/schemas/location-catalog.schema.json"
+        payload_schema = load_json(catalog_path)
     narrator_payloads = {"narrator_command": "command", "narrator_turn": "turn", "narrator_receipt": "receipt",
                          "narrator_reply": "reply", "narrator_state": "state"}
     if value.get("schema") in {"synth.event.v2", "synth.response.line.v2"} and payload_type in narrator_payloads:

@@ -3,6 +3,7 @@
 #include "client/private_narrator.hpp"
 #include "client/rechat_prefetch.hpp"
 #include "client/server_control.hpp"
+#include "client/location_export.hpp"
 #if defined(_WIN32)
 // The real player-input owner holds a NativeMicrophone; these checks never open a device.
 #ifndef NOMINMAX
@@ -85,6 +86,7 @@ public:
     bool actor_support{};
     bool social_support{};
     bool location_ancestry_support{};
+    bool location_catalog_support{};
     std::optional<synth::runtime::SocialTaskDescriptor> social_offer;
     bool inventory_support{};
     bool action_inventory_support{};
@@ -140,13 +142,14 @@ public:
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
         std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((everyone_ack || social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        if ((everyone_ack || social_support || location_ancestry_support || location_catalog_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
             if (actor_stats_support) payload.emplace_back("actor_stats",true);
             if(social_support)payload.emplace_back("social_tasks",true);
             if(location_ancestry_support)payload.emplace_back("location_ancestry",true);
+            if(location_catalog_support)payload.emplace_back("location_catalog",true);
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
             if (combat_targets_support) payload.emplace_back("combat_targets",true);
             if (combat_contacts_ack) payload.emplace_back("combat_contacts",*combat_contacts_ack);
@@ -168,6 +171,12 @@ public:
                 {"text", "Bound response"}});
             if (dialogue_listener) payload.emplace_back("listener",protocol_native::identity_value(*dialogue_listener));
             body += line("dialogue",json::Value{std::move(payload)});
+        }
+        if (protocol_native::text(event, "type") == "location_catalog") {
+            const auto& locations = protocol_native::required(protocol_native::required(event, "payload"), "locations").as_array();
+            body += line("status", json::Value{protocol_native::object({{"code", "location_catalog_accepted"},
+                {"detail", "{\"received\":" + std::to_string(locations.size()) + ",\"valid\":" + std::to_string(locations.size()) +
+                    ",\"markers\":0,\"refused\":[],\"stored\":false}"}})});
         }
         if (protocol_native::text(event, "type") == "diary_request" && !diary_ack.empty())
             body += line("status", json::Value{protocol_native::object({{"code", diary_ack}})});
@@ -1579,6 +1588,29 @@ int main() {
             const auto& body=wire.requests.back().body;
             CHECK((body.find("\"location_ancestry\"")!=std::string::npos)==(mode==0));
             CHECK((body.find("\"location_ref\"")!=std::string::npos)==(mode!=3));
+        }
+        for(int mode=0;mode<4;++mode) {
+            // The catalog is sent only by a flat session whose init listed it and whose server acknowledged it.
+            BindingEchoTransport wire;wire.location_catalog_support=mode!=1;
+            SessionOptions options{.runtime_session_id="session:catalog",.runtime_variant=mode==3?"vr":"flat",
+                .client_version="test",.runtime_version="1.11.240",.capabilities={"world.location_catalog"},.protocol_version=2};
+            if(mode==2)options.capabilities.clear();
+            SynthClient catalog_client{wire,options};
+            CHECK(catalog_client.initialize(1,false).status==RequestStatus::complete);
+            CHECK(catalog_client.location_catalog_ready()==(mode==0));
+            synth::core::CatalogLocation place;place.ref={"Fallout4.esm",0x395C};place.name="Dugout Inn";
+            place.markers.push_back({synth::core::CatalogMarkerType::location_center,{"Fallout4.esm",0x0A1B10},std::nullopt,true,std::nullopt,{0.0,128.0,64.0},false});
+            const synth::protocol_native::LocationCatalogRequest request{synth::protocol_native::LocationCatalogMode::upsert,"save:one","",0,false,{place}};
+            if(catalog_client.location_catalog_ready()) {
+                const auto sent=catalog_client.send_location_catalog(request);
+                CHECK(sent.status==RequestStatus::complete);
+                const auto answer=synth::client::location_catalog_answer(sent);
+                CHECK(answer.accepted && answer.received==1 && answer.valid==1 && answer.refused==0);
+                CHECK(wire.requests.back().body.find("\"context_sequence\":0")!=std::string::npos);
+            } else {
+                bool refused=false;try{(void)catalog_client.send_location_catalog(request);}catch(const std::invalid_argument&){refused=true;}
+                CHECK(refused);
+            }
         }
         for(int mode=0;mode<4;++mode) {
             BindingEchoTransport wire;wire.player_support=true;wire.social_support=mode!=1;

@@ -121,7 +121,8 @@ public:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false,
-                                                             bool observed_dialogue_available = false) {
+                                                             bool observed_dialogue_available = false,
+                                                             bool location_catalog_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts",
@@ -167,6 +168,8 @@ public:
             if (companion_comments) result.push_back("dialogue.companion_combat_comments");
             // Only an audited flat sampler offers first-observed vanilla dialogue; VR never does.
             if (observed_dialogue_available) result.push_back("context.observed_dialogue");
+            // Only a flat adapter that can read the BGSLocation set offers the catalog export; VR never does yet.
+            if (location_catalog_available) result.push_back("world.location_catalog");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
         }

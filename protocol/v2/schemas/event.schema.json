@@ -46,7 +46,8 @@
         "speech_receipt",
         "narrator_command",
         "narrator_turn",
-        "narrator_receipt"
+        "narrator_receipt",
+        "location_catalog"
       ]
     },
     "session_id": {
@@ -1454,6 +1455,27 @@
           },
           "payload": {
             "$ref": "speech-receipt.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "location_catalog"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "world.location_catalog"
+            }
+          },
+          "payload": {
+            "$ref": "location-catalog.schema.json"
           }
         }
       }

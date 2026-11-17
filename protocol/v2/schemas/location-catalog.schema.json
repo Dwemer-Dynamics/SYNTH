@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/location-catalog.schema.json",
+  "title": "SYNTH v2 location catalog export (batch) and first-entry upsert",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "playthrough_id", "locations"],
+  "properties": {
+    "mode": {"enum": ["batch", "upsert"]},
+    "playthrough_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "export_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "final": {"type": "boolean"},
+    "locations": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/location"}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "batch"}}},
+      "then": {"required": ["export_id", "sequence", "final"]},
+      "else": {
+        "not": {"anyOf": [{"required": ["export_id"]}, {"required": ["sequence"]}, {"required": ["final"]}]},
+        "properties": {"locations": {"maxItems": 1}}
+      }
+    }
+  ],
+  "$defs": {
+    "plugin_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin_plugin", "local_form_id"],
+      "properties": {
+        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"},
+        "local_form_id": {"type": "string", "pattern": "^0x[0-9A-F]{6}$"}
+      }
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": {"type": "number", "minimum": -10000000, "maximum": 10000000},
+        "y": {"type": "number", "minimum": -10000000, "maximum": 10000000},
+        "z": {"type": "number", "minimum": -10000000, "maximum": 10000000}
+      }
+    },
+    "worldspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "uses_parent_map"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/plugin_ref"},
+        "editor_id": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,128}$"},
+        "name": {"type": "string", "maxLength": 255},
+        "parent_ref": {"anyOf": [{"$ref": "#/$defs/plugin_ref"}, {"type": "null"}]},
+        "uses_parent_map": {"type": "boolean"}
+      }
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "ref", "interior", "position", "disabled"],
+      "properties": {
+        "type": {"enum": ["location_center", "inside_entrance", "outside_entrance", "boss_treasure", "map_marker", "world_marker", "workshop"]},
+        "ref": {"$ref": "#/$defs/plugin_ref"},
+        "cell_ref": {"$ref": "#/$defs/plugin_ref"},
+        "interior": {"type": "boolean"},
+        "worldspace": {"$ref": "#/$defs/worldspace"},
+        "position": {"$ref": "#/$defs/point"},
+        "disabled": {"type": "boolean"}
+      },
+      "allOf": [
+        {"if": {"properties": {"interior": {"const": true}}}, "then": {"not": {"required": ["worldspace"]}}, "else": {"required": ["worldspace"]}}
+      ]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "name", "keywords", "markers"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/plugin_ref"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "editor_id": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,128}$"},
+        "parent_ref": {"anyOf": [{"$ref": "#/$defs/plugin_ref"}, {"type": "null"}]},
+        "keywords": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"}},
+        "cleared": {"type": "boolean"},
+        "discovered": {"type": "boolean"},
+        "markers": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/marker"}}
+      }
+    }
+  }
+}
