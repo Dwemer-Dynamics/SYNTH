@@ -209,8 +209,9 @@ or the save happened does not decide it.
 cover. A speech receipt raises it only on an exact `speech_receipt_accepted` for
 `audio_completed` stored as `spoken`, or explicit `text_presented` stored as `presented`.
 Ordinary enrollment requires pending or ready speech. Known text-only lines keep their existing
-history path. A text-only caption (no TTS, failed or silent TTS) that completes its reading window uncancelled sends
-`text_presented`; a queued, replaced or cancelled caption sends none. The session must also be uncancelled and
+history path. A native `/talk` text-only caption (no TTS, failed or silent TTS) that completes its reading window
+uncancelled sends `text_presented`; an ordinary line's caption timer produces no presentation receipt, and a queued,
+replaced or cancelled caption sends none. The session must also be uncancelled and
 not terminal, in the same generation, with its writer current. Other sources raise the frontier
 too. On flat, an accepted dialogue line raises it when it arrives, before presentation. That is not
 a heard signal. With delivery receipts negotiated, every dispatched typed or voice input raises it

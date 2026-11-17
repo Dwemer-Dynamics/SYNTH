@@ -389,11 +389,8 @@ private:
             throw std::runtime_error{"native TTS media hash mismatch"};
         }
         // Digital silence is no speech: the empty result sends the line to its text-only caption.
-        if (audio::wave_is_silent(bytes)) {
-            trace_->record(diagnostics::ConversationStage::media_failed,
-                line.generation,line.context_sequence,line.request_id,line.line_id);
-            return {};
-        }
+        // The caller records media_failed and notifies once, as for every other failed preparation.
+        if (audio::wave_is_silent(bytes)) return {};
         if (stopped(cancellation) ||
             tasks::TaskLanes::Clock::now() >= deadline) return {};
         trace_->record(diagnostics::ConversationStage::media_prepared,

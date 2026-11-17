@@ -426,8 +426,8 @@ The optional protocol v2 grant requires turn ownership. Ordinary NPC lines with 
 or ready speech can be enrolled. Check the stored exact line and confirm that only
 an accepted heard receipt adds its history. Known text-only responses keep their
 existing history. If enrolled audio fails later, the line stays unheard without an
-explicit accepted presentation receipt. A text-only caption that completes its reading window
-uncancelled sends `text_presented`; a queued or cancelled one sends nothing.
+explicit accepted presentation receipt. A caption timer supplies no receipt for an ordinary line;
+only a native `/talk` line reports `text_presented` for a fully shown text-only caption.
 
 Exercise cancellation both before and after receipt commit. An accepted heard row
 survives cancellation. When cancellation revokes a pending line first, a late receipt

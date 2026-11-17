@@ -393,6 +393,21 @@ void native_turn_receipt_tests(const std::string& root) {
     require(static_cast<bool>(client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,true))
         && !client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,false)
         && !client::speech_receipt_hook(outbox,first_line,spoken,true),"ordinary hook not bound to the marker and its own negotiation");
+    // An enrolled ordinary line whose speech fails keeps its caption timer out of history: a shown caption sends no
+    // text_presented, while completed audio and an interruption still report (only /talk lines may report presented).
+    {
+        const auto ordinary_outbox=std::make_shared<client::SpeechReceiptOutbox>();
+        const auto report=[&](presentation::DialogueDelivery terminal,bool cancelled) {
+            auto hook=client::ordinary_speech_receipt_hook(ordinary_outbox,first_line,spoken,player,true);
+            hook(terminal,cancelled);
+            return ordinary_outbox->take(first_line.generation);
+        };
+        require(report(presentation::DialogueDelivery::text_complete,false).empty(),"ordinary caption timer sent text_presented");
+        const auto done=report(presentation::DialogueDelivery::spoken,false);
+        require(done.size()==1 && done.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::audio_completed,"ordinary audio receipt lost");
+        const auto cut=report(presentation::DialogueDelivery::discarded,true);
+        require(cut.size()==1 && cut.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::interrupted,"ordinary interrupted receipt lost");
+    }
     const auto& text_line=dialogue_lines.back();
     const auto& text_only=std::get<protocol_native::Dialogue>(text_line.payload);
     require(!text_only.receipt_required && !text_only.speech
