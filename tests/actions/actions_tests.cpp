@@ -6,6 +6,7 @@
 #include "runtime/pickup_progress.hpp"
 #include "runtime/wait_recovery.hpp"
 #include "wait_verification_cases.hpp"
+#include "order_action_cases.hpp"
 #include "client/action_inventory.hpp"
 #include "actions/gift_menu.hpp"
 #include "client/wait_action.hpp"
@@ -84,6 +85,7 @@ int main() {
         }
         checks += synth::tests::social_visit_contract_checks();
         checks += synth::tests::wait_verification_checks();
+        checks += synth::tests::order_action_checks();
         checks += synth::tests::social_task_contract_checks();
         checks += synth::tests::social_delivery_contract_checks();
         checks += synth::tests::trade_contract_checks();

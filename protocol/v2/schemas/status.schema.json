@@ -78,6 +78,9 @@
     },
     "trade_confirmation": {
       "type": "boolean"
+    },
+    "narrator_object": {
+      "type": "boolean"
     }
   }
 }

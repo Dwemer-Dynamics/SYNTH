@@ -6,6 +6,7 @@
 #include "client/context_publication.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/synth_client.hpp"
+#include "client/order_action.hpp"
 #include "client/wait_action.hpp"
 #include "config/config.hpp"
 #include "core/snapshot.hpp"
@@ -142,7 +143,7 @@ public:
             notify_("SYNTH action queue is full");
             return;
         }
-        if ((action.name == "wait_here" || action.name == "release_wait" || action.name == "attack") && !wait_replays_.claim(action)) {
+        if ((action.name == "wait_here" || action.name == "release_wait" || action.name == "attack" || is_order_action(action.name)) && !wait_replays_.claim(action)) {
             notify_("SYNTH action was repeated or its session limit was reached");
             return;
         }
@@ -277,7 +278,7 @@ private:
                             detail = "SYNTH conversation ended and reactivation cooldown applied";
                         }
                     }
-                } else if ((action.name == "sheathe_weapon" || action.name == "equip_item" || action.name == "unequip_item" || action.name == "consume" || action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player" || action.name == "take_item_from_player" || action.name == "open_inventory" || action.name == "wait_here" || action.name == "release_wait" || action.name == "attack") &&
+                } else if ((action.name == "sheathe_weapon" || action.name == "equip_item" || action.name == "unequip_item" || action.name == "consume" || action.name == "give_item_to" || action.name == "give_caps_to" || action.name == "take_caps_from_player" || action.name == "take_item_from_player" || action.name == "open_inventory" || action.name == "wait_here" || action.name == "release_wait" || action.name == "attack" || is_order_action(action.name)) &&
                     action.capability == "action." + action.name) {
                     std::uint32_t form_id{};
                     if (action.actor.form_id.size() != 10 ||
@@ -304,6 +305,9 @@ private:
                                 catch (const std::invalid_argument& error) {
                                     request_valid = false; status = "rejected"; detail = error.what();
                                 }
+                            } else if (is_order_action(action.name)) {
+                                try { request = prepare_order_action(*snapshot, action, cancellation, deadline); }
+                                catch (const std::invalid_argument& error) { request_valid = false; status = "rejected"; detail = error.what(); }
                             } else if (action.name=="open_inventory") {
                                 try {request=prepare_gift_menu_action(*snapshot,action,cancellation,deadline);}
                                 catch(const std::invalid_argument& error){request_valid=false;status="rejected";detail=error.what();}
@@ -406,6 +410,12 @@ private:
                                             try {
                                                 if(!completion->result->wait)throw std::invalid_argument{"wait action lacks a physical receipt"};
                                                 detail=verified_wait_result(action,request,*completion->result->wait);
+                                            } catch(const std::invalid_argument& error) {status="failed";detail=error.what();}
+                                        }
+                                        if(!action_pending && status=="succeeded" && is_order_action(action.name)) {
+                                            try {
+                                                if(!completion->result->order)throw std::invalid_argument{"order action lacks a physical receipt"};
+                                                detail=verified_order_result(action,request,*completion->result->order);
                                             } catch(const std::invalid_argument& error) {status="failed";detail=error.what();}
                                         }
                                     }

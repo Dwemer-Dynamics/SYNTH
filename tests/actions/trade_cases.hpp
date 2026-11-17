@@ -1,8 +1,13 @@
 #pragma once
+#if defined(_WIN32) && !defined(NOMINMAX)
+#  define NOMINMAX  // the capability check pulls in the Windows-facing voice header
+#endif
 // Confirmed NPC sale: offer binding, staleness, the answered purchase with its undo, and the confirmation mailbox.
+#include "client/context_publication.hpp"
 #include "protocol_native/v1_codec.hpp"
 #include "trade/confirmed_trade.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -340,6 +345,20 @@ inline int trade_contract_checks() {
         terminal.store(true);
         retired.join();
         check(got == trade::Answer::withdrawn && !box.is_open(), "a retired session left its box open");
+    }
+
+    // The capability is offered only with a presenter, and never on VR.
+    {
+        const auto has = [](const std::vector<std::string>& list, const char* name) { return std::find(list.begin(), list.end(), name) != list.end(); };
+        trade::prompt().set_installed(false);
+        const auto bare = client::ContextPublication::capabilities(core::RuntimeVariant::flat, false, false, false);
+        check(!has(bare, "action.barter") && !has(bare, "action.trade_confirmation"), "trade advertised without a presenter");
+        trade::prompt().set_installed(true);
+        const auto flat = client::ContextPublication::capabilities(core::RuntimeVariant::flat, false, false, false);
+        check(has(flat, "action.barter") && has(flat, "action.trade_confirmation"), "trade not advertised with a presenter");
+        const auto vr = client::ContextPublication::capabilities(core::RuntimeVariant::vr, false, false, false);
+        check(!has(vr, "action.barter") && !has(vr, "action.trade_confirmation"), "VR advertised trade");
+        trade::prompt().set_installed(false);
     }
 
     // The mirrored fixtures decode into exactly what the preparation expects.

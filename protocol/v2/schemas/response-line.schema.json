@@ -94,6 +94,9 @@
         },
         "private_narrator": {
           "type": "boolean"
+        },
+        "narrator_object": {
+          "type": "boolean"
         }
       },
       "maxProperties": 64
@@ -148,6 +151,56 @@
             "properties": {
               "action": {
                 "$ref": "wait-action.schema.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "action"
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "follow_player",
+                      "stop_following",
+                      "take_a_seat"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "$ref": "order-action.schema.json"
               }
             }
           }

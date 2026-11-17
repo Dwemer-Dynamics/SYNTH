@@ -9,6 +9,8 @@
 #include "client/save_checkpoint.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/synth_client.hpp"
+#include "trade/confirmed_trade.hpp"
+#include "client/order_action.hpp"
 #include "client/wait_action.hpp"
 #include "config/config.hpp"
 #include "context/context.hpp"
@@ -122,6 +124,7 @@ public:
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false,
                                                              bool observed_dialogue_available = false,
+                                                             bool orders_available = false,
                                                              bool trade_confirmation_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
@@ -135,8 +138,9 @@ public:
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
             "action.check_inventory", "action.read_quests", "action.end_conversation",
-            "action.sheathe_weapon", "narrator.private.v1"};
+            "action.sheathe_weapon", "narrator.private.v1", "narrator.object.v1"};
         append_wait_capabilities(result, variant);
+        append_order_capabilities(result, variant, orders_available);
         if (variant==core::RuntimeVariant::flat) result.push_back("action.attack");
         if (variant == core::RuntimeVariant::flat && quest_events_available) result.push_back("context.quest_events");
         if (variant == core::RuntimeVariant::flat && actor_events_available) result.push_back("context.actor_events");
@@ -162,7 +166,7 @@ public:
             result.push_back("action.open_inventory");
             result.push_back("action.gift_menu_inventory");
             // Confirmed NPC sales need a confirmation presenter; without one the capability is never offered.
-            if (trade_confirmation_available) {
+            if (trade_confirmation_available || trade::prompt().installed()) {
                 result.push_back("action.barter");
                 result.push_back("action.trade_confirmation");
             }
