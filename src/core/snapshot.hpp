@@ -397,10 +397,27 @@ struct ActorConditionEntry final {
     std::string origin_plugin;
     std::string name;
     bool chem{};  // meaningful only for active effects: an alchemy-item source rather than another effect
+    // Longest prefix of at most `limit` bytes that ends on a code-point boundary.
+    [[nodiscard]] static std::string truncate_name(std::string name, std::size_t limit = 64) {
+        if (name.size() <= limit) return name;
+        std::size_t cut = limit;
+        while (cut > 0 && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) --cut;
+        name.resize(cut);
+        return name;
+    }
+    // The plugin suffix is compared without regard to case: the game reports the file name as installed.
     [[nodiscard]] bool valid() const noexcept {
+        const auto suffix_is = [this](const char* wanted) {
+            if (origin_plugin.size() < 4) return false;
+            for (std::size_t i = 0; i < 4; ++i) {
+                const auto c = static_cast<unsigned char>(origin_plugin[origin_plugin.size() - 4 + i]);
+                if ((c >= 'A' && c <= 'Z' ? c + 32 : c) != static_cast<unsigned char>(wanted[i])) return false;
+            }
+            return true;
+        };
         return form_id != 0 && !origin_plugin.empty() && origin_plugin.size() <= 255 &&
                origin_plugin.find_first_of("/\\") == std::string::npos &&
-               (origin_plugin.ends_with(".esm") || origin_plugin.ends_with(".esp") || origin_plugin.ends_with(".esl")) &&
+               (suffix_is(".esm") || suffix_is(".esp") || suffix_is(".esl")) &&
                !name.empty() && name.size() <= 64;
     }
 };

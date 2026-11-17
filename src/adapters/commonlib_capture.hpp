@@ -372,8 +372,7 @@ inline constexpr std::int32_t addiction_spell_type = 10;
     const auto full = RE::TESFullName::GetFullName(form);
     auto name = bounded_label(std::string{full}.c_str());
     if (name.empty()) name = form_fallback(form);
-    if (name.size() > 64) name.resize(64);
-    return name;
+    return core::ActorConditionEntry::truncate_name(std::move(name));
 }
 
 [[nodiscard]] inline core::ActorCondition actor_condition_snapshot(RE::Actor& actor, const RE::ActorValue* values) {
@@ -427,6 +426,8 @@ inline constexpr std::int32_t addiction_spell_type = 10;
         const bool addiction = static_cast<std::int32_t>(source.GetSpellType()) == addiction_spell_type;
         core::ActorConditionEntry entry{form_id, std::move(plugin), condition_name(source),
             !addiction && source.GetFormType() == RE::ENUM_FORM_ID::kALCH && !source.IsFood()};
+        // Capture never throws: an entry the contract would refuse is skipped and the lists marked incomplete.
+        if (!entry.valid()) { result.truncated = true; continue; }
         auto& target = addiction ? result.addictions : result.effects;
         if (target.size() >= core::ActorCondition::max_entries) { result.truncated = true; continue; }
         target.push_back(std::move(entry));
@@ -1514,7 +1515,10 @@ struct NearbyReferenceSnapshots final {
     auto with_stats = std::move(captured).with_actor_stats(std::move(stats));
     // Deep capture only; one bounded read set per selected actor, never in the shallow discovery scan.
     if (!include_details) return with_stats;
-    return std::move(with_stats).with_actor_condition(actor_condition_snapshot(mutable_actor, actor_values));
+    auto condition = actor_condition_snapshot(mutable_actor, actor_values);
+    // A throw here would abort the whole actor capture on the game thread; an invalid read is simply unobserved.
+    if (!condition.valid()) condition = core::ActorCondition{};
+    return std::move(with_stats).with_actor_condition(std::move(condition));
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.

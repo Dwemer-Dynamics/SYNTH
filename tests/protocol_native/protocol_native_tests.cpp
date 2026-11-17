@@ -72,6 +72,16 @@ void actor_condition_tests() {
     bad=condition;bad.addictions[0].name.assign(65,'x');expect_refused(bad,"long name accepted");
     bad=condition;bad.addictions[0].origin_plugin="a/b.esm";expect_refused(bad,"path-like plugin accepted");
     bad=none;bad.truncated=true;expect_refused(bad,"unobserved read carried a value");
+    // Truncation never splits a multibyte character: 63 ASCII bytes then a 2-byte letter cuts back to 63.
+    const auto cut=core::ActorConditionEntry::truncate_name(std::string(63,'a')+"Ã©Ã©");
+    require(cut==std::string(63,'a'),"multibyte name split");
+    require(core::ActorConditionEntry::truncate_name(std::string(64,'b')).size()==64,"short name shortened");
+    // The game reports plugin file names as installed: an upper-case suffix is valid and serialised unchanged.
+    auto upper=condition;upper.addictions[0].origin_plugin="Foo.ESP";upper.effects[0].origin_plugin="Bar.Esl";
+    require(upper.valid(),"upper-case plugin suffix refused");
+    state.actor_condition=upper;
+    require(json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_condition")).find("\"Foo.ESP\"")!=std::string::npos,"upper-case plugin altered");
+    upper.addictions[0].origin_plugin="Foo.esx";require(!upper.valid(),"unknown suffix accepted");
 }
 
 void verified_wait_tests() {

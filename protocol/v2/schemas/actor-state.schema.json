@@ -822,7 +822,7 @@
         },
         "origin_plugin": {
           "type": "string",
-          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$",
+          "pattern": "^[^/\\\\]+\\.([eE][sS][mM]|[eE][sS][pP]|[eE][sS][lL])$",
           "maxLength": 255
         },
         "name": {
@@ -848,7 +848,7 @@
         },
         "origin_plugin": {
           "type": "string",
-          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$",
+          "pattern": "^[^/\\\\]+\\.([eE][sS][mM]|[eE][sS][pP]|[eE][sS][lL])$",
           "maxLength": 255
         },
         "name": {
