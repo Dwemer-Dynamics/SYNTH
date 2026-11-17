@@ -14,6 +14,7 @@
 #include "adapters/commonlib_save_context.hpp"
 #include "runtime/game_thread_dispatcher.hpp"
 #include "client/plugin_session.hpp"
+#include "client/connection_notice.hpp"
 #include "client/plugin_session_host.hpp"
 #include "input/press_gesture.hpp"
 #include "presentation/commonlib_face_animation.hpp"
@@ -24,6 +25,7 @@
 #include <spdlog/spdlog.h>
 
 #include <memory>
+#include <optional>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -39,6 +41,11 @@ std::unique_ptr<synth::adapters::VrFalloutRuntime> runtime;
 std::unique_ptr<synth::runtime::GameThreadDispatcher> dispatcher;
 std::unique_ptr<synth::client::PluginSession> session;
 std::unique_ptr<synth::client::PluginSessionHost> session_host;
+// Server up/down notices; independent of the session so an outage is reported while no session exists.
+synth::client::ConnectionWatch connection_watch{[](const synth::config::ServerConfig& server) {
+    return std::make_unique<synth::client::WinHttpTransport>(server.base_url, server.connect_timeout_ms);
+}};
+std::optional<synth::config::ServerConfig> watched_server;
 std::uint64_t pending_session_request{};
 bool runtime_disabled{};
 std::array<bool, 256> hotkey_down{};
@@ -310,6 +317,8 @@ void pump_runtime_impl() {
     }
     reload_settings_if_changed(now);
     adopt_session_result(now);
+    if (session) watched_server = session->configuration().server;
+    if (watched_server) connection_watch.pump(*watched_server, now, present_notification);
     if (session && session->initialization_failed()) {
         session->drain_notifications(present_notification);
         invalidate_sessions();
@@ -561,6 +570,7 @@ void apply_lifecycle(LifecycleAction action) {
     switch (action) {
     case LifecycleAction::ready:
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
+        connection_watch.game_loaded(synth::core::SnapshotClock::now());
         break;
     case LifecycleAction::invalidate:
         invalidate_sessions(true);
@@ -576,9 +586,11 @@ void apply_lifecycle(LifecycleAction action) {
         pip_vision_gesture.reset();
         profile_timer_paused_at = {};
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
+        connection_watch.game_loaded(synth::core::SnapshotClock::now());
         (void)runtime->invalidate();
         break;
     case LifecycleAction::stop:
+        connection_watch.stop();
         if (dispatcher != nullptr) {
             dispatcher->stop_accepting(true);
         }

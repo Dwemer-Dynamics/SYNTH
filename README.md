@@ -59,7 +59,8 @@ shipped.
 folder. Git ignores it, and the in-game pages write to it.
 
 - `[Server] BaseUrl=http://127.0.0.1:8087/Synthserver/` is the default. `AllowRemote=false`
-  keeps the client on loopback.
+  keeps the client on loopback. `ConnectionNotice=true` shows one notice when the server stops
+  answering and one when it returns ([docs/CONNECTION-NOTICE.md](docs/CONNECTION-NOTICE.md)).
 - `[Hotkeys]` takes DirectInput scan codes. All hotkeys are unbound by default.
 - `[Input]`, `[OpenMic]`, `[Audio]`, `[Behavior]`, `[AutoActivate]` and `[Distance]` control
   speech input, playback, pause, combat and NPC selection.
