@@ -42,6 +42,9 @@ enum class RuntimeActionName : unsigned char {
     wait_here,
     release_wait,
     attack,
+    follow_player,
+    stop_following,
+    take_a_seat,
 };
 
 enum class RuntimeActionStatus : unsigned char {
@@ -201,6 +204,23 @@ struct RuntimeWaitObservation final {
     }
 };
 
+// Current physical companion-order evidence. Queue admission is never a successful order.
+struct RuntimeOrderObservation final {
+    core::RuntimeGeneration generation;
+    RuntimeActorIdentity actor;
+    std::string action_id;
+    RuntimeActionName name{};
+    // Game-owned AI state read after the order was applied; the server never supplies any of it.
+    bool follows_player{}, seated{}, released{};
+    std::uint32_t owned_package{}, seat_form{};
+    [[nodiscard]] static bool order_name(RuntimeActionName value) noexcept {
+        return value==RuntimeActionName::follow_player || value==RuntimeActionName::stop_following ||
+            value==RuntimeActionName::take_a_seat;
+    }
+    [[nodiscard]] bool valid_for(const RuntimeActionRequest& request) const noexcept;
+    [[nodiscard]] bool confirms_success(const RuntimeActionRequest& request) const noexcept;
+};
+
 struct RuntimeActionResult final {
     RuntimeActionStatus status{RuntimeActionStatus::failed};
     std::string detail;
@@ -209,10 +229,39 @@ struct RuntimeActionResult final {
     // Async script admission is not completion; the worker polls again off the game thread.
     bool pending{};
     std::optional<RuntimeWaitObservation> wait{};
+    std::optional<RuntimeOrderObservation> order{};
     [[nodiscard]] bool verified_wait_for(const RuntimeActionRequest& request) const noexcept {
         return !pending && status==RuntimeActionStatus::succeeded && wait && wait->confirms_success(request);
     }
+    [[nodiscard]] bool verified_order_for(const RuntimeActionRequest& request) const noexcept {
+        return !pending && status==RuntimeActionStatus::succeeded && order && order->confirms_success(request);
+    }
 };
+
+inline bool RuntimeOrderObservation::valid_for(const RuntimeActionRequest& request) const noexcept {
+    const auto same_plugin=[](std::string_view a,std::string_view b) {
+        return std::ranges::equal(a,b,[](unsigned char x,unsigned char y) {
+            const auto fold=[](unsigned char c){return c>='A'&&c<='Z'?c+('a'-'A'):c;};
+            return fold(x)==fold(y);
+        });
+    };
+    return order_name(name) && name==request.name && generation.valid() && generation==request.cancellation.generation() &&
+        !request.cancellation.is_cancelled() && !action_id.empty() && action_id.size()<=128 && action_id==request.action_id &&
+        actor.form_id!=0 && actor.form_id!=0x14 && actor.form_id==request.actor.form_id &&
+        !actor.origin_plugin.empty() && same_plugin(actor.origin_plugin,request.actor.origin_plugin) &&
+        !actor.playthrough_id.empty() && actor.playthrough_id==request.actor.playthrough_id;
+}
+
+// Follow and Sit succeed only on an owned game package; Stop only once no owned package remains.
+inline bool RuntimeOrderObservation::confirms_success(const RuntimeActionRequest& request) const noexcept {
+    if(!valid_for(request)) return false;
+    switch(name) {
+    case RuntimeActionName::follow_player: return follows_player && !seated && !released && owned_package!=0;
+    case RuntimeActionName::take_a_seat: return seated && !follows_player && !released && owned_package!=0 && seat_form!=0;
+    case RuntimeActionName::stop_following: return released && !follows_player && !seated && owned_package==0 && seat_form==0;
+    default: return false;
+    }
+}
 
 // Immutable, response-owned identities; no engine pointers or mutable target lookup.
 struct RuntimeFacingRequest final {
@@ -318,6 +367,8 @@ public:
         assert_game_thread();
     }
     [[nodiscard]] virtual bool conversation_actions_ready() { assert_game_thread(); return true; }
+    // True only for an adapter that applies Follow/Sit orders through original game packages and observes them.
+    [[nodiscard]] virtual bool orders_ready() const noexcept { return false; }
     // Optional original native-radio diagnostic seam; VR and other adapters fail closed.
     [[nodiscard]] virtual radio::ProbeObservation capture_radio_probe() {
         assert_game_thread();

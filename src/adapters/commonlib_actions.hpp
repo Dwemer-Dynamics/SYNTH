@@ -509,6 +509,11 @@ struct EquipmentInventory final {
         return finish(std::move(result));
 #endif
     }
+    case runtime::RuntimeActionName::follow_player:
+    case runtime::RuntimeActionName::stop_following:
+    case runtime::RuntimeActionName::take_a_seat:
+        // Capabilities stay unadvertised until an adapter applies these through owned packages and observes them.
+        return {runtime::RuntimeActionStatus::unsupported_runtime, "companion orders have no native adapter in this build"};
     case runtime::RuntimeActionName::sheathe_weapon:
         if (actor->IsDead(false) || actor->IsDisabled()) {
             return {runtime::RuntimeActionStatus::rejected,
