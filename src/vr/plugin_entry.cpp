@@ -282,6 +282,8 @@ void reload_settings_if_changed(synth::core::SnapshotClock::time_point now) {
     }
     if (revision == settings_revision) return;
     settings_revision = revision;
+    // The notice follows the edited INI even while no session can start (the server may be what is down).
+    try { watched_server = synth::client::PluginSession::load_configuration().server; } catch (const std::exception&) {}
     invalidate_sessions();
     (void)runtime->invalidate();
     if (runtime) face_animation.reset(*runtime);
