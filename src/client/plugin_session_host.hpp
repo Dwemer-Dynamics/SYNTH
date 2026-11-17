@@ -289,7 +289,7 @@ private:
                         std::move(configuration), variant_, runtime_version_, *request->dispatcher,
                         request->snapshot->generation(), save_context_, std::move(request->save_binding),
                         request->rest_events_available, request->quest_events_available, request->actor_events_available,
-                        request->observed_dialogue_available, request->reading_events_available);
+                        request->observed_dialogue_available, false, request->reading_events_available);
                     if (request_stale(*request) || writer_lost()) {
                         retire_and_destroy(result.session);
                     } else if (!result.session->initialize(request->snapshot)) {

@@ -80,7 +80,8 @@ public:
                   core::SaveContextStore* save_context = nullptr,
                   core::SaveContextStore::Binding save_binding = {}, bool rest_events_available = false,
                   bool quest_events_available = false, bool actor_events_available = false,
-                  bool observed_dialogue_available = false, bool reading_events_available = false)
+                  bool observed_dialogue_available = false, bool orders_available = false,
+                  bool reading_events_available = false)
         : dispatcher_{dispatcher},
           configuration_{std::move(configuration)},
           transport_{configuration_.server.base_url,
@@ -93,7 +94,7 @@ public:
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
-                          configuration_.behavior.companion_combat_comments, observed_dialogue_available,
+                          configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available,
                           reading_events_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
@@ -1139,6 +1140,8 @@ private:
             // An enrolled line has no emission-time server history; only its accepted heard receipt raises the frontier.
             if (!dialogue->receipt_required) context_.note_dialogue_history(snapshot->variant(), cancellation);
             mark_activity();
+            if (const auto* reply_actor = std::get_if<protocol_native::Identity>(&dialogue->speaker))
+                order_replies_.note_reply(line, *reply_actor, cancellation);
             // VR shows this caption from its subtitle frame, so a cancelled or replaced turn never displays.
             const auto caption = speech_.make_caption(line, *dialogue, cancellation, snapshot, combat_bark, conversation_holds_,
                                                       companion_start_by);
@@ -1155,6 +1158,8 @@ private:
         if (line.generation != snapshot->generation().value()) {
             return;
         }
+        // A Follow/Sit/Stop order applies only for the exact reply line it rode on, once, in a live turn.
+        if (is_order_action(action->name) && !order_replies_.claim(line, *action, cancellation)) return;
         conversation_holds_.suspend(cancellation); // Release participants before any requested action is dispatched.
         actions_.enqueue(*action, snapshot, response_binding(line, cancellation));
     }
@@ -1258,6 +1263,7 @@ private:
     // flag. Its network tasks capture it and its callbacks capture this session; ~PluginSession joins
     // the network lane first. Dispatcher tasks never capture it.
     ActionExecution actions_;
+    OrderReplyBinding order_replies_;
     // Borrows configuration, client, network lane, response accounting, speech, context, social
     // tasks, the action queue (for the action-then-rechat gates), dialogue, holds, trace and the
     // terminal/pause flags. Its network tasks capture it and its callbacks capture this session;
