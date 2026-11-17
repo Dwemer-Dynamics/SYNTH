@@ -252,6 +252,55 @@ void observed_dialogue_tests(const std::string& root) {
 }
 
 // Native-turn receipts: exact owner encoding, first terminal outcome only, bounded copy-only outbox.
+// Talking objects (narrator.object.v1): the encoded requests carry exactly the fixture identity, and state and status
+// decode with their bindings; every missing grant or malformed identity is refused before anything is sent.
+void talking_object_tests(const std::string& root) {
+    using namespace synth;
+    namespace pn=protocol_native;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto read=[&](const char* name){std::ifstream in{root+"/protocol/v2/fixtures/"+name};return std::string{std::istreambuf_iterator<char>{in},{}};};
+    const auto line=[&](const char* name,std::size_t index){std::istringstream in{read(name)};std::string raw;for(std::size_t at=0;std::getline(in,raw);++at)if(at==index)return raw;return std::string{};};
+    const auto same=[](const json::Value& left,const json::Value& right){return json::write(left)==json::write(right);};
+    const auto ack=pn::decode_line(line("valid/response-init-narrator-object.ndjson",1));
+    require(std::get<pn::Status>(ack.payload).narrator_object && std::get<pn::Status>(ack.payload).private_narrator,"narrator_object status lost");
+    const auto state_line=pn::decode_line(line("valid/response-narrator-object-state.ndjson",1));
+    const auto& state=std::get<pn::NarratorState>(state_line.payload);
+    require(state.objects.size()==1 && state.object_definitions.size()==1 && state.available.empty(),"object state shape");
+    const auto fixture_object=pn::NarratorObjectRef{std::string{"Fallout4.esm"},"0x000A1B2C","Fallout4.esm","0x000A1B2D"};
+    require(state.objects[0].object==fixture_object && state.objects[0].definition_id==state.object_definitions[0].definition_id,"object binding lost");
+    pn::EventContext context{"session:vr:fixture","narrator-bind-1","narrator-turn-1","vr","0.1.0","1.2.72",3,
+        {"context.saved_anchor","dialogue.text","dialogue.turn_ownership","narrator.object.v1","narrator.private.v1"},2,7};
+    const auto definition=std::string{"nd-0123456789abcdef0123456789abcdef"};
+    const auto bind=json::parse(pn::encode_narrator_command(context,pn::NarratorAction::bind_object,definition,{},fixture_object));
+    const auto expected_bind=json::parse(read("valid/narrator-command-bind-object.json"));
+    require(same(pn::required(bind,"payload"),pn::required(expected_bind,"payload")),"bind_object payload differs from fixture");
+    pn::NarratorTurn turn{pn::NarratorTurnKind::typed,definition,12,"Who left you running?",std::nullopt,fixture_object,"Wall Terminal"};
+    const auto encoded=json::parse(pn::encode_narrator_turn(context,turn));
+    require(same(pn::required(encoded,"payload"),pn::required(json::parse(read("valid/narrator-turn-object-typed.json")),"payload")),"object turn payload differs from fixture");
+    const auto refused=[&](auto&& call){try{(void)call();}catch(const std::invalid_argument&){return true;}return false;};
+    auto without=context;
+    std::erase(without.capabilities,"narrator.object.v1");
+    require(refused([&]{return pn::encode_narrator_turn(without,turn);}),"object turn without grant");
+    require(refused([&]{return pn::encode_narrator_command(without,pn::NarratorAction::bind_object,definition,{},fixture_object);}),"bind without grant");
+    auto scene=turn; scene.kind=pn::NarratorTurnKind::scene; scene.text.clear();
+    require(refused([&]{return pn::encode_narrator_turn(context,scene);}),"object scene turn");
+    auto blank=turn; blank.object_name=" \t ";
+    require(pn::required(pn::required(json::parse(pn::encode_narrator_turn(context,blank)),"payload"),"object").is_object() &&
+        !pn::required(json::parse(pn::encode_narrator_turn(context,blank)),"payload").find("object_name"),"blank object name is omitted");
+    auto upper=turn; upper.object->ref_plugin="Foo.ESP"; upper.object->base_plugin="BASE.Esm";
+    require(!refused([&]{return pn::encode_narrator_turn(context,upper);}),"upper-case plugin suffix");
+    auto lower=turn; lower.object->ref_id="0x000a1b2c";
+    require(refused([&]{return pn::encode_narrator_turn(context,lower);}),"lower-case object id");
+    auto named=turn; named.object.reset();
+    require(refused([&]{return pn::encode_narrator_turn(context,named);}),"object name without object");
+    require(refused([&]{return pn::encode_narrator_command(context,pn::NarratorAction::bind_object,definition,{},std::nullopt);}),"bind without object");
+    require(refused([&]{return pn::encode_narrator_command(context,pn::NarratorAction::state,{},{},fixture_object);}),"object on a state command");
+    auto runtime=turn; runtime.object=pn::NarratorObjectRef{std::nullopt,"0xFF001234","Fallout4.esm","0x00014E3A"};
+    require(json::write(pn::required(pn::required(json::parse(pn::encode_narrator_turn(context,runtime)),"payload"),"object")).find("\"ref_plugin\":null")!=std::string::npos,"runtime object keeps a null plugin");
+    runtime.object->ref_plugin="Fallout4.esm";
+    require(refused([&]{return pn::encode_narrator_turn(context,runtime);}),"plugin with a runtime id");
+}
+
 void native_turn_receipt_tests(const std::string& root) {
     using namespace synth;
     const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
@@ -442,6 +491,7 @@ int main(int argc,char** argv){
   actor_stats_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
+  if(argc==2) talking_object_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
