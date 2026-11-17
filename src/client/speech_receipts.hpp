@@ -109,41 +109,47 @@ private:
     std::atomic_bool draining_{};
 };
 
-// Only completed native audio proves a heard line. The text reading timer is not a renderer
-// acknowledgement, so text_complete produces no receipt and the server keeps the line unheard.
+// Completed native audio proves a heard line. A text-only line (no TTS, failed or silent TTS) is heard once its
+// caption has been shown for the whole reading window: text_complete (uncancelled) is text_presented. A caption
+// that was only queued, replaced, cancelled or discarded never claims presentation.
 [[nodiscard]] inline std::optional<protocol_native::SpeechReceiptOutcome> speech_receipt_outcome(
     presentation::DialogueDelivery terminal, bool cancelled) noexcept {
     using presentation::DialogueDelivery;
     if (terminal == DialogueDelivery::spoken && !cancelled) return protocol_native::SpeechReceiptOutcome::audio_completed;
+    if (terminal == DialogueDelivery::text_complete && !cancelled) return protocol_native::SpeechReceiptOutcome::text_presented;
     if (terminal == DialogueDelivery::discarded || terminal == DialogueDelivery::spoken)
         return cancelled ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::failed;
     return std::nullopt;
 }
 
-// The copied receipt of one bound line's NPC speaker; its first terminal delivery pushes it once.
+// The copied receipt of one bound line's NPC speaker; its first terminal delivery pushes it once. Only a
+// native /talk line may report text_presented (presented_allowed); an ordinary line whose speech failed
+// stays unheard and sends nothing for a shown caption.
 [[nodiscard]] inline std::function<void(presentation::DialogueDelivery, bool)> terminal_receipt_hook(
-    std::weak_ptr<SpeechReceiptOutbox> outbox, const protocol_native::Line& line, const protocol_native::Identity& speaker) {
-    return [outbox = std::move(outbox),
+    std::weak_ptr<SpeechReceiptOutbox> outbox, const protocol_native::Line& line, const protocol_native::Identity& speaker,
+    bool presented_allowed) {
+    return [outbox = std::move(outbox), presented_allowed,
             pending = PendingSpeechReceipt{line.generation, line.context_sequence, line.turn_id,
                 {line.request_id, line.line_id, speaker, {}}}](
                 presentation::DialogueDelivery terminal, bool cancelled) mutable {
         const auto outcome = speech_receipt_outcome(terminal, cancelled);
         const auto target = outbox.lock();
         if (!outcome || !target) return;
+        if (*outcome == protocol_native::SpeechReceiptOutcome::text_presented && !presented_allowed) return;
         pending.receipt.outcome = *outcome;
         (void)target->push(std::move(pending));
     };
 }
 
 // Terminal caption hook for a native v2 turn line; empty for any other line. Its first terminal delivery
-// pushes one copied receipt; only completed native audio becomes audio_completed.
+// pushes one copied receipt: completed native audio is audio_completed, a fully shown text-only caption text_presented.
 [[nodiscard]] inline std::function<void(presentation::DialogueDelivery, bool)> speech_receipt_hook(
     std::weak_ptr<SpeechReceiptOutbox> outbox, const protocol_native::Line& line, const protocol_native::Dialogue& dialogue,
     bool native_turn_ready) {
     const auto* speaker = std::get_if<protocol_native::Identity>(&dialogue.speaker);
     if (!speaker || !dialogue.native_turn || !native_turn_ready ||
         line.protocol_version != 2 || line.context_sequence == 0) return {};
-    return terminal_receipt_hook(std::move(outbox), line, *speaker);
+    return terminal_receipt_hook(std::move(outbox), line, *speaker, true);
 }
 
 // Terminal caption hook for an ordinary (non-/talk) NPC line the server enrolled (receipt_required), once
@@ -164,7 +170,7 @@ private:
     };
     if (same(speaker->form_id, player.form_id) && same(speaker->origin_plugin, player.origin_plugin) &&
         speaker->playthrough_id == player.playthrough_id) return {};
-    return terminal_receipt_hook(std::move(outbox), line, *speaker);
+    return terminal_receipt_hook(std::move(outbox), line, *speaker, false);
 }
 
 // The server's only receipt acknowledgement: start, one speech_receipt_accepted status carrying the
