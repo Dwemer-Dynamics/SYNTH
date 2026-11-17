@@ -1,0 +1,2 @@
+{"schema":"synth.response.line.v2","protocol_version":2,"type":"response_start","line_id":"req-text-3:start","request_id":"req-text-3","turn_id":"turn-text-3","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"server_version":"0.1.0","conversation_id":"nope"},"context_sequence":7}
+{"schema":"synth.response.line.v2","protocol_version":2,"type":"response_end","line_id":"req-text-3:end","request_id":"req-text-3","turn_id":"turn-text-3","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"status":"complete"},"context_sequence":7}

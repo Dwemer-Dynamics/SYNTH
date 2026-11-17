@@ -1,5 +1,6 @@
 #pragma once
 
+#include "client/conversation_continuity.hpp"
 #include "client/http.hpp"
 #include "core/cancellation.hpp"
 #include "protocol_native/v1_codec.hpp"
@@ -150,6 +151,18 @@ public:
     [[nodiscard]] bool delivery_receipts_ready() const noexcept {
         return delivery_receipts_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Conversation continuity and the uniform line lifecycle are a separate grant of this init. Without the
+    // acknowledgement no request carries a conversation_id, no cancel is scoped and skipped is never sent.
+    [[nodiscard]] bool uses_conversation_contract() const noexcept {
+        return options_.protocol_version == 2 &&
+            std::ranges::find(options_.capabilities, "dialogue.conversation") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "dialogue.turn_ownership") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool conversation_ready() const noexcept {
+        return conversation_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    // The player's conversation for this runtime. Game-thread observers (cell change) and the network lane share it.
+    [[nodiscard]] ConversationContinuity& conversation() noexcept { return conversation_; }
     [[nodiscard]] bool actor_stats_ready() const noexcept {
         return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -323,6 +336,9 @@ public:
             social_tasks_negotiated_.store(false, std::memory_order_release);
             native_turn_negotiated_.store(false, std::memory_order_release);
             delivery_receipts_negotiated_.store(false, std::memory_order_release);
+            conversation_negotiated_.store(false, std::memory_order_release);
+            // A new generation is a load or reconnect: the old conversation never carries over.
+            (void)conversation_.end(ConversationEnd::reconnect);
             actor_stats_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
@@ -373,6 +389,9 @@ public:
                 std::memory_order_release);
             delivery_receipts_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->delivery_receipts && uses_delivery_receipts_contract(),
+                std::memory_order_release);
+            conversation_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->conversation && uses_conversation_contract(),
                 std::memory_order_release);
             private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
@@ -630,7 +649,7 @@ public:
             request_id = next_id("text");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
-            body = protocol_native::encode_input_text(context(request_id, turn_id, binding), std::move(text), selection, intent);
+            body = protocol_native::encode_input_text(carrier_context(request_id, turn_id, binding), std::move(text), selection, intent);
         }
         return send_event(request_id, turn_id, generation, std::move(body), std::move(callback), true, "/main.php", binding, true);
     }
@@ -747,7 +766,7 @@ public:
             request_id = next_id("trigger");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
-            body = protocol_native::encode_trigger(context(request_id, turn_id, binding),
+            body = protocol_native::encode_trigger(carrier_context(request_id, turn_id, binding),
                                                    kind, actor, game_time_ticks,
                                                    kind == "external_reaction" ? external_text : std::nullopt,
                                                    kind == "external_tts" ? external_text : std::nullopt, capture_id, previous_context_sequence, player_event_serial, std::move(rechat_parent));
@@ -789,7 +808,7 @@ public:
             request_id = next_id("audio");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
-            body = protocol_native::encode_input_audio(context(request_id, turn_id, binding), media, selection);
+            body = protocol_native::encode_input_audio(carrier_context(request_id, turn_id, binding), media, selection);
         }
         return send_event(request_id, turn_id, generation, std::move(body), std::move(callback), true, "/main.php", binding, true);
     }
@@ -1090,6 +1109,30 @@ public:
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 2000);
     }
 
+    // Explicit player cancel (dialogue.conversation): stops every in-flight request of the live conversation on the
+    // server, which records the reason, and retires the conversation so the next input starts a fresh one. Like
+    // cancel() it overtakes the serial dialogue lane. Nothing is sent when no conversation is live or the server did
+    // not acknowledge the capability.
+    [[nodiscard]] std::optional<RequestOutcome> cancel_conversation(
+        protocol_native::ConversationCancelReason reason = protocol_native::ConversationCancelReason::player_cancel,
+        std::uint64_t expected_generation = 0) {
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!initialized_ || !conversation_ready()) return std::nullopt;
+            if (expected_generation != 0 && expected_generation != generation_)
+                return RequestOutcome{RequestStatus::cancelled, {}, {}, "cancel belongs to a retired generation"};
+            const auto id = conversation_.end(ConversationEnd::player_cancel);
+            if (!id) return std::nullopt;
+            request_id = next_id("cancel");
+            turn_id = next_id("turn");
+            generation = generation_;
+            body = protocol_native::encode_conversation_cancel(context(request_id, turn_id), *id, reason);
+        }
+        return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 2000);
+    }
+
     [[nodiscard]] RequestOutcome send_action_result(std::string action_id,
                                                     std::string idempotency_key,
                                                     std::string status,
@@ -1204,6 +1247,15 @@ private:
                 options_.protocol_version == 2 ? binding.sequence : 0};
     }
 
+    // Player input and triggers belong to the live conversation (started here when there is none). Every other
+    // event, and every request of a session that did not negotiate the capability, carries no conversation.
+    [[nodiscard]] protocol_native::EventContext carrier_context(const std::string& request_id,
+                                                                const std::string& turn_id, ContextBinding binding = {}) {
+        auto stamped = context(request_id, turn_id, binding);
+        if (conversation_ready()) stamped.conversation_id = conversation_.touch();
+        return stamped;
+    }
+
     [[nodiscard]] RequestOutcome send_event(const std::string& request_id,
                                             const std::string& turn_id,
                                             std::uint64_t expected_generation,
@@ -1241,6 +1293,8 @@ private:
         std::string parse_error;
         std::unordered_set<std::string> line_ids;
         const bool incremental = owns_turn && callback && binding.invalidate_response;
+        // A response to a request that carried a conversation echoes it on its start line, and only then.
+        const auto expected_conversation = protocol_native::carrier_conversation_id(body);
         // Any unsuccessful exit invalidates only this request owner's pending speech.
         struct AdmissionGuard final {
             const RequestOutcome& outcome;
@@ -1284,8 +1338,12 @@ private:
                     }
                     if (!line_ids.insert(line.line_id).second)
                         throw std::invalid_argument{"duplicate response line ID"};
-                    if (std::holds_alternative<protocol_native::Start>(line.payload)) {
+                    if (const auto* start = std::get_if<protocol_native::Start>(&line.payload)) {
                         if (started) throw std::invalid_argument{"duplicate response start"};
+                        if (start->conversation_id != expected_conversation) {
+                            outcome.status = RequestStatus::stale_response;
+                            throw std::invalid_argument{"response does not echo this request's conversation"};
+                        }
                         started = true;
                     } else if (!started) {
                         throw std::invalid_argument{"response has no start line"};
@@ -1465,6 +1523,8 @@ private:
     std::atomic_bool social_tasks_negotiated_{};
     std::atomic_bool native_turn_negotiated_{};
     std::atomic_bool delivery_receipts_negotiated_{};
+    std::atomic_bool conversation_negotiated_{};
+    ConversationContinuity conversation_;
     std::atomic_bool actor_stats_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
     std::atomic_bool everyone_negotiated_{};

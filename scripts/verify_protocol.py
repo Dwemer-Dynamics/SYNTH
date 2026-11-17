@@ -216,6 +216,14 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         payload_schema["properties"]["audience_reset_epoch"] = {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
         if payload_type == "input_text":
             payload_schema["properties"]["intent"] = {"const": "conversation"}
+        # Conversation continuity (dialogue.conversation): a client-created UUID; the capability rule is in event.schema.json.
+        payload_schema["properties"]["conversation_id"] = {"$ref": "../../v2/schemas/conversation.schema.json#/$defs/conversation_id"}
+    if value.get("schema") == "synth.event.v2" and payload_type == "cancel":
+        catalog_path = PROTOCOL / "v2/schemas/conversation.schema.json"
+        payload_schema = {"$ref": "#/$defs/cancel"}
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "response_start":
+        catalog_path = PROTOCOL / "v2/schemas/conversation.schema.json"
+        payload_schema = {"$ref": "#/$defs/response_start"}
     if value.get("schema") == "synth.response.line.v2" and payload_type == "dialogue":
         # Explicit native-turn marker: only a receipt-owned native-turn line carries it, always true.
         payload_schema = dict(payload_schema)

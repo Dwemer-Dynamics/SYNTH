@@ -664,6 +664,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
             "PipVision",
             "OpenMicMute",
             "WriteDiary",
+            "CancelConversation",
         ):
             with self.subTest(hotkey=key):
                 self.assertIn(f'"{key}"', catalog)

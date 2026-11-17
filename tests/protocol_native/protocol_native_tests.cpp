@@ -403,12 +403,100 @@ void native_turn_receipt_tests(const std::string& root) {
 }
 }
 
+// dialogue.conversation: ids, echo, the cancel scope and the skipped outcome, against the mirrored fixtures.
+void conversation_tests(const std::string& root) {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto read=[&](const char* name){std::ifstream in{root+"/protocol/v2/fixtures/"+name};return std::string{std::istreambuf_iterator<char>{in},{}};};
+    const std::string id="3f6c1d52-8a74-4b1e-9c3a-5d2e7f0a9b11";
+    const std::vector<std::string> caps{"dialogue.text","dialogue.turn_ownership","dialogue.delivery_receipts","dialogue.conversation"};
+    protocol_native::EventContext context{"session:flat:fixture","req-text-3","turn-text-3","flat","0.1.0","1.10.163",2,caps,2,7,id};
+    require(json::write(json::parse(protocol_native::encode_input_text(context,"Any word from the Minutemen?")))
+        ==json::write(json::parse(read("valid/input-text-conversation.json"))),"conversation input_text does not match the mirrored fixture");
+    // No id, no field: a session without the acknowledgement keeps the released payloads byte for byte.
+    auto none=context; none.conversation_id.clear();
+    require(protocol_native::encode_input_text(none,"Hi").find("conversation_id")==std::string::npos,"conversation id sent unprompted");
+    auto uncapable=context; uncapable.capabilities={"dialogue.text","dialogue.turn_ownership"};
+    bool refused=false;
+    try{(void)protocol_native::encode_input_text(uncapable,"Hi");}catch(const std::invalid_argument&){refused=true;}
+    require(refused,"conversation id encoded without the capability");
+    auto bad=context; bad.conversation_id="NOT-A-UUID"; refused=false;
+    try{(void)protocol_native::encode_input_text(bad,"Hi");}catch(const std::invalid_argument&){refused=true;}
+    require(refused,"malformed conversation id encoded");
+    const protocol_native::Identity jun{"0x0001A4D7","Fallout4.esm","save-1","Jun"};
+    auto trigger_context=context; trigger_context.request_id="req-trigger-4";
+    require(json::write(json::parse(protocol_native::encode_trigger(trigger_context,"bored",jun)))
+        ==json::write(json::parse(read("valid/trigger-ambient-conversation.json"))),"ambient trigger does not carry the conversation");
+    // The explicit cancel names its scope, the conversation and why.
+    protocol_native::EventContext cancel_context{"session:flat:fixture","req-cancel-3","turn-cancel-3","flat","0.1.0","1.10.163",2,caps,2,0};
+    require(json::write(json::parse(protocol_native::encode_conversation_cancel(cancel_context,id,protocol_native::ConversationCancelReason::player_cancel)))
+        ==json::write(json::parse(read("valid/cancel-conversation.json"))),"conversation cancel does not match the mirrored fixture");
+    refused=false;
+    try{(void)protocol_native::encode_conversation_cancel(cancel_context,"nope",protocol_native::ConversationCancelReason::player_cancel);}
+    catch(const std::invalid_argument&){refused=true;}
+    require(refused,"cancel of a malformed conversation encoded");
+    // The skipped outcome is only ever sent to a server that acknowledged it; otherwise it is the released interrupted.
+    const protocol_native::Identity character{"0x0001A4D7","Fallout4.esm","save-1","Jun"};
+    protocol_native::EventContext receipt_context{"session:flat:fixture","receipt:2:5","turn-text-3","flat","0.1.0","1.10.163",2,caps,2,7};
+    const protocol_native::SpeechReceipt skipped{"req-text-3","req-text-3:dialogue:2",character,protocol_native::SpeechReceiptOutcome::skipped};
+    require(json::write(json::parse(protocol_native::encode_speech_receipt(receipt_context,skipped)))
+        ==json::write(json::parse(read("valid/speech-receipt-skipped.json"))),"skipped receipt does not match the mirrored fixture");
+    receipt_context.capabilities={"dialogue.text","dialogue.turn_ownership","dialogue.delivery_receipts"};
+    require(protocol_native::encode_speech_receipt(receipt_context,skipped).find("\"outcome\":\"interrupted\"")!=std::string::npos,
+        "skipped reached a server that did not acknowledge it");
+    // A line cut off after it started is interrupted; one that never started is skipped; the reading timer proves nothing.
+    using presentation::DialogueDelivery;
+    require(client::speech_receipt_outcome(DialogueDelivery::skipped,true)==protocol_native::SpeechReceiptOutcome::skipped,"skipped cancelled");
+    require(client::speech_receipt_outcome(DialogueDelivery::skipped,false)==protocol_native::SpeechReceiptOutcome::failed,"skipped uncancelled");
+    require(client::speech_receipt_outcome(DialogueDelivery::discarded,true)==protocol_native::SpeechReceiptOutcome::interrupted,"started line cut off");
+    // The caption itself reports which: a queued line discarded by a cancel never played (skipped); one cut mid-play is
+    // reported discarded (interrupted). The state it stores stays discarded either way.
+    {
+        core::CancellationSource turn{core::RuntimeGeneration::from_value(2)};
+        std::vector<DialogueDelivery> reported;
+        const auto caption=[&]{return presentation::DialogueCaption{.generation=2,.cancellation=turn.token(),
+            .on_terminal=[&](DialogueDelivery terminal,bool){reported.push_back(terminal);}};};
+        const auto queued=caption();
+        queued.mark_delivery(DialogueDelivery::discarded);
+        const auto started=caption();
+        started.mark_delivery(DialogueDelivery::playing);
+        started.mark_delivery(DialogueDelivery::discarded);
+        const auto read_cut=caption();
+        read_cut.mark_delivery(DialogueDelivery::reading);
+        read_cut.mark_delivery(DialogueDelivery::discarded);
+        require(reported==std::vector<DialogueDelivery>{DialogueDelivery::skipped,DialogueDelivery::discarded,DialogueDelivery::discarded},
+            "skipped and interrupted are not told apart");
+        require(queued.delivery->load()==DialogueDelivery::discarded,"skipped changed the stored delivery state");
+    }
+    // The server echoes the conversation on response_start only; the init ACK carries the grant.
+    std::istringstream echoed{read("valid/response-conversation.ndjson")}; std::string raw;
+    std::getline(echoed,raw);
+    const auto start=protocol_native::decode_line(raw);
+    require(std::get<protocol_native::Start>(start.payload).conversation_id==id,"conversation echo lost");
+    std::istringstream ack{read("valid/response-init-conversation.ndjson")}; std::vector<protocol_native::Line> lines;
+    while(std::getline(ack,raw)) lines.push_back(protocol_native::decode_line(raw));
+    require(lines.size()==3 && std::get<protocol_native::Status>(lines[1].payload).conversation,"conversation ACK lost");
+    require(std::get<protocol_native::Start>(lines[0].payload).conversation_id.empty(),"ack start carried a conversation");
+    std::istringstream unrelated{read("valid/response-init-delivery-receipts.ndjson")}; lines.clear();
+    while(std::getline(unrelated,raw)) lines.push_back(protocol_native::decode_line(raw));
+    require(!std::get<protocol_native::Status>(lines[1].payload).conversation,"conversation implied by delivery receipts");
+    std::istringstream invalid{read("invalid/response-start-bad-conversation.ndjson")}; std::getline(invalid,raw); refused=false;
+    try{(void)protocol_native::decode_line(raw);}catch(const std::invalid_argument&){refused=true;}
+    require(refused,"malformed conversation echo accepted");
+    // The sender's own id is what a response must echo; a cancel never expects one.
+    require(protocol_native::carrier_conversation_id(protocol_native::encode_input_text(context,"Hi"))==id,"carrier id not recovered");
+    require(protocol_native::carrier_conversation_id(protocol_native::encode_conversation_cancel(cancel_context,id,protocol_native::ConversationCancelReason::player_cancel)).empty(),
+        "a cancel expected an echo");
+    require(protocol_native::carrier_conversation_id(protocol_native::encode_input_text(none,"Hi")).empty(),"absent id expected an echo");
+}
+
 int main(int argc,char** argv){
  try{
   actor_stats_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);
+  if(argc==2) conversation_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};

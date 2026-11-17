@@ -491,6 +491,7 @@ void pump_runtime_impl() {
             (void)session->request_control();
             session->open_control_panel();
         }
+        if (session && hotkey_pressed(configuration.hotkeys.cancel_conversation)) session->cancel_conversation();
         if (session && hotkey_pressed(configuration.hotkeys.hard_halt)) {
             session->hard_halt();
             voice_capture_down = false;

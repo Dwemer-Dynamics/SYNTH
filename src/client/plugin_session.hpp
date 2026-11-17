@@ -365,6 +365,34 @@ public:
         push_notification("SYNTH combat started; active dialogue cancelled");
     }
 
+    // Explicit player cancel (the CancelConversation hotkey): drops the live conversation's local work like a
+    // superseding line does (queued speech is skipped, the line being spoken is cut off, actions and rechat are
+    // cleared) and tells the server to stop that conversation's in-flight work. Unlike hard_halt() the session keeps
+    // running, and the next player request starts a new conversation. Needs the negotiated dialogue.conversation
+    // capability; without it nothing happens, so the released halt and interrupt behaviour is unchanged.
+    void cancel_conversation() noexcept {
+        try {
+            if (!client_.conversation_ready() || client_.conversation().current().empty()) return;
+            (void)begin_player_turn();
+            // The conversation id must be read after local teardown; the network lane retires it with the cancel.
+            const auto submitted = network_.try_submit(
+                "network", tasks::TaskClass::current_turn,
+                tasks::TaskLanes::Clock::now() + std::chrono::seconds{2}, cancellation_.token(),
+                [this](const core::CancellationToken&) {
+                    try {
+                        const auto outcome = client_.cancel_conversation();
+                        if (outcome && outcome->status != RequestStatus::complete && outcome->status != RequestStatus::cancelled)
+                            push_notification("SYNTH conversation stopped locally; server cancellation was not acknowledged");
+                    } catch (const std::exception&) {
+                        push_notification("SYNTH conversation stopped locally; server cancellation failed");
+                    }
+                });
+            if (submitted != tasks::SubmitResult::accepted)
+                push_notification("SYNTH conversation stopped locally; server cancellation could not be queued");
+            else push_notification("SYNTH conversation cancelled");
+        } catch (...) {}
+    }
+
     void hard_halt() noexcept {
         terminal_.store(true, std::memory_order_release);
         observations_.clear_enemy_awareness();

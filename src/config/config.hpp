@@ -57,6 +57,8 @@ struct HotkeysConfig {
     std::uint32_t pip_vision{};
     std::uint32_t open_mic_mute{};
     std::uint32_t write_diary{};
+    // Explicit player cancel of the live conversation (dialogue.conversation); unbound by default.
+    std::uint32_t cancel_conversation{};
 };
 
 struct ActivationConfig {
@@ -339,6 +341,8 @@ inline void apply(Config& config,
         config.hotkeys.open_mic_mute = parse_range(value, 0, 255, qualified);
     else if (section == "Hotkeys" && key == "WriteDiary")
         config.hotkeys.write_diary = parse_range(value, 0, 255, qualified);
+    else if (section == "Hotkeys" && key == "CancelConversation")
+        config.hotkeys.cancel_conversation = parse_range(value, 0, 255, qualified);
     else if (section == "AutoActivate" && key == "Enabled")
         config.activation.enabled = parse_bool(value, qualified);
     else if (section == "AutoActivate" && key == "AutoAddHostile")

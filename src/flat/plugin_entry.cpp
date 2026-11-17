@@ -1178,6 +1178,8 @@ void pump_runtime_impl() {
                 (void)session->request_control();
             } else present_notification("SYNTH control menu unavailable; check F4SE Menu Framework");
         }
+        // Explicit player cancel of the live conversation. Unlike Halt it leaves the session running.
+        if (session && hotkey_pressed(hotkeys.cancel_conversation)) session->cancel_conversation();
         if (session && hotkey_pressed(hotkeys.hard_halt)) {
             cancel_control_wait();
             synth::adapters::commonlib::FlatWaitPackage::cancel_all();

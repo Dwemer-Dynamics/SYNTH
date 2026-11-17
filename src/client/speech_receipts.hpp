@@ -111,10 +111,14 @@ private:
 
 // Only completed native audio proves a heard line. The text reading timer is not a renderer
 // acknowledgement, so text_complete produces no receipt and the server keeps the line unheard.
+// A line cut off after it started is interrupted; one that never started is skipped (sent as interrupted to a
+// server that did not negotiate dialogue.conversation, which is what it always was).
 [[nodiscard]] inline std::optional<protocol_native::SpeechReceiptOutcome> speech_receipt_outcome(
     presentation::DialogueDelivery terminal, bool cancelled) noexcept {
     using presentation::DialogueDelivery;
     if (terminal == DialogueDelivery::spoken && !cancelled) return protocol_native::SpeechReceiptOutcome::audio_completed;
+    if (terminal == DialogueDelivery::skipped)
+        return cancelled ? protocol_native::SpeechReceiptOutcome::skipped : protocol_native::SpeechReceiptOutcome::failed;
     if (terminal == DialogueDelivery::discarded || terminal == DialogueDelivery::spoken)
         return cancelled ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::failed;
     return std::nullopt;
