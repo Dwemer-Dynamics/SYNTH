@@ -143,7 +143,7 @@ public:
             notify_("SYNTH action queue is full");
             return;
         }
-        if ((action.name == "wait_here" || action.name == "release_wait" || action.name == "attack" || is_order_action(action.name)) && !wait_replays_.claim(action)) {
+        if ((action.name == "wait_here" || action.name == "release_wait" || action.name == "attack" || action.name == "barter" || is_order_action(action.name)) && !wait_replays_.claim(action)) {
             notify_("SYNTH action was repeated or its session limit was reached");
             return;
         }

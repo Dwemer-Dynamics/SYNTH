@@ -166,7 +166,7 @@ public:
             result.push_back("action.open_inventory");
             result.push_back("action.gift_menu_inventory");
             // Confirmed NPC sales need a confirmation presenter; without one the capability is never offered.
-            if (trade_confirmation_available || trade::prompt().installed()) {
+            if (trade_confirmation_available) {
                 result.push_back("action.barter");
                 result.push_back("action.trade_confirmation");
             }

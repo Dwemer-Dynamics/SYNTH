@@ -62,10 +62,13 @@ It is flat only. `action.trade_confirmation` requires `action.barter`, `action.p
 `action.inventory_observation` and `dialogue.turn_ownership`. Only an init whose status carries
 `trade_confirmation: true` grants it; older acknowledgements and VR never do.
 
-**Offer.** An `action` line whose `payload.action` is `barter-action.schema.json`: the NPC is
+**Offer.** An `action` line whose `payload.action` is `barter-action.schema.json`. It carries `reply_line_id`, the NPC's
+own first dialogue line of the same response, and at most one offer is issued per response; the client shows no box unless it accepted
+that line from the same turn, and a line carries one offer. The NPC is
 `actor`, the captured Sole Survivor (`0x00000014`) is `target`, `arguments` are `item` (display name),
 `item_form_id`, `item_origin_plugin`, `count` (1..99; the server offers 1) and `price` (whole caps,
-1..100000), `deadline_ms` is 60000. The server issues it only for a typed or spoken turn (never rechat,
+1..100000), `deadline_ms` is 60000. The client's box stays up 45 s, and the server accepts a receipt for 5 minutes past the deadline
+(a grace for speech queuing and transport), so a sale the client completed inside its window is never refused. The server issues it only for a typed or spoken turn (never rechat,
 narrator or action-result continuations), only when the NPC's complete observed inventory holds exactly
 one unequipped stack of that name (never caps), the price is at most ten times the stack's base value
 (never below 25 caps) and the player's observed caps cover it. The offer is an ordinary action intent;

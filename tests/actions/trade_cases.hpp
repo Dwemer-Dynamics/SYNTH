@@ -70,7 +70,8 @@ inline void set_total(std::vector<InventoryItemSnapshot>& items, const Inventory
 inline protocol_native::Action offer_action(const char* arguments =
     R"({"item":"Nuka-Cola","item_form_id":"0x00022F75","item_origin_plugin":"Fallout4.esm","count":1,"price":12})") {
     return {"action:trade", "idem:trade", "barter", "action.barter", {"0x0001A4D7", "Fallout4.esm", "save-a", "Preston Garvey"},
-            protocol_native::Identity{"0x00000014", "Fallout4.esm", "save-a", "Sole Survivor"}, json::parse(arguments), 60000};
+            protocol_native::Identity{"0x00000014", "Fallout4.esm", "save-a", "Sole Survivor"}, json::parse(arguments), 60000,
+            "reply:line:1"};
 }
 
 // Fake runtime IO: counts and orders every transfer, and can fail or partly apply chosen steps.
@@ -161,6 +162,8 @@ inline int trade_contract_checks() {
         refused(Scene{}, npc_buyer, "an NPC bought");
         auto foreign = offer_action(); foreign.actor.playthrough_id = "other-save";
         refused(Scene{}, foreign, "another save's actor accepted");
+        auto unbound = offer_action(); unbound.reply_line_id.clear();
+        refused(Scene{}, unbound, "an offer with no reply line accepted");
         auto not_barter = offer_action(); not_barter.name = "give_item_to";
         refused(Scene{}, not_barter, "wrong action accepted");
         Scene absent; absent.npc_present = false; refused(absent, offer_action(), "absent seller");
@@ -298,6 +301,64 @@ inline int trade_contract_checks() {
         quiet_io.transfer = [&](const runtime::RuntimeActionRequest&) -> std::optional<runtime::RuntimeActionResult> { silent.npc[0].count = 2; return std::nullopt; };
         result = trade::run_trade(offer, before, quiet_io, token, later);
         check(result && result->status == "failed" && result->stop_trading, "an unanswered step that moved the item was called clean");
+    }
+
+    // The sale is atomic from the player's side: whenever the caps are not PROVEN to have moved, the item goes back.
+    {
+        const auto run = [&](Scene& scene, int fail_call, int null_from, int null_until, bool silent_caps, Io& io, const char* why) {
+            const auto before = scene.snapshot();
+            const auto offer = trade::prepare_trade_offer(*before, offer_action(), token);
+            io.fail_call = fail_call;
+            auto bound = io.bind();
+            const auto inner = bound.capture;
+            auto seen = std::make_shared<int>(0);
+            bound.capture = [=]() -> std::shared_ptr<const core::RuntimeSnapshot> {
+                const int n = ++*seen;
+                return n >= null_from && n < null_until ? nullptr : inner();
+            };
+            if (silent_caps) {
+                const auto transfer = bound.transfer;
+                bound.transfer = [&io, transfer](const runtime::RuntimeActionRequest& request) -> std::optional<runtime::RuntimeActionResult> {
+                    if (request.name == runtime::RuntimeActionName::take_caps) { io.calls.push_back("take_caps:silent"); return std::nullopt; }
+                    return transfer(request);
+                };
+            }
+            auto result = trade::run_trade(offer, before, bound, token, later);
+            check(result.has_value(), why);
+            return *result;
+        };
+        // Captures: 1 fresh, 2 after the item, 3-5 after the payment, 6 after an undo.
+        {
+            Scene scene; Io io{scene};
+            const auto result = run(scene, 1, 3, 6, false, io, "unreadable capture after a failed payment left no receipt");
+            check(result.status == "failed" && !result.stop_trading && result.detail.find("returned") != std::string::npos, "an unreadable capture after a refused payment did not return the item");
+            check(io.calls == std::vector<std::string>{"give_item:1", "take_caps:12", "take_item:1"}, "unknown caps did not trigger exactly one return");
+            check(total(scene.npc, 0x22F75) == 3 && total(scene.player, 0x22F75) == 0 && total(scene.player, 0xF) == 100, "the player kept the item for free");
+        }
+        {
+            Scene scene; Io io{scene};
+            const auto result = run(scene, -1, 3, 6, true, io, "a payment that never reported left no receipt");
+            check(result.status == "failed" && !result.stop_trading && io.calls.back() == "take_item:1", "a silent payment with unknown caps did not return the item");
+            check(total(scene.player, 0x22F75) == 0 && total(scene.player, 0xF) == 100, "a silent payment left the item with the player");
+        }
+        {
+            Scene scene; Io io{scene};
+            const auto result = run(scene, -1, 3, 6, false, io, "a paid sale with unreadable captures left no receipt");
+            check(result.status == "failed" && result.stop_trading && io.calls == std::vector<std::string>{"give_item:1", "take_caps:12"},
+                  "caps that moved were not left alone when the capture was unreadable");
+            check(total(scene.player, 0xF) == 88 && total(scene.player, 0x22F75) == 1, "an unreadable capture undid a paid sale");
+        }
+        {
+            Scene scene; Io io{scene};
+            const auto result = run(scene, -1, 2, 5, false, io, "an unreadable capture after the item left no receipt");
+            check(result.status == "succeeded" && io.calls == std::vector<std::string>{"give_item:1", "take_caps:12"}, "an unreadable capture after the item abandoned the payment");
+        }
+        {
+            // One failed capture is retried rather than called unknown.
+            Scene scene; Io io{scene};
+            const auto result = run(scene, -1, 3, 4, false, io, "a transient capture failure left no receipt");
+            check(result.status == "succeeded" && !result.stop_trading, "a single failed capture was not retried");
+        }
     }
 
     // The confirmation mailbox: one box, one answer, a stale click answers nothing.

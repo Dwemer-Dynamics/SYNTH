@@ -44,8 +44,8 @@ inline constexpr std::uint32_t player_form_id = 0x14;
 inline constexpr std::uint32_t maximum_count = 99;
 inline constexpr std::uint32_t maximum_price = 100000;
 inline constexpr std::size_t maximum_name_bytes = 160;
-// The server's offer deadline (60000 ms) is the outer bound; the box itself stays up this long.
-inline constexpr std::chrono::seconds confirmation_window{60};
+// Shorter than the server's 60 s offer deadline, so a Yes the client completes is never later than the server allows.
+inline constexpr std::chrono::seconds confirmation_window{45};
 
 // Machine reason codes carried in the receipt detail; the server accepts only these (protocol/v2/README.md).
 inline constexpr std::string_view reason_completed = "trade_completed";
@@ -60,7 +60,7 @@ enum class Answer : unsigned char { yes, cancel, expired, withdrawn, unavailable
 
 // What the player is shown, copied from the snapshot the offer was validated against.
 struct TradeOffer final {
-    std::string action_id;
+    std::string action_id, reply_line_id;  // the NPC reply line the offer rode on
     runtime::RuntimeActorIdentity seller, buyer;
     std::string seller_name;
     core::InventoryItemSnapshot item;   // the NPC's exact stack at offer time
@@ -144,7 +144,8 @@ namespace detail {
                                                     const core::CancellationToken& cancellation) {
     if (snapshot.game() != core::Game::fallout4 || snapshot.variant() != core::RuntimeVariant::flat || cancellation.is_cancelled() ||
         cancellation.generation() != snapshot.generation() || action.name != "barter" || action.capability != "action.barter" ||
-        action.action_id.empty() || action.action_id.size() > 128 || !action.target || !action.arguments.is_object())
+        action.action_id.empty() || action.action_id.size() > 128 || action.reply_line_id.empty() || action.reply_line_id.size() > 128 ||
+        !action.target || !action.arguments.is_object())
         throw std::invalid_argument{"invalid trade offer owner"};
     const auto& arguments = action.arguments.as_object();
     if (arguments.size() != 5) throw std::invalid_argument{"trade offer arguments are not exactly item, form, plugin, count and price"};
@@ -184,6 +185,7 @@ namespace detail {
 
     TradeOffer offer;
     offer.action_id = action.action_id;
+    offer.reply_line_id = action.reply_line_id;
     offer.seller = seller_id;
     offer.buyer = buyer_id;
     offer.seller_name = seller->name().empty() ? action.actor.display_name : seller->name();
@@ -360,12 +362,19 @@ namespace detail {
         return runtime::RuntimeActionRequest{name, donor, what, cancellation, deadline, offer.action_id, recipient, amount};
     };
 
+    // A capture can fail while the game is busy; evidence is worth a few tries before it is called unknown.
+    const auto capture_retry = [&]() {
+        std::shared_ptr<const core::RuntimeSnapshot> seen;
+        for (int attempt = 0; attempt < 3 && !seen; ++attempt) seen = io.capture();
+        if (seen) result.snapshot = seen;
+        return seen;
+    };
+
     // 1. The item moves seller -> player with the game's own transfer.
     const auto first = io.transfer(request(runtime::RuntimeActionName::give_item, offer.seller, offer.buyer, *item, offer.count));
-    auto after_first = io.capture();
-    if (cancellation.is_cancelled()) return std::nullopt;
-    if (after_first) result.snapshot = after_first;
+    const auto after_first = capture_retry();
     if (!detail::succeeded(first)) {
+        if (cancellation.is_cancelled() && !after_first) return std::nullopt;
         // A refused step moved nothing only if the inventories say so; an unproven one stops trading.
         if (after_first && detail::inventories_match(*fresh, *after_first, offer)) {
             result.status = "failed";
@@ -378,24 +387,20 @@ namespace detail {
         result.stop_trading = true;
         return result;
     }
-    if (!after_first) {
-        result.status = "failed";
-        result.detail = "the sale could not be verified after the item moved";
-        result.moved = true;
-        result.stop_trading = true;
-        return result;
-    }
-    const auto* player_after_item = detail::find_actor(*after_first, offer.buyer);
-    const auto player_caps = player_after_item ? actions::select_caps_item(player_after_item->inventory(), player_after_item->inventory_observation()) : std::nullopt;
+    // From here the item has left the seller. Nothing below returns early without either finishing the sale
+    // or returning the item: a cancelled turn or an unreadable capture is never a reason to leave it with the player.
+    const auto* player_after_item = after_first ? detail::find_actor(*after_first, offer.buyer) : nullptr;
     const auto player_item = player_after_item ? detail::seller_stack(*player_after_item, offer.item) : std::nullopt;
+    const auto payer_caps = player_after_item
+        ? actions::select_caps_item(player_after_item->inventory(), player_after_item->inventory_observation()) : caps;
+    // The stack to return, if it must come back: the player's own, or the one just sent when it could not be read.
+    const auto return_stack = player_item ? *player_item : *item;
 
     // 2. The price moves player -> seller.
     std::optional<runtime::RuntimeActionResult> second;
-    if (player_caps && player_caps->count == offer.buyer_caps && !cancellation.is_cancelled())
-        second = io.transfer(request(runtime::RuntimeActionName::take_caps, offer.buyer, offer.seller, *player_caps, offer.price));
-    auto after_second = io.capture();
-    if (cancellation.is_cancelled()) return std::nullopt;
-    if (after_second) result.snapshot = after_second;
+    if (payer_caps && payer_caps->count == offer.buyer_caps)
+        second = io.transfer(request(runtime::RuntimeActionName::take_caps, offer.buyer, offer.seller, *payer_caps, offer.price));
+    const auto after_second = capture_retry();
     if (detail::succeeded(second) && after_second && detail::sale_conserved(*fresh, *after_second, offer)) {
         result.status = "succeeded";
         result.detail = std::string{reason_completed};
@@ -403,19 +408,21 @@ namespace detail {
         return result;
     }
 
-    // Payment did not complete cleanly. If no caps moved at all, return the item once and prove the undo.
+    // The payment did not finish cleanly. The item goes back unless the caps are PROVEN to have moved: a native
+    // success, or any change in either side's caps in a capture. Unknown is not proof, so an unreadable capture
+    // after a failed payment still returns the item.
     const auto seller_caps_before = detail::stack_total(seller->inventory(), caps_form_id, "Fallout4.esm");
-    bool no_caps_moved = false;
+    bool caps_moved = detail::succeeded(second);
     if (after_second) {
         const auto* b = detail::find_actor(*after_second, offer.buyer);
         const auto* s = detail::find_actor(*after_second, offer.seller);
-        no_caps_moved = b && s && detail::stack_total(b->inventory(), caps_form_id, "Fallout4.esm") == offer.buyer_caps &&
-            detail::stack_total(s->inventory(), caps_form_id, "Fallout4.esm") == seller_caps_before;
+        const bool buyer_same = b && detail::stack_total(b->inventory(), caps_form_id, "Fallout4.esm") == offer.buyer_caps;
+        const bool seller_same = s && detail::stack_total(s->inventory(), caps_form_id, "Fallout4.esm") == seller_caps_before;
+        if (!buyer_same || !seller_same) caps_moved = true;
     }
-    if (no_caps_moved && player_item && !cancellation.is_cancelled()) {
-        const auto undo = io.transfer(request(runtime::RuntimeActionName::take_item, offer.buyer, offer.seller, *player_item, offer.count));
-        auto restored = io.capture();
-        if (restored) result.snapshot = restored;
+    if (!caps_moved) {
+        const auto undo = io.transfer(request(runtime::RuntimeActionName::take_item, offer.buyer, offer.seller, return_stack, offer.count));
+        const auto restored = capture_retry();
         if (detail::succeeded(undo) && restored && detail::inventories_match(*fresh, *restored, offer)) {
             result.status = "failed";
             result.detail = "payment failed; the item was returned and nothing changed";

@@ -858,7 +858,11 @@ class PowerShellBuildScriptTests(unittest.TestCase):
     def test_confirmed_trade_is_advertised_only_with_a_presenter_and_never_on_vr(self) -> None:
         publication = read("src/client/context_publication.hpp")
         flat = publication.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr) {", 1)[0]
-        self.assertIn("if (trade_confirmation_available || trade::prompt().installed()) {", flat)
+        self.assertIn("if (trade_confirmation_available) {", flat)
+        session = read("src/client/plugin_session.hpp")
+        self.assertIn("trade::prompt().installed()),", session)
+        self.assertIn("observed_dialogue_available, orders_available,", session)
+        self.assertIn('action->name == "barter" && !order_replies_.claim(line, *action, cancellation)', session)
         self.assertIn('result.push_back("action.trade_confirmation");', flat)
         self.assertEqual(publication.count('"action.barter"'), 1)
         framework = read("src/ui/menu_framework_ui.hpp")
