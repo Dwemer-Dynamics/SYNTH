@@ -172,6 +172,8 @@ struct Action {
     std::optional<Identity> target;
     json::Value arguments;
     std::uint64_t deadline_ms{};
+    // Companion orders only: the line_id of the reply dialogue line this order rides on.
+    std::string reply_line_id;
 };
 // conversation_id is the request's own id echoed by the server (dialogue.conversation); empty when none.
 struct Start { std::string server_version; std::string conversation_id; };
@@ -439,7 +441,7 @@ inline Line decode_line(std::string_view wire) {
         closed_object(payload, {"action"});
         const auto& a=required(payload,"action");
         closed_object(a, {"schema", "action_id", "idempotency_key", "name", "capability", "actor",
-                          "target", "arguments", "deadline_ms"});
+                          "target", "arguments", "deadline_ms", "reply_line_id"});
         if (text(a, "schema") != "synth.action.v1")
             throw std::invalid_argument{"invalid action schema"};
         std::optional<Identity> target;
@@ -449,7 +451,7 @@ inline Line decode_line(std::string_view wire) {
         closed_object(arguments, {"target_name", "item", "amount", "location", "message", "instruction", "speed"});
         line.payload=Action{text(a,"action_id"),text(a,"idempotency_key"),text(a,"name"),
                             text(a,"capability"),identity(required(a,"actor")),std::move(target),
-                            arguments,integer(a,"deadline_ms")};
+                            arguments,integer(a,"deadline_ms"),a.find("reply_line_id")?text(a,"reply_line_id"):std::string{}};
     }
     else if(type=="social_task") {
         if (line.protocol_version!=2 || line.runtime_variant!="flat") throw std::invalid_argument{"social tasks require v2 flat responses"};

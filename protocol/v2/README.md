@@ -630,6 +630,10 @@ an opponent from nearby hostility, other actors' targets or older dialogue.
 
 `action.wait_here` and `action.release_wait` are optional flat-only capabilities for owned player text/audio input. `wait_here` and `release_wait` address only the captured NPC, have an empty arguments object and no target. They are unavailable to VR, narration and autonomous turns. Waiting is temporary (at most 90 seconds); release removes SYNTH waiting without recruiting a follower. Existing clients omit both capabilities and retain their earlier action set.
 
+## Companion orders
+
+`action.follow_player`, `action.stop_following` and `action.take_a_seat` are optional flat-only capabilities, negotiated together with `action.order_verified`. They apply only to owned player text/audio input and address only the captured NPC; the action has an empty arguments object and no target. The server names the order and nothing else: the game applies it through owned packages and the client reports a bounded physical receipt (`synth.action.order.result.v1`). Each order carries `reply_line_id`, the `line_id` of the same NPC's dialogue line it rides on. The client applies it once, only while that reply's turn is live; a cancelled, replaced or unmatched reply drops it. `stop_following` releases only SYNTH's own order and does not dismiss a native follower. VR never advertises these capabilities. Existing clients omit them and retain their earlier action set.
+
 ## Bounded ambient NPC exchanges
 
 `dialogue.ambient_npc` opts an existing `bored` trigger into a public NPC-to-NPC origin. It requires `dialogue.turn_ownership`, `dialogue.rechat.ownership`, `dialogue.rechat.scene` and `dialogue.listener_identity`, plus explicit init acknowledgements `ambient_npc: true` and `rechat_scene: true`. It adds no trigger payload fields and does not fabricate a continuation parent. Older bored triggers retain their earlier behavior.
