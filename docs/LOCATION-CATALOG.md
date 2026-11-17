@@ -42,3 +42,11 @@ The design, the Fallout 4 data mapping and the server storage are in the paired 
 
 `scripts/verify_protocol.py --peer` against the server tree, `tests/protocol_native` and `tests/fake_server` built and run with
 the engine-free targets. No flat or VR game library was built, so the adapter is untouched; no in-game check was possible.
+
+## Behavior notes
+
+- **Not-stored answers.** The acknowledgement's `stored` flag is parsed. An accepted answer with `stored: false` counts nothing as
+  accepted, ends the run with "Server not storing locations yet" (`Progress::server_not_storing`), and the export can be started
+  again. The server also withholds the init flag until it stores, so a real session does not negotiate the capability before then.
+- **Request lock.** `send_location_catalog` takes its own mutex, not the dialogue request mutex, so a 15 s export batch cannot stall
+  dialogue.

@@ -668,7 +668,9 @@ public:
     // Network worker: one location catalog batch or first-entry upsert. Unbound to a context, so it needs only the
     // negotiated capability and a live generation. Never retried here: the export decides what to do with a failed batch.
     [[nodiscard]] RequestOutcome send_location_catalog(const protocol_native::LocationCatalogRequest& request) {
-        std::scoped_lock request_lock{request_mutex_};
+        // Its own lock: a slow export batch must never hold the dialogue request mutex. Ids come from next_id under the
+        // short state lock, and the event is unbound, so nothing here orders against dialogue requests.
+        std::scoped_lock catalog_lock{location_request_mutex_};
         std::string request_id, turn_id, body;
         std::uint64_t generation{};
         {
@@ -1460,6 +1462,8 @@ private:
     IHttpTransport& transport_;
     SessionOptions options_;
     mutable std::recursive_mutex request_mutex_;
+    // Serializes location catalog requests only, apart from the dialogue request mutex.
+    mutable std::mutex location_request_mutex_;
     mutable std::mutex state_mutex_;
     std::uint64_t generation_{};
     std::uint64_t context_sequence_{};

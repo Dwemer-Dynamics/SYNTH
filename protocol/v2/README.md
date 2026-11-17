@@ -3,7 +3,7 @@
 ## Location catalog export (2026-11-16)
 
 `location_catalog` is a v2 event, `context_sequence` 0, granted by the capability `world.location_catalog`; the init status
-carries `location_catalog: true` only when the init listed it. Payload `mode` is `batch` (1 to 50 locations with `export_id`,
+carries `location_catalog: true` only when the init listed it and the server stores the catalog. Payload `mode` is `batch` (1 to 50 locations with `export_id`,
 `sequence`, `final`) or `upsert` (exactly one location, first entry in a game session). A location is `ref`, `name`,
 `keywords`, `markers` and optionally `editor_id`, `parent_ref`, `cleared`, `discovered`; every form is plugin-local
 (`origin_plugin`, `local_form_id` as six uppercase hex digits, never a runtime form). An exterior marker carries its

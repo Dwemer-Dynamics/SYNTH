@@ -29,7 +29,7 @@
       "additionalProperties": false,
       "required": ["origin_plugin", "local_form_id"],
       "properties": {
-        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"},
+        "origin_plugin": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+\\.([eE][sS][mMpPlL])$"},
         "local_form_id": {"type": "string", "pattern": "^0x[0-9A-F]{6}$"}
       }
     },

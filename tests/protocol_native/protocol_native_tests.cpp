@@ -100,7 +100,7 @@ void location_catalog_tests(const std::string& root) {
         final_seen=batch->final;carried+=batch->locations.size();++batches;
         const bool bad_answer=batches==2;                                  // the second batch fails at the server
         const std::size_t server_refused=batches==1?1U:0U;
-        run.answered(client::LocationCatalogAnswer{!bad_answer,batch->locations.size(),batch->locations.size()-server_refused,server_refused});
+        run.answered(client::LocationCatalogAnswer{!bad_answer,batch->locations.size(),batch->locations.size()-server_refused,server_refused,!bad_answer});
     }
     const auto& progress=run.progress();
     if(progress.running || !final_seen || batches!=3 || carried!=120 || progress.total!=124 || progress.sent!=124)
@@ -109,8 +109,15 @@ void location_catalog_tests(const std::string& root) {
     // Stop ends the run after the batch on its way.
     client::LocationExport stopping{"playthrough-001"};
     if(!stopping.begin("export-003",ids)) throw std::runtime_error{"stopping export start"};
-    auto first=stopping.next_batch(reader);stopping.stop();stopping.answered({true,first->locations.size(),first->locations.size(),0});
+    auto first=stopping.next_batch(reader);stopping.stop();stopping.answered({true,first->locations.size(),first->locations.size(),0,true});
     if(stopping.next_batch(reader) || stopping.progress().running || stopping.progress().message!="Stopped") throw std::runtime_error{"export stop"};
+    // An accepted-but-not-stored answer counts nothing as accepted, ends the run and leaves it re-runnable.
+    client::LocationExport unstored{"playthrough-001"};
+    if(!unstored.begin("export-004",ids)) throw std::runtime_error{"unstored export start"};
+    auto held=unstored.next_batch(reader);unstored.answered({true,held->locations.size(),held->locations.size(),0,false});
+    if(unstored.progress().running || !unstored.progress().server_not_storing || unstored.progress().accepted!=0 ||
+       unstored.progress().message!="Server not storing locations yet" || unstored.next_batch(reader) || !unstored.begin("export-005",ids))
+        throw std::runtime_error{"export against a server that does not store"};
     // First entry: once per session, never an unreadable or invalid location.
     client::LocationExport entry{"playthrough-001"};
     const auto once=entry.upsert_on_first_entry(form(0x395C),reader);

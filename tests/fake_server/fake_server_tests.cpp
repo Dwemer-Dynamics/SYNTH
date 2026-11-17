@@ -87,6 +87,7 @@ public:
     bool social_support{};
     bool location_ancestry_support{};
     bool location_catalog_support{};
+    bool location_catalog_stores{true};
     std::optional<synth::runtime::SocialTaskDescriptor> social_offer;
     bool inventory_support{};
     bool action_inventory_support{};
@@ -176,7 +177,7 @@ public:
             const auto& locations = protocol_native::required(protocol_native::required(event, "payload"), "locations").as_array();
             body += line("status", json::Value{protocol_native::object({{"code", "location_catalog_accepted"},
                 {"detail", "{\"received\":" + std::to_string(locations.size()) + ",\"valid\":" + std::to_string(locations.size()) +
-                    ",\"markers\":0,\"refused\":[],\"stored\":false}"}})});
+                    ",\"markers\":0,\"refused\":[],\"stored\":" + std::string{location_catalog_stores ? "true" : "false"} + "}"}})});
         }
         if (protocol_native::text(event, "type") == "diary_request" && !diary_ack.empty())
             body += line("status", json::Value{protocol_native::object({{"code", diary_ack}})});
@@ -1605,7 +1606,10 @@ int main() {
                 const auto sent=catalog_client.send_location_catalog(request);
                 CHECK(sent.status==RequestStatus::complete);
                 const auto answer=synth::client::location_catalog_answer(sent);
-                CHECK(answer.accepted && answer.received==1 && answer.valid==1 && answer.refused==0);
+                CHECK(answer.accepted && answer.received==1 && answer.valid==1 && answer.refused==0 && answer.stored);
+                wire.location_catalog_stores=false; // A storage-less server answers accepted but not stored.
+                const auto unstored=synth::client::location_catalog_answer(catalog_client.send_location_catalog(request));
+                CHECK(unstored.accepted && !unstored.stored);
                 CHECK(wire.requests.back().body.find("\"context_sequence\":0")!=std::string::npos);
             } else {
                 bool refused=false;try{(void)catalog_client.send_location_catalog(request);}catch(const std::invalid_argument&){refused=true;}

@@ -34,6 +34,8 @@ struct LocationCatalogAnswer final {
     std::size_t received{};
     std::size_t valid{};
     std::size_t refused{};
+    // The server's own statement that it kept the records. A storage-less server answers accepted with stored false.
+    bool stored{};
 };
 
 // The server's only catalog acknowledgement: start, one location_catalog_accepted status whose detail is
@@ -49,8 +51,10 @@ struct LocationCatalogAnswer final {
         const auto detail = json::parse(status->detail);
         const auto& refused = protocol_native::required(detail, "refused");
         if (!refused.is_array()) return {};
+        const auto& stored = protocol_native::required(detail, "stored");
+        if (!stored.is_bool()) return {};
         return {true, static_cast<std::size_t>(protocol_native::integer(detail, "received")),
-                static_cast<std::size_t>(protocol_native::integer(detail, "valid")), refused.as_array().size()};
+                static_cast<std::size_t>(protocol_native::integer(detail, "valid")), refused.as_array().size(), stored.as_bool()};
     } catch (const std::exception&) {
         return {};
     }
@@ -69,6 +73,8 @@ public:
         std::size_t accepted{};
         // Dropped by the client (unreadable or out of bounds), refused by the server, or in a failed batch.
         std::size_t refused{};
+        // The server accepted the request but is not storing yet: the run ended early and may be started again.
+        bool server_not_storing{};
         std::string message;
     };
 
@@ -123,6 +129,13 @@ public:
         if (!progress_.running || !awaiting_answer_) return;
         awaiting_answer_ = false;
         progress_.sent += in_flight_;
+        if (answer.accepted && !answer.stored) {
+            // Nothing was kept, so nothing is counted as accepted and the rest is not sent; the export can run again.
+            in_flight_ = 0;
+            progress_.server_not_storing = true;
+            finish("Server not storing locations yet");
+            return;
+        }
         if (answer.accepted) {
             const auto stored = std::min(answer.valid, in_flight_);
             progress_.accepted += stored;
