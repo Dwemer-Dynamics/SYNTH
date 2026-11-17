@@ -58,6 +58,9 @@ MaxPendingRequests=12
     CHECK(config.runtime.log_level == LogLevel::warning);
     CHECK(config.limits.max_pending_requests == 12);
     CHECK(!config.server.allow_remote);
+    CHECK(config.server.connection_notice); // On unless SYNTH_custom.ini turns it off.
+    CHECK(!parse(defaults, "[Server]\nConnectionNotice=false\n").server.connection_notice);
+    rejects([] { (void)parse(defaults, "[Server]\nConnectionNotice=sometimes\n"); });
     CHECK(config.behavior.end_conversation_cooldown_seconds == 60);
 }
 
@@ -169,7 +172,7 @@ void test_settings_catalog_matches_configuration() {
             }
         }
     }
-    CHECK(interactive == 46);
+    CHECK(interactive == 47);
 
     // Every framework hotkey identifier must resolve to a catalog keybind row,
     // otherwise the reconcile pass would drop a rebind on the floor.
