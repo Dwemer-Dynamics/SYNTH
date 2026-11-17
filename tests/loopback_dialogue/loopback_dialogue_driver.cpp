@@ -1112,6 +1112,7 @@ int run_conversation(std::string_view base) {
     capabilities.emplace_back("dialogue.turn_cancel");
     capabilities.emplace_back("dialogue.delivery_receipts");
     capabilities.emplace_back("dialogue.conversation");
+    client::append_wait_capabilities(capabilities, core::RuntimeVariant::flat);
     Writer s{transport, "loopback-conversation", 1, store, capabilities};
     CHECK(s.synth.conversation_ready() && s.synth.delivery_receipts_ready());
     s.target_form_id = piper_form;
@@ -1208,6 +1209,7 @@ int run_conversation(std::string_view base) {
     CHECK(old_store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
     auto old_capabilities = dialogue_capabilities();
     old_capabilities.emplace_back("dialogue.delivery_receipts");
+    client::append_wait_capabilities(old_capabilities, core::RuntimeVariant::flat);
     Writer old{transport, "loopback-conversation-old", 1, old_store, old_capabilities};
     CHECK(!old.synth.conversation_ready() && old.synth.delivery_receipts_ready());
     old.target_form_id = piper_form;
