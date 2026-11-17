@@ -73,6 +73,41 @@ unreadable entry or a lost record means the lists may be incomplete. Empty lists
 value only in the bound session context snapshot and projects one bounded condition line.
 It is never written to an NPC profile or history.
 
+## Confirmed NPC trade (2026-11-16)
+
+An NPC may offer to sell the player one stack of one item it carries for caps. The offer is a
+`barter` action (`action.barter`); the player answers in a Yes/Cancel box; only Yes moves anything.
+It is flat only. `action.trade_confirmation` requires `action.barter`, `action.player_caps_inventory`
+(and so the caps/paired-transfer contracts), `action.give_item_to`, `action.transfer_inventory`,
+`action.inventory_observation` and `dialogue.turn_ownership`. Only an init whose status carries
+`trade_confirmation: true` grants it; older acknowledgements and VR never do.
+
+**Offer.** An `action` line whose `payload.action` is `barter-action.schema.json`. It carries `reply_line_id`, the NPC's
+own first dialogue line of the same response, and at most one offer is issued per response; the client shows no box unless it accepted
+that line from the same turn, and a line carries one offer. The NPC is
+`actor`, the captured Sole Survivor (`0x00000014`) is `target`, `arguments` are `item` (display name),
+`item_form_id`, `item_origin_plugin`, `count` (1..99; the server offers 1) and `price` (whole caps,
+1..100000), `deadline_ms` is 60000. The client's box stays up 45 s, and the server accepts a receipt for 5 minutes past the deadline
+(a grace for speech queuing and transport), so a sale the client completed inside its window is never refused. The server issues it only for a typed or spoken turn (never rechat,
+narrator or action-result continuations), only when the NPC's complete observed inventory holds exactly
+one unequipped stack of that name (never caps), the price is at most ten times the stack's base value
+(never below 25 caps) and the player's observed caps cover it. The offer is an ordinary action intent;
+no new storage exists.
+
+**Client.** The client never moves anything on receipt of the offer. It shows a confirmation box, and
+discards the offer without a box if the generation, scene or actors no longer match. On Yes it
+re-reads both inventories and caps and only proceeds when they still equal what the box described;
+otherwise it reports a stale result. Cancel, a closed box and a timeout move nothing.
+
+**Receipt.** Every outcome is one `synth.action.transfer-result.v2` (`inventory` = NPC, `recipient_inventory`
+= player, both after the answer). `status` and `detail` are exactly one of: `succeeded` / `trade_completed`;
+`cancelled` / `player_declined`; `cancelled` / `stale_cell_changed`, `stale_inventory_changed`,
+`stale_caps_changed` or `stale_actor_unavailable`; `timed_out` / `expired`. The server accepts
+`succeeded` only before the offer's deadline and, from the admitted context, verifies the item
+and caps each moved exactly once (NPC item `-count`, caps `+price`; player item `+count`, caps `-price`).
+An unverifiable success is reported to the NPC as unverified, never as a sale. The NPC is told the
+outcome in a follow-up; client text is never copied into it.
+
 ## Native typed turn and speech receipts (2026-11-09, Stage 1)
 
 `dialogue.native_turn` requires v2 and `dialogue.turn_ownership`. Only the init

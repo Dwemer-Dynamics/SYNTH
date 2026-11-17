@@ -190,7 +190,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -487,7 +487,8 @@ inline Line decode_line(std::string_view wire) {
         if (const auto* value=a.find("target")) target=identity(*value);
         const auto& arguments=required(a,"arguments");
         if (!arguments.is_object()) throw std::invalid_argument{"action arguments are not an object"};
-        closed_object(arguments, {"target_name", "item", "amount", "location", "message", "instruction", "speed"});
+        closed_object(arguments, {"target_name", "item", "amount", "location", "message", "instruction", "speed",
+                                  "item_form_id", "item_origin_plugin", "count", "price"});
         line.payload=Action{text(a,"action_id"),text(a,"idempotency_key"),text(a,"name"),
                             text(a,"capability"),identity(required(a,"actor")),std::move(target),
                             arguments,integer(a,"deadline_ms"),a.find("reply_line_id")?text(a,"reply_line_id"):std::string{}};
@@ -511,7 +512,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "narrator_object"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "control_audience", "delivery_receipts", "narrator_object"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -540,6 +541,8 @@ inline Line decode_line(std::string_view wire) {
             std::get<Status>(line.payload).narrator_object = required(payload, "narrator_object").as_bool();
         if (payload.find("actor_condition"))
             std::get<Status>(line.payload).actor_condition = required(payload, "actor_condition").as_bool();
+        if (payload.find("trade_confirmation"))
+            std::get<Status>(line.payload).trade_confirmation = required(payload, "trade_confirmation").as_bool();
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});

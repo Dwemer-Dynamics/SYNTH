@@ -254,6 +254,52 @@
       "if": {
         "properties": {
           "type": {
+            "const": "action"
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "const": "barter"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "context_sequence": {
+            "minimum": 1
+          },
+          "payload": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "$ref": "barter-action.schema.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "social_task"
           }
         }

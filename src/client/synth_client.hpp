@@ -220,6 +220,16 @@ public:
     [[nodiscard]] bool enemy_awareness_ready() const noexcept {
         return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
     }
+    // Confirmed NPC sales: granted only by an init whose acknowledgement carries trade_confirmation, over the
+    // player-payment contract it extends. Older servers and VR never acknowledge it.
+    [[nodiscard]] bool uses_trade_contract() const noexcept {
+        return uses_player_caps_contract() &&
+            std::ranges::find(options_.capabilities, "action.barter") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "action.trade_confirmation") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool trade_ready() const noexcept {
+        return trade_negotiated_.load(std::memory_order_acquire) && player_caps_ready();
+    }
     [[nodiscard]] bool observed_dialogue_ready() const noexcept {
         return observed_dialogue_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -345,6 +355,7 @@ public:
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
             location_ancestry_negotiated_.store(false, std::memory_order_release);
             observed_dialogue_negotiated_.store(false, std::memory_order_release);
+            trade_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
             player_events_negotiated_.store(false, std::memory_order_release);
@@ -441,6 +452,7 @@ public:
             player_item_negotiated_.store(player_item_support, std::memory_order_release);
             const bool player_caps_support = supported_init && (player_item_support || status->code == "init_player_caps_inventory_accepted") && uses_player_caps_contract();
             player_caps_negotiated_.store(player_caps_support, std::memory_order_release);
+            trade_negotiated_.store(player_caps_support && status->trade_confirmation && uses_trade_contract(), std::memory_order_release);
             const bool caps_support = supported_init && (gift_menu_support || player_item_support || player_caps_support || status->code == "init_caps_inventory_accepted") && uses_caps_contract();
             caps_negotiated_.store(caps_support, std::memory_order_release);
             const bool transfer_support = supported_init && (gift_menu_support || player_item_support || caps_support || status->code == "init_transfer_inventory_accepted") && uses_transfer_contract();
@@ -1472,6 +1484,7 @@ private:
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
     std::atomic_bool observed_dialogue_negotiated_{};
+    std::atomic_bool trade_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};
