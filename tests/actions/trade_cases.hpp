@@ -1,9 +1,13 @@
 #pragma once
-#if defined(_WIN32) && !defined(NOMINMAX)
-#  define NOMINMAX  // the capability check pulls in the Windows-facing voice header
-#endif
 // Confirmed NPC sale: offer binding, staleness, the answered purchase with its undo, and the confirmation mailbox.
 #include "client/context_publication.hpp"
+// The voice header pulls in <windows.h>; the rest of this suite uses std::min/max and numeric_limits.
+#ifdef min
+#  undef min
+#endif
+#ifdef max
+#  undef max
+#endif
 #include "protocol_native/v1_codec.hpp"
 #include "trade/confirmed_trade.hpp"
 
