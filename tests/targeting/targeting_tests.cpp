@@ -3,6 +3,7 @@
 #include "client/automatic_activation.hpp"
 #include "core/automatic_diary_queue.hpp"
 #include "core/picked_reference_mailbox.hpp"
+#include "core/talking_object.hpp"
 #include "integration/external_requests.hpp"
 
 #include <chrono>
@@ -450,6 +451,64 @@ int main() {
               targeting::TargetingStatus::stale_pose);
         CHECK(targeting::select_flat_crosshair(flat, context::PlaythroughIdentity{"other"}).status ==
               targeting::TargetingStatus::identity_mismatch);
+        {
+            // Talking objects: exact identity, no guessing, no actors, no stacks.
+            using namespace synth::core;
+            const auto at = SnapshotClock::now();
+            const std::vector<LoadedPlugin> plugins{{"Fallout4.esm", false, 0, 0, 0, "00"}, {"Mod.esl", true, 0, 0, 0x123, "FE123"}};
+            const auto make = [&](std::vector<NearbyItemSnapshot> items, std::vector<PointOfInterestSnapshot> points) {
+                return RuntimeSnapshot{Game::fallout4, RuntimeVariant::flat, RuntimeGeneration::initial(), 4, at, pose({}), std::nullopt,
+                    std::nullopt, std::nullopt, ActorSnapshot{0x14, "Sole Survivor", {}, "Fallout4.esm", "save-a"}, {}, 0,
+                    std::nullopt, plugins, {}, std::move(items), std::move(points)};
+            };
+            const auto terminal = [](std::uint32_t id, double distance, bool looking) {
+                return PointOfInterestSnapshot{id, 0x00014E3A, 0x00018AA2, std::string{"Fallout4.esm"}, "Fallout4.esm", "Fallout4.esm",
+                    "Wall Terminal", "terminal", {10, 0, 0}, distance, false, looking};
+            };
+            const auto item = [](std::uint32_t id, std::optional<std::string> plugin, std::uint32_t count, bool held, bool looking) {
+                return NearbyItemSnapshot{id, 0x00004822, 0x00018AA2, std::move(plugin), "Fallout4.esm", "Fallout4.esm", "Holotape",
+                    {5, 0, 0}, 80.0, 0.1, count, 1, 43, false, looking, held};
+            };
+            const auto one = make({}, {terminal(0x000A1B2C, 120, true)});
+            const auto found = scan_talking_object(one);
+            CHECK(found.status == TalkingObjectScanStatus::found);
+            CHECK(found.object->kind == TalkingObjectKind::terminal);
+            CHECK(found.object->identity.ref_plugin == std::optional<std::string>{"Fallout4.esm"});
+            CHECK(found.object->identity.ref_id == 0x000A1B2C && found.object->identity.base_id == 0x00014E3A);
+            CHECK(talking_object_wire_id(found.object->identity.ref_id) == "0x000A1B2C");
+            CHECK(scan_talking_object(make({}, {terminal(0x000A1B2C, 120, false)})).status == TalkingObjectScanStatus::none);
+            CHECK(scan_talking_object(make({}, {terminal(0x000A1B2C, 400, true)})).status == TalkingObjectScanStatus::none);
+            CHECK(scan_talking_object(make({}, {terminal(0x000A1B2C, 120, true), terminal(0x000A1B2D, 140, true)})).status == TalkingObjectScanStatus::ambiguous);
+            const auto separated = scan_talking_object(make({}, {terminal(0x000A1B2C, 120, true), terminal(0x000A1B2D, 200, true)}));
+            CHECK(separated.status == TalkingObjectScanStatus::found && separated.object->identity.ref_id == 0x000A1B2C);
+            // A runtime-created reference needs the 0xFF prefix and no plugin; a count above one is a stack.
+            const auto runtime = scan_talking_object(make({item(0xFF001234, std::nullopt, 1, false, true)}, {}));
+            CHECK(runtime.status == TalkingObjectScanStatus::found && runtime.object->identity.runtime_created());
+            CHECK(runtime.object->identity.ref_id == 0xFF001234);
+            CHECK(scan_talking_object(make({item(0xFF001234, std::nullopt, 2, false, true)}, {})).status == TalkingObjectScanStatus::none);
+            CHECK(scan_talking_object(make({item(0x00001234, std::nullopt, 1, false, true)}, {})).status == TalkingObjectScanStatus::none);
+            CHECK(scan_talking_object(make({item(0xFF001234, std::string{"Fallout4.esm"}, 1, false, true)}, {})).status == TalkingObjectScanStatus::none);
+            // A held item wins over an aimed terminal; two held items refuse.
+            const auto held = scan_talking_object(make({item(0xFF001234, std::nullopt, 1, true, false)}, {terminal(0x000A1B2C, 120, true)}));
+            CHECK(held.status == TalkingObjectScanStatus::found && held.object->identity.runtime_created());
+            CHECK(scan_talking_object(make({item(0xFF001234, std::nullopt, 1, true, false), item(0xFF001235, std::nullopt, 1, true, false)}, {})).status
+                  == TalkingObjectScanStatus::ambiguous);
+            // Light plugin references decode to their 12-bit local ID; a plugin missing from the manifest is no identity.
+            CHECK(talking_object_identity(0xFE123ABC, std::string{"Mod.esl"}, 0x00014E3A, "Fallout4.esm", plugins)->ref_id == 0xABC);
+            CHECK(!talking_object_identity(0x05000001, std::string{"Missing.esp"}, 0x00014E3A, "Fallout4.esm", plugins));
+            CHECK(!talking_object_identity(0xFF000001, std::nullopt, 0xFF000002, "Fallout4.esm", plugins));
+            // The same reference listed as an item and as a point of interest is one object, not an ambiguity.
+            const auto duplicate = make({item(0xFF001234, std::nullopt, 1, false, true)},
+                {PointOfInterestSnapshot{0xFF001234, 0x00004822, 0x00018AA2, std::nullopt, "Fallout4.esm", "Fallout4.esm", "Holotape", "activator", {5, 0, 0}, 80.0, false, true}});
+            CHECK(scan_talking_object(duplicate).status == TalkingObjectScanStatus::found);
+            // Re-locating requires the exact identity; another terminal with the same base is never adopted.
+            CHECK(locate_talking_object(one, found.object->identity));
+            auto other = found.object->identity;
+            other.ref_id = 0x000A1B2D;
+            CHECK(!locate_talking_object(one, other));
+            CHECK(locate_talking_object(make({}, {terminal(0x000A1B2C, 340, false)}), found.object->identity));
+            CHECK(!locate_talking_object(make({}, {terminal(0x000A1B2C, 360, false)}), found.object->identity));
+        }
         std::cout << "targeting tests passed (" << checks << " checks)\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

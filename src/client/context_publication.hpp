@@ -138,7 +138,7 @@ public:
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
             "action.check_inventory", "action.read_quests", "action.end_conversation",
-            "action.sheathe_weapon", "narrator.private.v1"};
+            "action.sheathe_weapon", "narrator.private.v1", "narrator.object.v1"};
         append_wait_capabilities(result, variant);
         append_order_capabilities(result, variant, orders_available);
         if (variant==core::RuntimeVariant::flat) result.push_back("action.attack");

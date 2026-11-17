@@ -559,6 +559,17 @@ See [README](../README.md#build-and-test) for the commands. Points to know:
 
 ## Known gaps and deferred work
 
+- **Talking objects (client candidate, no game run).** `narrator.object.v1` adds `/narrator object`,
+  `/narrator object bind <number or name>` and `/narrator object talk`. The object is chosen from the copied
+  snapshot only (`core/talking_object.hpp`): one eligible terminal, activator, furniture, container or single
+  item that is held or in the look cone, never an actor, and a near tie refuses instead of guessing. The wire
+  identity is plugin and plugin-local ID (runtime `0xFF` references keep the full ID with a null plugin); every
+  typed and push-to-talk turn re-finds that exact identity in the snapshot. The client only offers the commands
+  when the server's init acknowledgement carries `narrator_object`, which the server does not send until its
+  storage lands, so nothing here is reachable against an installed server today. Open: hotkey/semantic action,
+  FF reference persistence, inventory-item identity, positional audio, flat and VR in-game acceptance. Design:
+  Synthserver `docs/TALKING-OBJECTS.md`.
+
 - **Stage 1 native typed turn (source candidate).** The client advertises
   `dialogue.native_turn`; only `/talk <message>` in the existing text entry
   selects the native route (explicit per-turn intent). It sends `speech_receipt` only after the exact
