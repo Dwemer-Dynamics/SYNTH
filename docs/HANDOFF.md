@@ -1,5 +1,13 @@
 # SYNTH developer handoff
 
+## Confirmed NPC trade candidate
+
+An NPC can offer to sell the player one stack of one item for caps; the player answers in a Menu Framework Yes/Cancel box and
+only Yes moves the item and the caps, with the existing paired receipt. Flat only; the capability is advertised only when
+the Menu Framework is installed. Offer, stale, decline and a half-done sale are covered by native tests with a fake runtime;
+the Menu Framework window and the native transfers are not proven in the game. See [CONFIRMED-TRADE.md](CONFIRMED-TRADE.md)
+and [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#confirmed-npc-trade). Paired with the server `action.trade_confirmation` contract.
+
 ## Auto Chat candidate
 
 Explicit `AUTOCHAT` mode on the existing Control mode list: the server rewrites typed or voice

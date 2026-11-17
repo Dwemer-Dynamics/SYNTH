@@ -121,7 +121,8 @@ public:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false,
-                                                             bool observed_dialogue_available = false) {
+                                                             bool observed_dialogue_available = false,
+                                                             bool trade_confirmation_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts",
@@ -160,6 +161,11 @@ public:
             result.push_back("action.player_item_inventory");
             result.push_back("action.open_inventory");
             result.push_back("action.gift_menu_inventory");
+            // Confirmed NPC sales need a confirmation presenter; without one the capability is never offered.
+            if (trade_confirmation_available) {
+                result.push_back("action.barter");
+                result.push_back("action.trade_confirmation");
+            }
             result.push_back("context.inventory_512");
             result.push_back("context.player_events");
             result.push_back("dialogue.player_reactions");

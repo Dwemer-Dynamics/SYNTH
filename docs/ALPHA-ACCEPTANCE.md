@@ -176,6 +176,21 @@ exactly when the loaded anchor's snapshot covers its heard row.
   same receipt produces no second relationship reward.
 
 
+## Confirmed NPC trade
+
+Contract and boundaries: [CONFIRMED-TRADE.md](CONFIRMED-TRADE.md). Automated checks use a fake runtime and a fake
+confirmation mailbox only; nothing below has been seen in the game.
+
+- [ ] Flat with the Menu Framework: ask an NPC with plain stock (for example a vendor's apple) to sell something; the
+  box shows the NPC, item, price and your caps, and Cancel has focus.
+- [ ] Yes moves exactly one item and the price once; both inventories, the HUD line and the paired receipt agree, and the
+  NPC reacts to the completed sale.
+- [ ] Cancel, Escape and closing the window move nothing and the NPC takes the refusal without re-offering.
+- [ ] Leaving the cell, loading a save, waiting out the box, or spending caps while it is open leaves nothing moved and
+  the NPC is told the offer lapsed.
+- [ ] The Menu Framework absent: no `action.barter` is advertised and no offer is ever made. VR: never offered.
+- [ ] A stack the engine will not transfer (quest, enchanted, leveled-list stock) is refused without moving anything.
+
 ## Equipped pistol transfer
 
 - [x] Jun equips and unequips Heavy 10mm Pistol with successful live-state/count receipts.

@@ -2146,7 +2146,7 @@ actions return `unsupported_without_esp` or `unsupported_runtime`; they never cl
 | Inventory | `OpenInventory`, `PickupItem` | Native only after exact delta and theft/menu semantics are proven | CAPABILITY DISABLED. Flat world-item capture b6d29a6 is deployed; pickup binding/conservation helpers435e5b7 are source-only. Native approach/transfer/retirement/restoration, matched receipt and OpenInventory menu semantics remain incomplete. No gameplay or inherited VR proof. |
 | Movement | `ComeCloser`, `MoveTo`, `Follow`, `FollowPlayer`, `StopFollowing`, `StopWalk`, `WaitHere`, `TakeASeat`, `TravelTo` | Package-backed operations need SYNTH-owned forms | DEFERRED ESP (not advertised; requires the separately authorized content phase) |
 | Combat | `Attack` | Native only with original combat-state restoration | CAPABILITY DISABLED (not advertised; safe cancellation/restoration is not proven on either runtime) |
-| Trade | `Barter` | Native menu/inventory experiment | CAPABILITY DISABLED (not advertised; opening or mutating Fallout menus is deliberately unavailable) |
+| Trade | `Barter` | Confirmed one-stack NPC sale: server offer, Menu Framework Yes/Cancel, existing paired transfers | CANDIDATE FLAT (`action.barter` + `action.trade_confirmation`, advertised only with the Menu Framework; see [CONFIRMED-TRADE.md](CONFIRMED-TRADE.md)). Fake-runtime checks only; in-game acceptance pending. No vendor menu is opened. VR DISABLED. |
 | Follower conversion | `MakeFollower` | Requires FO4 companion/package/faction design | DEFERRED ESP |
 | Walk speed | `IncreaseWalkSpeed`, `DecreaseWalkSpeed` | Omit unless a safe reversible FO4 implementation is proven | CAPABILITY DISABLED (not advertised; SYNTH does not modify actor movement state) |
 

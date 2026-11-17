@@ -15,6 +15,7 @@
 #include "social_visit_cases.hpp"
 #include "social_task_cases.hpp"
 #include "social_delivery_cases.hpp"
+#include "trade_cases.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -85,6 +86,7 @@ int main() {
         checks += synth::tests::wait_verification_checks();
         checks += synth::tests::social_task_contract_checks();
         checks += synth::tests::social_delivery_contract_checks();
+        checks += synth::tests::trade_contract_checks();
         {
             using namespace synth;
             using Kind=runtime::ConversationApproachKind;

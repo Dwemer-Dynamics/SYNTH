@@ -12,6 +12,7 @@
 #include "runtime/action_completion.hpp"
 #include "runtime/game_thread_dispatcher.hpp"
 #include "tasks/task_lanes.hpp"
+#include "trade/confirmed_trade.hpp"
 
 #include <atomic>
 #include <charconv>
@@ -22,6 +23,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -208,6 +210,9 @@ private:
                 std::string detail{"action capability is not implemented by this runtime"};
                 std::optional<runtime::RuntimeInventoryObservation> inventory_observation;
                 std::optional<runtime::RuntimeTransferObservation> transfer_observation;
+                // A confirmed sale reports its own paired inventories; it never reuses a single native transfer's.
+                std::optional<protocol_native::ActionTransferObservation> trade_observation;
+                Snapshot trade_snapshot;
                 if (tasks::TaskLanes::Clock::now() >= deadline) {
                     status = "timed_out";
                     detail = "action expired while awaiting presentation or worker dispatch";
@@ -232,6 +237,17 @@ private:
                     detail = "server has not acknowledged player item inventories; no action was executed";
                 } else if (action.name=="open_inventory" && action.capability=="action.open_inventory" && !client_.gift_menu_ready()) {
                     status="rejected";detail="server has not acknowledged gift menu inventory observations";
+                } else if (action.name == "barter" && action.capability == "action.barter" && !client_.trade_ready()) {
+                    status = "rejected";
+                    detail = "server has not acknowledged confirmed trading; no action was executed";
+                } else if (action.name == "barter" && action.capability == "action.barter") {
+                    // The player's own Yes/Cancel answer decides; this worker waits for it and sends exactly one receipt.
+                    auto trade = run_barter(pending, cancellation, deadline);
+                    if (!trade) return;  // the turn ended or the session retired while the box was open
+                    status = std::move(trade->status);
+                    detail = std::move(trade->detail);
+                    trade_observation = std::move(trade->transfer);
+                    trade_snapshot = std::move(trade->snapshot);
                 } else if (action.name == "end_conversation" &&
                     action.capability == "action.end_conversation") {
                     const auto matches = [&](const core::ActorSnapshot& actor) {
@@ -592,6 +608,11 @@ private:
                         auto prepared=prepare_action_inventory(snapshot,action,cancellation,inventory_observation,client_.extended_inventory_ready());
                         continuation_snapshot=std::move(prepared.snapshot);inventory=std::move(prepared.inventory);
                     }
+                    if (action.name == "barter" && action.capability == "action.barter") {
+                        // The server only accepts a sale's receipt as a paired observation, so even a refusal carries one.
+                        transfer = trade_observation ? std::move(trade_observation) : unavailable_pair(action);
+                        if (trade_snapshot) continuation_snapshot = std::move(trade_snapshot);
+                    }
                     if (((client_.transfer_ready() && action.name=="give_item_to") || (client_.caps_ready() && action.name=="give_caps_to") ||
                         (client_.player_caps_ready() && action.name=="take_caps_from_player") ||
                         (client_.player_item_ready() && action.name=="take_item_from_player") ||
@@ -635,6 +656,105 @@ private:
         if (accepted != tasks::SubmitResult::accepted) {
             notify_("SYNTH action dispatch queue is full");
         }
+    }
+
+    struct BarterOutcome final {
+        std::string status, detail;
+        std::optional<protocol_native::ActionTransferObservation> transfer;
+        Snapshot snapshot;
+    };
+
+    [[nodiscard]] static protocol_native::ActionTransferObservation unavailable_pair(const protocol_native::Action& action) {
+        return {{action.actor, {}, "unavailable"}, {action.target.value_or(protocol_native::Identity{}), {}, "unavailable"}};
+    }
+
+    // Worker thread. One fresh copied capture of the scene, taken on the game thread; null when none was taken.
+    [[nodiscard]] Snapshot capture_fresh(core::RuntimeGeneration generation, const core::CancellationToken& cancellation) {
+        auto promise = std::make_shared<std::promise<Snapshot>>();
+        auto future = promise->get_future();
+        const auto dispatch = dispatcher_.try_enqueue(generation, [promise](runtime::IFalloutRuntime& fallout) {
+            try { promise->set_value(fallout.capture_snapshot(core::SnapshotClock::now(), runtime::RuntimeCapturePurpose::dialogue)); }
+            catch (...) { promise->set_value(nullptr); }
+        });
+        if (dispatch != runtime::DispatchResult::accepted) return nullptr;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (future.wait_for(std::chrono::milliseconds{10}) != std::future_status::ready) {
+            if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                std::chrono::steady_clock::now() >= limit) return nullptr;
+        }
+        return future.get();
+    }
+
+    // Worker thread. One native request on the game thread with the same completion, deadline and pending
+    // rules as every other action; null when it was not dispatched or did not complete.
+    [[nodiscard]] std::optional<runtime::RuntimeActionResult> run_native(const runtime::RuntimeActionRequest& request,
+                                                                         const core::CancellationToken& cancellation,
+                                                                         core::SnapshotClock::time_point deadline) {
+        for (;;) {
+            auto completion = std::make_shared<RuntimeActionCompletion>();
+            const auto dispatch = dispatcher_.try_enqueue(cancellation.generation(),
+                [completion, request, cancellation, deadline](runtime::IFalloutRuntime& fallout) {
+                    completion->execute([&] { return fallout.execute_action(request); }, cancellation, deadline);
+                });
+            if (dispatch != runtime::DispatchResult::accepted) return std::nullopt;
+            std::unique_lock lock{completion->mutex};
+            while (completion->phase != RuntimeActionCompletion::Phase::complete) {
+                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                    tasks::TaskLanes::Clock::now() >= deadline) {
+                    if (completion->phase == RuntimeActionCompletion::Phase::pending)
+                        completion->phase = RuntimeActionCompletion::Phase::abandoned;
+                    if (completion->phase != RuntimeActionCompletion::Phase::executing) return std::nullopt;
+                }
+                completion->changed.wait_for(lock, std::chrono::milliseconds{10});
+            }
+            if (!completion->result) return std::nullopt;
+            if (!completion->result->pending) return completion->result;
+            lock.unlock();
+            if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                tasks::TaskLanes::Clock::now() >= deadline) return std::nullopt;
+            std::this_thread::sleep_for(std::chrono::milliseconds{25});
+        }
+    }
+
+    // Worker thread. Binds the offer to its captured scene, asks the player, and carries out only an
+    // answered Yes that still matches. Null means the turn ended and no receipt is owed.
+    [[nodiscard]] std::optional<BarterOutcome> run_barter(const PendingAction& pending, const core::CancellationToken& cancellation,
+                                                          core::SnapshotClock::time_point deadline) {
+        const auto& action = pending.action;
+        if (trade::trading_stopped().load(std::memory_order_acquire))
+            return BarterOutcome{"rejected", "trading is stopped for this game session; nothing was bought", std::nullopt, nullptr};
+        trade::TradeOffer offer;
+        try { offer = trade::prepare_trade_offer(*pending.snapshot, action, cancellation); }
+        catch (const std::invalid_argument& error) {
+            return BarterOutcome{"rejected", error.what(), std::nullopt, nullptr};
+        }
+        const auto generation = pending.snapshot->generation();
+        trade::TradeIo io;
+        io.ask = [&](const trade::TradeOffer& shown) {
+            const auto window = std::min<std::chrono::steady_clock::duration>(
+                trade::confirmation_window, std::max<std::chrono::steady_clock::duration>(
+                    deadline - tasks::TaskLanes::Clock::now(), std::chrono::milliseconds{1}));
+            return trade::prompt().ask(shown, cancellation, terminal_, window);
+        };
+        io.capture = [&] { return capture_fresh(generation, cancellation); };
+        io.transfer = [&](const runtime::RuntimeActionRequest& request) { return run_native(request, cancellation, deadline); };
+        auto run = trade::run_trade(offer, pending.snapshot, io, cancellation, deadline);
+        if (!run) return std::nullopt;
+        if (run->stop_trading) {
+            trade::trading_stopped().store(true, std::memory_order_release);
+            notify_("SYNTH trading stopped: the last sale could not be verified. Check your inventory.");
+        } else if (run->status == "succeeded") {
+            notify_("Bought " + std::to_string(offer.count) + " " + offer.item.display_name + " from " + offer.seller_name +
+                    " for " + std::to_string(offer.price) + " caps.");
+        } else if (run->status == "cancelled" && run->detail == trade::reason_declined) {
+            notify_("You declined. Nothing changed.");
+        } else if (run->status == "cancelled" || run->status == "timed_out") {
+            notify_("That offer is no longer valid. Nothing changed.");
+        }
+        BarterOutcome outcome{std::move(run->status), std::move(run->detail), std::nullopt, run->snapshot};
+        if (run->snapshot && action.target)
+            outcome.transfer = trade::observe_pair(*run->snapshot, offer, action.actor, *action.target, client_.extended_inventory_ready());
+        return outcome;
     }
 
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {

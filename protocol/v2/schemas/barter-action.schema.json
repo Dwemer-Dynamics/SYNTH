@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/barter-action.schema.json",
+  "title": "Confirmed NPC sale offer: one NPC stack for caps, answered by the player",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "action_id",
+    "idempotency_key",
+    "name",
+    "capability",
+    "actor",
+    "target",
+    "arguments",
+    "deadline_ms"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.action.v1"
+    },
+    "action_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "name": {
+      "const": "barter"
+    },
+    "capability": {
+      "const": "action.barter"
+    },
+    "actor": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        {
+          "properties": {
+            "form_id": {
+              "not": {
+                "enum": [
+                  "0x00000014",
+                  "0X00000014"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "target": {
+      "allOf": [
+        {
+          "$ref": "../../v1/schemas/identity.schema.json"
+        },
+        {
+          "properties": {
+            "form_id": {
+              "enum": [
+                "0x00000014",
+                "0X00000014"
+              ]
+            },
+            "origin_plugin": {
+              "const": "Fallout4.esm"
+            }
+          }
+        }
+      ]
+    },
+    "arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item",
+        "item_form_id",
+        "item_origin_plugin",
+        "count",
+        "price"
+      ],
+      "properties": {
+        "item": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "item_form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$",
+          "not": {
+            "enum": [
+              "0x00000000",
+              "0x0000000F",
+              "0x0000000f",
+              "0x00000014"
+            ]
+          }
+        },
+        "item_origin_plugin": {
+          "type": "string",
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$",
+          "maxLength": 255
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "price": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "deadline_ms": {
+      "const": 60000
+    }
+  }
+}
