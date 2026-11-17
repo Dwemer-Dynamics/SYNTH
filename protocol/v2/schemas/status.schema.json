@@ -75,6 +75,9 @@
     },
     "observed_dialogue": {
       "type": "boolean"
+    },
+    "actor_condition": {
+      "type": "boolean"
     }
   }
 }

@@ -391,6 +391,44 @@ struct ActorStatValue final {
 };
 using ActorStats = std::array<std::optional<ActorStatValue>, 7>;
 
+// One copied, named condition entry: an exact form identity plus a short display name.
+struct ActorConditionEntry final {
+    std::uint32_t form_id{};
+    std::string origin_plugin;
+    std::string name;
+    bool chem{};  // meaningful only for active effects: an alchemy-item source rather than another effect
+    [[nodiscard]] bool valid() const noexcept {
+        return form_id != 0 && !origin_plugin.empty() && origin_plugin.size() <= 255 &&
+               origin_plugin.find_first_of("/\\") == std::string::npos &&
+               (origin_plugin.ends_with(".esm") || origin_plugin.ends_with(".esp") || origin_plugin.ends_with(".esl")) &&
+               !name.empty() && name.size() <= 64;
+    }
+};
+
+// Condition facts read once with the deep actor capture. The lists are bounded; `truncated` means a cap, an
+// unreadable entry or a lost record can hide members. Empty lists with truncated=false mean none were found.
+struct ActorCondition final {
+    enum class Limb : std::uint8_t { head, torso, left_arm, right_arm, left_leg, right_leg };
+    static constexpr std::size_t max_entries = 8;
+    static constexpr std::size_t max_limbs = 6;
+    bool observed{};
+    std::optional<double> radiation_percent;  // radiation actor value / permanent health, 0..100; unverified against the HUD
+    std::vector<ActorConditionEntry> addictions;
+    std::vector<ActorConditionEntry> effects;
+    std::vector<Limb> crippled_limbs;
+    bool truncated{};
+    [[nodiscard]] bool valid() const noexcept {
+        if (!observed) return !radiation_percent && addictions.empty() && effects.empty() && crippled_limbs.empty() && !truncated;
+        if (radiation_percent && (!std::isfinite(*radiation_percent) || *radiation_percent < 0.0 || *radiation_percent > 100.0)) return false;
+        if (addictions.size() > max_entries || effects.size() > max_entries || crippled_limbs.size() > max_limbs) return false;
+        for (const auto& entry : addictions) if (!entry.valid()) return false;
+        for (const auto& entry : effects) if (!entry.valid()) return false;
+        for (std::size_t i = 0; i < crippled_limbs.size(); ++i)
+            for (std::size_t j = i + 1; j < crippled_limbs.size(); ++j) if (crippled_limbs[i] == crippled_limbs[j]) return false;
+        return true;
+    }
+};
+
 class ActorSnapshot final {
 public:
     ActorSnapshot(std::uint32_t form_id,
@@ -534,6 +572,15 @@ public:
     [[nodiscard]] bool health_percent_available() const noexcept { return health_percent_available_; }
     [[nodiscard]] bool action_points_percent_available() const noexcept { return action_points_percent_available_; }
     [[nodiscard]] const ActorStats& actor_stats() const noexcept { return actor_stats_; }
+    [[nodiscard]] const std::optional<ActorCondition>& actor_condition() const noexcept { return actor_condition_; }
+    [[nodiscard]] ActorSnapshot with_actor_condition(ActorCondition condition) const & {
+        if (!condition.valid()) throw std::invalid_argument{"invalid actor condition"};
+        auto result=*this;result.actor_condition_=std::move(condition);return result;
+    }
+    [[nodiscard]] ActorSnapshot with_actor_condition(ActorCondition condition) && {
+        if (!condition.valid()) throw std::invalid_argument{"invalid actor condition"};
+        actor_condition_ = std::move(condition); return std::move(*this);
+    }
     // Attach only copied, bounded engine reads; the enclosing snapshot owns their identity and generation.
     [[nodiscard]] ActorSnapshot with_actor_stats(ActorStats stats) const & {
         for (const auto& value:stats) if (value && !value->valid()) throw std::invalid_argument{"invalid actor stats"};
@@ -630,6 +677,7 @@ public:
         result.faction_completeness_ = observed.faction_completeness_;
         result.current_package_ = observed.current_package_;
         result.actor_stats_ = observed.actor_stats_;
+        result.actor_condition_ = observed.actor_condition_;
         // Selection facts remain frozen; a combat transition during enrichment cannot attest a current opponent.
         result.combat_target_ = in_combat_ == observed.in_combat_ && alive_ == observed.alive_ && disabled_ == observed.disabled_
             ? observed.combat_target_ : CombatTargetSnapshot{};
@@ -705,6 +753,7 @@ private:
     bool conversation_held_{};
     std::optional<bool> wait_held_;
     ActorStats actor_stats_{};
+    std::optional<ActorCondition> actor_condition_;
 };
 
 class RuntimeSnapshot final {

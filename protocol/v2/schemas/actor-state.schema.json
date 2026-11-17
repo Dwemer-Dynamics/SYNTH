@@ -669,6 +669,114 @@
           ]
         }
       }
+    },
+    "actor_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation"
+      ],
+      "properties": {
+        "observation": {
+          "type": "string",
+          "enum": [
+            "observed",
+            "unavailable"
+          ]
+        },
+        "radiation_percent": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          ]
+        },
+        "addictions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/condition_entry"
+          }
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/condition_effect"
+          }
+        },
+        "crippled_limbs": {
+          "type": "array",
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "head",
+              "torso",
+              "left_arm",
+              "right_arm",
+              "left_leg",
+              "right_leg"
+            ]
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "if": {
+        "properties": {
+          "observation": {
+            "const": "observed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "radiation_percent",
+          "addictions",
+          "effects",
+          "crippled_limbs",
+          "truncated"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "radiation_percent"
+              ]
+            },
+            {
+              "required": [
+                "addictions"
+              ]
+            },
+            {
+              "required": [
+                "effects"
+              ]
+            },
+            {
+              "required": [
+                "crippled_limbs"
+              ]
+            },
+            {
+              "required": [
+                "truncated"
+              ]
+            }
+          ]
+        }
+      }
     }
   },
   "$defs": {
@@ -698,6 +806,64 @@
           }
         }
       ]
+    },
+    "condition_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "origin_plugin",
+        "name"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$"
+        },
+        "origin_plugin": {
+          "type": "string",
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$",
+          "maxLength": 255
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "condition_effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "origin_plugin",
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]{8}$"
+        },
+        "origin_plugin": {
+          "type": "string",
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$",
+          "maxLength": 255
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "chem",
+            "effect"
+          ]
+        }
+      }
     }
   }
 }

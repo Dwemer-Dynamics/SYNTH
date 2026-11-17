@@ -37,6 +37,43 @@ void actor_stats_tests() {
     if (!refused) throw std::runtime_error{"non-finite stat accepted"};
 }
 
+// Condition wire shape, bounds and the capability gate, without an engine.
+void actor_condition_tests() {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    core::ActorCondition condition;
+    condition.observed=true;condition.radiation_percent=62.5;
+    condition.addictions.push_back({0x57A4C,"Fallout4.esm","Jet Addiction",false});
+    condition.effects.push_back({0x57A4B,"Fallout4.esm","Psycho",true});
+    condition.effects.push_back({0x10E8A2,"Fallout4.esm","Rad-X",false});
+    condition.crippled_limbs={core::ActorCondition::Limb::left_leg,core::ActorCondition::Limb::right_arm};
+    core::ActorSnapshot actor{0x2F1F,"Piper",{},"Fallout4.esm","cond-save"};
+    auto observed=actor.with_actor_condition(condition);
+    require(!actor.actor_condition() && actor.with_details_from(observed).actor_condition(),"condition enrichment leaked or lost");
+    protocol_native::ActorState state;state.actor_condition=observed.actor_condition();
+    const auto wire=protocol_native::actor_state_value(state);
+    const auto& cond=protocol_native::required(wire,"actor_condition");
+    require(protocol_native::text(cond,"observation")=="observed" && protocol_native::required(cond,"radiation_percent").as_double()==62.5,"radiation lost");
+    require(json::write(protocol_native::required(cond,"crippled_limbs"))=="[\"left_leg\",\"right_arm\"]","limbs lost");
+    require(json::write(protocol_native::required(cond,"effects")).find("\"kind\":\"chem\"")!=std::string::npos,"chem kind lost");
+    require(json::write(protocol_native::required(cond,"addictions")).find("\"kind\"")==std::string::npos,"addiction carries a kind");
+    core::ActorCondition none;
+    state.actor_condition=none;
+    require(json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_condition"))=="{\"observation\":\"unavailable\"}","unobserved read claimed an observation");
+    auto expect_refused=[&](core::ActorCondition bad,const char* message) {
+        bool refused=false;
+        try { (void)core::ActorSnapshot{0x2F1F,"Piper",{},"Fallout4.esm","cond-save"}.with_actor_condition(std::move(bad)); }
+        catch (const std::invalid_argument&) { refused=true; }
+        require(refused,message);
+    };
+    auto bad=condition;bad.radiation_percent=101;expect_refused(bad,"out-of-range radiation accepted");
+    bad=condition;bad.crippled_limbs={core::ActorCondition::Limb::head,core::ActorCondition::Limb::head};expect_refused(bad,"duplicate limb accepted");
+    bad=condition;bad.effects.assign(9,condition.effects[0]);expect_refused(bad,"unbounded effects accepted");
+    bad=condition;bad.addictions[0].name.assign(65,'x');expect_refused(bad,"long name accepted");
+    bad=condition;bad.addictions[0].origin_plugin="a/b.esm";expect_refused(bad,"path-like plugin accepted");
+    bad=none;bad.truncated=true;expect_refused(bad,"unobserved read carried a value");
+}
+
 void verified_wait_tests() {
     using namespace synth;
     const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
@@ -406,6 +443,7 @@ void native_turn_receipt_tests(const std::string& root) {
 int main(int argc,char** argv){
  try{
   actor_stats_tests();
+  actor_condition_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);
