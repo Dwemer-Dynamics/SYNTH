@@ -58,6 +58,21 @@ commits of the pair combined with vanilla dialogue witnesses and the flat settin
 
 See [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md). No gameplay or deployment proof.
 
+## Player reading events
+
+- [x] Off game: bounded text cleaning, repeat suppression, bounded delivery queue, codec against the mirrored
+  golden fixtures, closed-schema rejection of unnegotiated, VR, oversized and malformed readings.
+- [ ] Flat in game: activating a note or magazine in the world reports its title and text once; reading it again
+  within ten minutes does not; load and main menu discard pending captures.
+- [ ] Flat in game: a terminal text entry and a terminal-launched holotape report once each; an unknown
+  selection reports nothing. Confirm the terminal menu's last-selection record names the chosen entry.
+- [ ] Flat in game: books, magazines and holotapes opened from the Pip-Boy inventory are not captured
+  (known gap); decide on an audited source before claiming them.
+- [ ] Model answers: a nearby NPC can refer to what was read; a distant NPC cannot.
+- [ ] VR: builds, but capture is unavailable.
+
+See [READING-EVENTS.md](READING-EVENTS.md). No gameplay or deployment proof.
+
 ## NPC biography and actor stats
 
 - [ ] Flat in game: compare all seven SPECIAL base/current values with the next provider request, including an older-save load.

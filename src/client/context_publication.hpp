@@ -6,6 +6,7 @@
 #include "client/dialogue_requests.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
+#include "client/reading_event_delivery.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/synth_client.hpp"
@@ -121,7 +122,8 @@ public:
     [[nodiscard]] static std::vector<std::string> capabilities(core::RuntimeVariant variant, bool rest_events_available,
                                                              bool quest_events_available, bool actor_events_available,
                                                              bool companion_comments = false,
-                                                             bool observed_dialogue_available = false) {
+                                                             bool observed_dialogue_available = false,
+                                                             bool reading_events_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts",
@@ -167,6 +169,8 @@ public:
             if (companion_comments) result.push_back("dialogue.companion_combat_comments");
             // Only an audited flat sampler offers first-observed vanilla dialogue; VR never does.
             if (observed_dialogue_available) result.push_back("context.observed_dialogue");
+            // Reading capture is an audited flat adapter; VR never advertises it.
+            if (reading_events_available) result.push_back("context.reading_events");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
         }
@@ -364,8 +368,13 @@ public:
                                          const std::shared_ptr<const ActorEventDelivery::Prepared>& actor_events = {},
                                          const protocol_native::ControlSelection& controls = {},
                                          const runtime::SocialTaskDescriptor* social_pair = nullptr,
-                                         const DialogueObservationDelivery::Prepared& observed_dialogue = {}) {
+                                         const DialogueObservationDelivery::Prepared& observed_dialogue = {},
+                                         const ReadingEventDelivery::Prepared& reading = {}) {
         const auto& snapshot = *owned_snapshot;
+        // A reading owns its scene and shares the publication with nothing else.
+        if (reading && (reading->scene != owned_snapshot || target || quest_events || player_event || actor_events ||
+            social_pair || observed_dialogue))
+            throw std::invalid_argument{"reading context does not own this scene"};
         if (observed_dialogue && (observed_dialogue->scene != owned_snapshot || target || quest_events || player_event ||
             actor_events || social_pair))
             throw std::invalid_argument{"observed dialogue context does not own this scene"};
@@ -592,7 +601,10 @@ public:
                                        actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt,
                                        observed_dialogue ? std::optional{protocol_native::NativeDialogueObservation{
                                            observed_dialogue->observation, observation_age_ms(*observed_dialogue->scene)}}
-                                                         : std::nullopt);
+                                                         : std::nullopt,
+                                       reading ? std::optional{protocol_native::NativeReadingEvent{
+                                           reading->event, reading_age_ms(reading->event)}}
+                                               : std::nullopt);
         if (!cancellation.is_cancelled() && !save_writer_current()) {
             outcome.status = RequestStatus::stale_response;
             outcome.detail = "save writer revoked";
@@ -647,6 +659,13 @@ private:
         if (now < scene.captured_at()) throw std::invalid_argument{"observed dialogue clock moved backwards"};
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - scene.captured_at()).count());
+    }
+
+    [[nodiscard]] static std::uint64_t reading_age_ms(const core::ReadingEvent& reading) {
+        const auto now = core::SnapshotClock::now();
+        if (now < reading.observed_at) throw std::invalid_argument{"reading clock moved backwards"};
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - reading.observed_at).count());
     }
 
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {

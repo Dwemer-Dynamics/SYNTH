@@ -234,6 +234,9 @@
     "quest_events": {
       "$ref": "quest-events.schema.json"
     },
+    "reading_event": {
+      "$ref": "reading-event.schema.json"
+    },
     "active_quests_observation": {
       "type": "string",
       "enum": [

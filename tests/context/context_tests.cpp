@@ -1,5 +1,7 @@
 #include "context/context.hpp"
 #include "client/quest_event_delivery.hpp"
+#include "client/reading_event_delivery.hpp"
+#include "core/reading_event.hpp"
 #include "client/actor_event_binding.hpp"
 #include "client/actor_event_delivery.hpp"
 #include "client/actor_state_combat.hpp"
@@ -22,6 +24,83 @@ synth::context::TargetContext target(std::uint32_t id, std::uint64_t generation,
                                                          context::PlaythroughIdentity{"save-a"}},
                                   "actor", {double(id), 0, 0}, double(id),
                                   core::RuntimeGeneration::from_value(generation), frame};
+}
+
+// Reading capture: copied text is cleaned and bounded in code points, repeats are not new readings, and the
+// delivery keeps the original capture through retries without ever waiting on the game thread.
+void test_reading_events() {
+    using namespace synth;
+    // Markup, page breaks and placeholders go; malformed bytes are dropped, never repaired.
+    const auto cleaned = core::bound_reading_text("<font size='20'>Dear Nate,</font>\r\n  The key is under the mat.[pagebreak]Burn this.\n\n\n\nP.S. 3 < 4 and 5 > 2 <Alias=Player>  \n");
+    CHECK(cleaned.text == "Dear Nate,\nThe key is under the mat.\n\nBurn this.\n\nP.S. 3 < 4 and 5 > 2");
+    CHECK(!cleaned.truncated);
+    CHECK(core::bound_reading_text(std::string{"ab\xC3"} + "\x28" + "cd\x01\x7F").text == "ab(cd");
+    CHECK(core::bound_reading_text("  \n\t ").text.empty());
+    CHECK(core::bound_reading_title("  Sanctuary\nHills\tNote ") == "Sanctuary Hills Note");
+    // The limit counts code points: 4000 two-byte characters fit, one more is cut at a character boundary.
+    std::string wide;
+    for (int i = 0; i < 4001; ++i) wide += "\xC3\xA9";
+    const auto cut = core::bound_reading_text(wide);
+    CHECK(cut.truncated && cut.text.size() == 8000);
+    CHECK(!core::bound_reading_text(wide.substr(0, 8000)).truncated);
+    CHECK(core::bound_reading_title(std::string(300, 'x')).size() == core::reading_title_limit);
+
+    const auto now = core::SnapshotClock::time_point{std::chrono::seconds{100}};
+    core::ReadingEvent event{1, core::ReadingKind::note, 0x1F2A3, "Fallout4.esm", "Note", "Hello", false, now};
+    CHECK(event.valid());
+    auto bad = event; bad.serial = 0; CHECK(!bad.valid());
+    bad = event; bad.serial = core::RuntimeGeneration::maximum_wire_value + 1; CHECK(!bad.valid());
+    bad = event; bad.form_id = 0; CHECK(!bad.valid());
+    bad = event; bad.form_id = UINT32_MAX; CHECK(!bad.valid());
+    bad = event; bad.origin_plugin = "../Fallout4.esm"; CHECK(!bad.valid());
+    bad = event; bad.origin_plugin = "Fallout4.dll"; CHECK(!bad.valid());
+    bad = event; bad.title.clear(); CHECK(!bad.valid());
+    bad = event; bad.title = "two\nlines"; CHECK(!bad.valid());
+    bad = event; bad.text = "<b>markup</b>"; CHECK(!bad.valid());
+    bad = event; bad.text.clear(); bad.text_truncated = true; CHECK(!bad.valid());
+    auto title_only = event; title_only.kind = core::ReadingKind::holotape; title_only.text.clear();
+    CHECK(title_only.valid());
+
+    core::ReadingRecents recents;
+    CHECK(recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now));
+    CHECK(!recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{5}));
+    CHECK(!recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{14})); // Refreshed by the repeat.
+    CHECK(recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{30}));
+    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Note", now)); // Another kind of reading.
+    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Other entry", now));
+    for (std::uint32_t id = 1; id <= core::ReadingRecents::capacity + 1; ++id)
+        CHECK(recents.admit(core::ReadingKind::book, id, "t", now));
+    recents.clear();
+    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Note", now));
+
+    const core::WorldPose pose{{},core::UnitVector3::from({1,0,0}),core::UnitVector3::from({0,0,1})};
+    const auto scene = [&](core::RuntimeVariant variant, std::uint64_t generation) {
+        return std::make_shared<const core::RuntimeSnapshot>(core::RuntimeSnapshot{core::Game::fallout4, variant,
+            core::RuntimeGeneration::from_value(generation), 1, core::SnapshotClock::now(), pose, {}, {}, {},
+            core::ActorSnapshot{0x14,"Player",{},"Fallout4.esm","save-a"}, {}, 42});
+    };
+    client::ReadingEventDelivery delivery{core::RuntimeGeneration::initial()};
+    const auto first = scene(core::RuntimeVariant::flat, 1);
+    CHECK(!delivery.enqueue(scene(core::RuntimeVariant::vr, 1), event));
+    CHECK(!delivery.enqueue(scene(core::RuntimeVariant::flat, 2), event));
+    CHECK(!delivery.enqueue(first, bad));
+    CHECK(!delivery.pending() && !delivery.prepare());
+    CHECK(delivery.enqueue(first, event));
+    auto prepared = delivery.prepare();
+    CHECK(prepared && prepared->scene == first && prepared->event.serial == 1);
+    CHECK(delivery.prepare() == prepared); // A retry sees the same capture.
+    for (std::uint64_t serial = 2; serial <= client::ReadingEventDelivery::capacity; ++serial) {
+        auto next = event; next.serial = serial;
+        CHECK(delivery.enqueue(first, next));
+    }
+    CHECK(delivery.full());
+    auto overflow = event; overflow.serial = 9;
+    CHECK(!delivery.enqueue(first, overflow) && delivery.dropped() == 1);
+    CHECK(delivery.finish(prepared, true) && !delivery.finish(prepared, true));
+    CHECK(delivery.prepare()->event.serial == 2); // Order is preserved.
+    CHECK(delivery.finish(delivery.prepare(), false) && delivery.dropped() == 2);
+    delivery.stop();
+    CHECK(!delivery.prepare() && !delivery.enqueue(first, event));
 }
 
 // The callback is historical evidence; a later scene and nearby/visible actors cannot manufacture witnesses.
@@ -223,6 +302,7 @@ void test_actor_event_binding() {
 int main() {
     try {
         using namespace synth;
+        test_reading_events();
         test_actor_event_binding();
         throws<std::invalid_argument>([] { context::FormIdentity{0, "Actors.esm"}; });
         throws<std::invalid_argument>([] { context::FormIdentity{1, "../Actors.esm"}; });

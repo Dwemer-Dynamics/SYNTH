@@ -75,6 +75,9 @@
     },
     "observed_dialogue": {
       "type": "boolean"
+    },
+    "reading_events": {
+      "type": "boolean"
     }
   }
 }

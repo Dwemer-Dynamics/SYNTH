@@ -752,6 +752,35 @@
           },
           "payload": {
             "required": [
+              "reading_event"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "capabilities": {
+            "contains": {
+              "const": "context.reading_events"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
               "actor_events"
             ]
           }

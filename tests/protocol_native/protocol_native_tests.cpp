@@ -251,6 +251,41 @@ void observed_dialogue_tests(const std::string& root) {
     require(std::get<protocol_native::Status>(status.payload).observed_dialogue,"observed_dialogue ACK lost");
 }
 
+// Reading events: the golden fixtures are the contract; unnegotiated, VR and oversized readings never encode.
+void reading_event_tests(const std::string& root) {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto load=[&](const char* name){
+        std::ifstream in{root+"/protocol/v2/fixtures/valid/"+name};
+        return json::parse(std::string{std::istreambuf_iterator<char>{in},{}});};
+    protocol_native::EventContext context{"session-reading-001","request-reading-001","turn-reading-001","flat","0.1.0","1.11.240",7,
+        {"context.reading_events"},2,0};
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm","save-001","Sole Survivor"};
+    core::ReadingEvent note{1,core::ReadingKind::note,0x1F2A3,"Fallout4.esm","Sanctuary Hills Note","Dear Nate,\nThe key is under the mat.",false,{}};
+    require(json::write(protocol_native::reading_event_value({note,120},context,player))==
+        json::write(protocol_native::required(protocol_native::required(load("context-reading-event.json"),"payload"),"reading_event")),
+        "reading event does not match the mirrored fixture");
+    core::ReadingEvent tape{1,core::ReadingKind::holotape,0x1F2A3,"Fallout4.esm","Holotape: Vault-Tec Orientation","",false,{}};
+    require(json::write(protocol_native::reading_event_value({tape,120},context,player))==
+        json::write(protocol_native::required(protocol_native::required(load("context-reading-event-holotape-title-only.json"),"payload"),"reading_event")),
+        "title-only holotape does not match the mirrored fixture");
+    const auto rejected=[&](protocol_native::NativeReadingEvent value,protocol_native::EventContext owner){
+        try{(void)protocol_native::reading_event_value(value,owner,player);}catch(const std::invalid_argument&){return true;}
+        return false;};
+    auto unnegotiated=context;unnegotiated.capabilities.clear();
+    auto vr=context;vr.runtime_variant="vr";
+    auto v1=context;v1.protocol_version=1;
+    auto unbounded=note;unbounded.text=std::string(4001,'x');
+    auto markup=note;markup.text="<b>x</b>";
+    require(rejected({note,0},unnegotiated) && rejected({note,0},vr) && rejected({note,0},v1) && rejected({unbounded,0},context) &&
+        rejected({markup,0},context) && rejected({note,core::RuntimeGeneration::maximum_wire_value+1},context),
+        "unnegotiated, VR, oversized or malformed reading was encoded");
+    const auto status=protocol_native::decode_line(R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"code":"init_accepted","reading_events":true},"context_sequence":0})");
+    require(std::get<protocol_native::Status>(status.payload).reading_events,"reading_events ACK lost");
+    const auto plain=protocol_native::decode_line(R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"code":"init_accepted"},"context_sequence":0})");
+    require(!std::get<protocol_native::Status>(plain.payload).reading_events,"reading_events granted without the server's flag");
+}
+
 // Native-turn receipts: exact owner encoding, first terminal outcome only, bounded copy-only outbox.
 void native_turn_receipt_tests(const std::string& root) {
     using namespace synth;
@@ -409,6 +444,7 @@ int main(int argc,char** argv){
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);
+  if(argc==2) reading_event_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};
