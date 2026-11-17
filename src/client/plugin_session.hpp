@@ -367,7 +367,7 @@ public:
 
     // Explicit player cancel (the CancelConversation hotkey): drops the live conversation's local work like a
     // superseding line does (queued speech is skipped, the line being spoken is cut off, actions and rechat are
-    // cleared) and tells the server to stop that conversation's in-flight work. Unlike hard_halt() the session keeps
+    // cleared) and tells the server to stop that conversation's in-flight work. Unlike a halt the session keeps
     // running, and the next player request starts a new conversation. Needs the negotiated dialogue.conversation
     // capability; without it nothing happens, so the released halt and interrupt behaviour is unchanged.
     void cancel_conversation() noexcept {

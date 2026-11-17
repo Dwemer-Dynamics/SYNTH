@@ -688,7 +688,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         # Unbound is the shipped default for every hotkey.
         hotkeys = shipped.split("[Hotkeys]", 1)[1].split("[AutoActivate]", 1)[0]
         bindings = [line for line in hotkeys.splitlines() if "=" in line]
-        self.assertEqual(len(bindings), 8)
+        self.assertEqual(len(bindings), 9)
         for line in bindings:
             with self.subTest(line=line):
                 self.assertTrue(line.strip().endswith("=0"))
