@@ -684,10 +684,14 @@ int main() try {
         const auto refused=finish(Delivery::spoken,false);
         CHECK(drain(current.value())==std::vector{Stage::receipt_rejected} && heard.size()==1
             && speech.receipt_settled(current.value(),refused.request_id,refused.line_id)==false);
-        const auto reading=finish(Delivery::text_complete,false); // The reading timer is not a renderer ACK.
-        CHECK(drain(current.value()).empty() && receipts()==3 && !speech.receipt_settled(current.value(),reading.request_id,reading.line_id));
+        script({{"speech_receipt_accepted","presented"}});
+        const auto reading=finish(Delivery::text_complete,false); // A caption shown for its whole reading window is text_presented.
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && receipts()==4 && heard.size()==2
+            && speech.receipt_settled(current.value(),reading.request_id,reading.line_id)==true);
+        (void)finish(Delivery::text_complete,true); // A cancelled caption claims nothing.
+        CHECK(drain(current.value()).empty() && receipts()==4);
         (void)finish(Delivery::spoken,false);
-        CHECK(drain(current.value()+1).empty() && receipts()==3 && heard.size()==1); // A replaced generation sends nothing.
+        CHECK(drain(current.value()+1).empty() && receipts()==4 && heard.size()==2); // A replaced generation sends nothing.
 
         // Possible player input history: enrolled replies raise no emission frontier and none is heard here, so the exact
         // input outcome (PluginSession's DialogueRequests sink) raises it, once per request, under the session token. The
@@ -718,7 +722,7 @@ int main() try {
         const auto due_once=[&](client::RequestStatus status,const client::RequestOutcome& outcome,std::uint64_t before) {
             CHECK(outcome.status==status && std::ranges::none_of(outcome.lines,[](const auto& line) {
                 return std::holds_alternative<protocol_native::Dialogue>(line.payload); }));
-            CHECK(checkpoint.revision()==before+1 && checkpoint.due() && receipts()==3 && heard.size()==1);
+            CHECK(checkpoint.revision()==before+1 && checkpoint.due() && receipts()==4 && heard.size()==2);
             CHECK(covering(checkpoint) && !checkpoint.due());
         };
         core::CancellationSource turn{session.token()};
@@ -744,11 +748,11 @@ int main() try {
         }
         // A complete input with its enrolled, unheard reply and no player echo makes the publication due exactly once.
         CHECK(input(true,{},"complete",turn.token()).status==client::RequestStatus::complete);
-        CHECK(checkpoint.revision()==++revision && checkpoint.due() && receipts()==3 && heard.size()==1);
+        CHECK(checkpoint.revision()==++revision && checkpoint.due() && receipts()==4 && heard.size()==2);
         CHECK(covering(checkpoint) && !checkpoint.due());
         // A later heard receipt after that ACK raises the frontier again.
         script({{"speech_receipt_accepted","spoken"}}); (void)finish(Delivery::spoken,false);
-        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && heard.size()==2 && checkpoint.due());
+        CHECK(drain(current.value())==std::vector{Stage::receipt_accepted} && heard.size()==3 && checkpoint.due());
         CHECK(covering(checkpoint) && !checkpoint.due());
         // A pre-cancelled turn is never sent, so it claims nothing.
         turn.cancel(); revision=checkpoint.revision();
