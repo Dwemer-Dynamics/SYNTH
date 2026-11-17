@@ -300,7 +300,16 @@ void conversation_client_tests() {
         CHECK(after_load.size() == 6 && after_load[5] != after_cell[4] && after_load[5] != ids[0]);
         // An explicit cancel names the live conversation and why, retires it, and the next input starts a new one.
         const auto live = after_load[5];
-        const auto cancelled = session->cancel_conversation(protocol_native::ConversationCancelReason::player_cancel);
+        // The key press retires the conversation and captures its id; the network task later names exactly that id.
+        const auto ended = session->end_conversation_for_cancel();
+        CHECK(ended && *ended == live && session->conversation().current().empty());
+        // Speech right after the cancel starts a NEW conversation, and a cell change before the cancel is sent loses
+        // nothing: the cancel still names the id captured at the key press.
+        CHECK(session->send_text("quick",{},binding).status == client::RequestStatus::complete);
+        const auto quick = sent_ids(wire).back();
+        CHECK(quick != live && session->conversation().current() == quick);
+        CHECK(session->conversation().observe_cell("Concord") == quick);
+        const auto cancelled = session->cancel_conversation(*ended, protocol_native::ConversationCancelReason::player_cancel);
         CHECK(cancelled && cancelled->status == client::RequestStatus::complete);
         const auto cancel = json::parse(wire.requests.back().body);
         CHECK(protocol_native::text(cancel,"type") == "cancel");
@@ -308,10 +317,10 @@ void conversation_client_tests() {
         CHECK(protocol_native::text(protocol_native::required(cancel,"payload"),"reason") == "player_cancel");
         CHECK(protocol_native::text(protocol_native::required(cancel,"payload"),"conversation_id") == live);
         CHECK(protocol_native::required(cancel,"payload").find("cancel_request_id") == nullptr);
-        CHECK(!session->cancel_conversation());  // nothing live: nothing is sent
+        CHECK(!session->end_conversation_for_cancel());  // nothing live: nothing to cancel
         CHECK(session->send_text("six",{},binding).status == client::RequestStatus::complete);
         const auto after_cancel = sent_ids(wire);
-        CHECK(after_cancel.size() == 7 && after_cancel[6] != live);
+        CHECK(after_cancel.size() == 8 && after_cancel[7] != live && after_cancel[7] != quick);
     }
     {
         // A response that echoes another conversation is refused, not delivered.
@@ -332,7 +341,7 @@ void conversation_client_tests() {
             const auto binding = publish(*session);
             CHECK(session->send_text("one",{},binding).status == client::RequestStatus::complete);
             CHECK(sent_ids(wire) == std::vector<std::string>{std::string{}});
-            CHECK(!session->cancel_conversation());
+            CHECK(!session->end_conversation_for_cancel());
             CHECK(wire.requests.back().body.find("\"conversation_id\"") == std::string::npos);
         }
     }

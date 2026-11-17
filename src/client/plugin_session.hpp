@@ -403,15 +403,16 @@ public:
     // capability; without it nothing happens, so the released halt and interrupt behaviour is unchanged.
     void cancel_conversation() noexcept {
         try {
-            if (!client_.conversation_ready() || client_.conversation().current().empty()) return;
+            // The id is retired and captured here, on the game thread at the key press; the network task only names it.
+            auto ended = client_.end_conversation_for_cancel();
+            if (!ended) return;
             (void)begin_player_turn();
-            // The conversation id must be read after local teardown; the network lane retires it with the cancel.
             const auto submitted = network_.try_submit(
                 "network", tasks::TaskClass::current_turn,
                 tasks::TaskLanes::Clock::now() + std::chrono::seconds{2}, cancellation_.token(),
-                [this](const core::CancellationToken&) {
+                [this, id = std::move(*ended)](const core::CancellationToken&) {
                     try {
-                        const auto outcome = client_.cancel_conversation();
+                        const auto outcome = client_.cancel_conversation(id);
                         if (outcome && outcome->status != RequestStatus::complete && outcome->status != RequestStatus::cancelled)
                             push_notification("SYNTH conversation stopped locally; server cancellation was not acknowledged");
                     } catch (const std::exception&) {

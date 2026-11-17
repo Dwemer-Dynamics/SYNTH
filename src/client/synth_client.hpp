@@ -161,6 +161,12 @@ public:
     [[nodiscard]] bool conversation_ready() const noexcept {
         return conversation_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Game thread, at the key press: retires the live conversation and returns the id the cancel must name; nullopt when
+    // the server did not acknowledge the capability or no conversation is live. The id is captured here, not later.
+    [[nodiscard]] std::optional<std::string> end_conversation_for_cancel() {
+        if (!conversation_ready()) return std::nullopt;
+        return conversation_.end(ConversationEnd::player_cancel);
+    }
     // The player's conversation for this runtime. Game-thread observers (cell change) and the network lane share it.
     [[nodiscard]] ConversationContinuity& conversation() noexcept { return conversation_; }
     [[nodiscard]] bool actor_stats_ready() const noexcept {
@@ -1111,11 +1117,15 @@ public:
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 2000);
     }
 
-    // Explicit player cancel (dialogue.conversation): stops every in-flight request of the live conversation on the
-    // server, which records the reason, and retires the conversation so the next input starts a fresh one. Like
-    // cancel() it overtakes the serial dialogue lane. Nothing is sent when no conversation is live or the server did
-    // not acknowledge the capability.
+    // Explicit player cancel (dialogue.conversation): stops every in-flight request of one conversation on the server,
+    // which records the reason. The caller names the conversation it retired itself (end_conversation_for_cancel() on
+    // the game thread at the key press); this never reads the live id, so speech right after the cancel starts a new
+    // conversation that is not cancelled, and a cell change in between cannot lose the cancel. Like cancel() it
+    // overtakes the serial dialogue lane. Nothing is sent when the server did not acknowledge the capability.
+    // A receipt for a line of a revoked request is refused by the server (409 receipt_owner_mismatch); receipts are
+    // never retried, so that refusal is final.
     [[nodiscard]] std::optional<RequestOutcome> cancel_conversation(
+        std::string conversation_id,
         protocol_native::ConversationCancelReason reason = protocol_native::ConversationCancelReason::player_cancel,
         std::uint64_t expected_generation = 0) {
         std::string request_id, turn_id, body;
@@ -1125,12 +1135,10 @@ public:
             if (!initialized_ || !conversation_ready()) return std::nullopt;
             if (expected_generation != 0 && expected_generation != generation_)
                 return RequestOutcome{RequestStatus::cancelled, {}, {}, "cancel belongs to a retired generation"};
-            const auto id = conversation_.end(ConversationEnd::player_cancel);
-            if (!id) return std::nullopt;
             request_id = next_id("cancel");
             turn_id = next_id("turn");
             generation = generation_;
-            body = protocol_native::encode_conversation_cancel(context(request_id, turn_id), *id, reason);
+            body = protocol_native::encode_conversation_cancel(context(request_id, turn_id), conversation_id, reason);
         }
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 2000);
     }

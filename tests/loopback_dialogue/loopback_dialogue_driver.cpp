@@ -1189,8 +1189,10 @@ int run_conversation(std::string_view base) {
         } join{turn, worker};
         phase("conv_held", {{"session", s.session}, {"conversation_id", f.conversation}});
         // What PluginSession::cancel_conversation does: the local turn first, then the scoped server cancel.
+        const auto ended = s.synth.end_conversation_for_cancel();
+        CHECK(ended && *ended == f.conversation);
         turn.cancel();
-        const auto cancelled = s.synth.cancel_conversation(protocol_native::ConversationCancelReason::player_cancel);
+        const auto cancelled = s.synth.cancel_conversation(*ended, protocol_native::ConversationCancelReason::player_cancel);
         const auto* accepted = cancelled ? only_status(*cancelled) : nullptr;
         CHECK(cancelled && cancelled->status == client::RequestStatus::complete && accepted && accepted->code == "cancel_accepted");
         worker.join();
@@ -1219,7 +1221,7 @@ int run_conversation(std::string_view base) {
     const auto old_first = old.publish();
     CHECK(old.synth.activate(piper, "manual", old_first.context_binding).status == client::RequestStatus::complete);
     const auto old_a = converse(old, "Piper, how is the settlement?", false);
-    CHECK(old_a.conversation.empty() && !old.synth.cancel_conversation());
+    CHECK(old_a.conversation.empty() && !old.synth.end_conversation_for_cancel());
     // An interrupted line is released behaviour for it: stored interrupted, never entering context.
     const auto old_cut = deliver(old, old_a, Ending::interrupted, false);
     CHECK(old_cut.accepted_state == "interrupted");
