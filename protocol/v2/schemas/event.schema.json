@@ -1953,6 +1953,69 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "narrator_command",
+              "narrator_turn"
+            ]
+          },
+          "payload": {
+            "required": [
+              "object"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "narrator.object.v1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "narrator_command"
+          },
+          "payload": {
+            "properties": {
+              "action": {
+                "const": "transcript"
+              }
+            },
+            "required": [
+              "action",
+              "definition_id"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "narrator.object.v1"
+            }
+          }
+        }
+      }
     }
   ]
 }

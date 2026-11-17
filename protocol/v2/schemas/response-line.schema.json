@@ -94,6 +94,9 @@
         },
         "private_narrator": {
           "type": "boolean"
+        },
+        "narrator_object": {
+          "type": "boolean"
         }
       },
       "maxProperties": 64
