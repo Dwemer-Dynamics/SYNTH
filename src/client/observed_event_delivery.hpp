@@ -311,9 +311,15 @@ public:
                 try {
                     capture = reading_events_.prepare();
                     if (!capture) return;
+                    // Recorded for the addressed actor only; with nobody addressed there is no one who may recall it.
+                    const auto target = context_.reading_target(*capture->scene);
+                    if (!target) {
+                        (void)reading_events_.finish(capture, false);
+                        return;
+                    }
                     const auto context_turn = client_.begin_context_turn();
                     if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
-                    const auto result = context_.publish(capture->scene, std::nullopt, cancellation, nullptr, std::nullopt,
+                    const auto result = context_.publish(capture->scene, target, cancellation, nullptr, std::nullopt,
                         std::nullopt, {}, {}, nullptr, {}, capture);
                     if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
                     if (result.status == RequestStatus::complete) {

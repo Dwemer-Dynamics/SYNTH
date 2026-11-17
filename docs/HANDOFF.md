@@ -56,7 +56,7 @@ queue pressure remain in-game checks. There is no model-answer review, game run 
 
 ## Player reading candidate
 
-Flat-only `context.reading_events` carries the bounded title and text of a book, note, magazine,
+Flat-only `context.reading_events` carries the bounded title and text of a book, magazine,
 terminal entry or terminal-launched holotape the player just read, one per context, through the existing
 observation timeline on the server. The off-game contract, codec and queue are tested; the adapter is
 not checked in game, and Pip-Boy inventory reads are not captured. See [READING-EVENTS.md](READING-EVENTS.md).

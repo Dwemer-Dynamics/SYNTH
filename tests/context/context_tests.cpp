@@ -46,7 +46,7 @@ void test_reading_events() {
     CHECK(core::bound_reading_title(std::string(300, 'x')).size() == core::reading_title_limit);
 
     const auto now = core::SnapshotClock::time_point{std::chrono::seconds{100}};
-    core::ReadingEvent event{1, core::ReadingKind::note, 0x1F2A3, "Fallout4.esm", "Note", "Hello", false, now};
+    core::ReadingEvent event{1, core::ReadingKind::book, 0x1F2A3, "Fallout4.esm", "Note", "Hello", false, now};
     CHECK(event.valid());
     auto bad = event; bad.serial = 0; CHECK(!bad.valid());
     bad = event; bad.serial = core::RuntimeGeneration::maximum_wire_value + 1; CHECK(!bad.valid());
@@ -62,16 +62,20 @@ void test_reading_events() {
     CHECK(title_only.valid());
 
     core::ReadingRecents recents;
-    CHECK(recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now));
-    CHECK(!recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{5}));
-    CHECK(!recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{14})); // Refreshed by the repeat.
-    CHECK(recents.admit(core::ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{30}));
-    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Note", now)); // Another kind of reading.
-    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Other entry", now));
-    for (std::uint32_t id = 1; id <= core::ReadingRecents::capacity + 1; ++id)
-        CHECK(recents.admit(core::ReadingKind::book, id, "t", now));
+    using core::ReadingKind;
+    CHECK(recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now));
+    CHECK(recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now)); // Checking alone records nothing: a dropped read stays readable.
+    recents.remember(ReadingKind::book, 0x1F2A3, "Note", now);
+    CHECK(!recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{5}));
+    recents.remember(ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{5});
+    CHECK(!recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{14})); // Refreshed by the accepted repeat.
+    CHECK(recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now + std::chrono::minutes{30}));
+    CHECK(recents.fresh(ReadingKind::terminal, 0x1F2A3, "Note", now)); // Another kind of reading.
+    CHECK(recents.fresh(ReadingKind::terminal, 0x1F2A3, "Other entry", now));
+    for (std::uint32_t id = 1; id <= core::ReadingRecents::capacity + 1; ++id) recents.remember(ReadingKind::book, id, "t", now);
+    CHECK(recents.fresh(ReadingKind::book, 0x1F2A3, "Note", now)); // Oldest entry rotated out.
     recents.clear();
-    CHECK(recents.admit(core::ReadingKind::terminal, 0x1F2A3, "Note", now));
+    CHECK(recents.fresh(core::ReadingKind::terminal, 0x1F2A3, "Note", now));
 
     const core::WorldPose pose{{},core::UnitVector3::from({1,0,0}),core::UnitVector3::from({0,0,1})};
     const auto scene = [&](core::RuntimeVariant variant, std::uint64_t generation) {

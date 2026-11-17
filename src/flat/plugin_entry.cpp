@@ -869,12 +869,14 @@ void pump_runtime_impl() {
                     if (session.get()!=owner_session || runtime->generation()!=generation) return;
                     const bool fresh=scene && scene->generation()==generation &&
                         scene->player().playthrough_id()==synth::adapters::commonlib::playthrough_id() &&
-                        reading_recents.admit(reading->kind,reading->form_id,reading->title,now);
+                        reading_recents.fresh(reading->kind,reading->form_id,reading->title,now);
                     if (fresh) {
                         reading->serial=session->next_reading_serial();
-                        const auto kind=reading->kind;
+                        const auto kind=reading->kind;const auto form=reading->form_id;const auto title=reading->title;
                         const bool accepted=session->observe_reading(scene,std::move(*reading));
-                        if (!accepted) ++reading_losses;
+                        // Only an accepted reading suppresses a re-read; a dropped one stays readable.
+                        if (accepted) reading_recents.remember(kind,form,title,now);
+                        else ++reading_losses;
                         REX::INFO("SYNTH reading: {} observation admitted {} losses {}",synth::core::reading_kind_name(kind),accepted,reading_losses);
                     }
                 }

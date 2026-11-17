@@ -374,8 +374,9 @@ public:
                                          const DialogueObservationDelivery::Prepared& observed_dialogue = {},
                                          const ReadingEventDelivery::Prepared& reading = {}) {
         const auto& snapshot = *owned_snapshot;
-        // A reading owns its scene and shares the publication with nothing else.
-        if (reading && (reading->scene != owned_snapshot || target || quest_events || player_event || actor_events ||
+        // A reading owns its scene and shares the publication with nothing else. It is recorded for the one
+        // addressed actor only, so a context without that actor is refused here and never sent.
+        if (reading && (reading->scene != owned_snapshot || !target || quest_events || player_event || actor_events ||
             social_pair || observed_dialogue))
             throw std::invalid_argument{"reading context does not own this scene"};
         if (observed_dialogue && (observed_dialogue->scene != owned_snapshot || target || quest_events || player_event ||
@@ -653,6 +654,13 @@ public:
             invalidate_response_(cancellation);
         };
         return outcome;
+    }
+
+private:
+public:
+    // The actor a reading would be recorded for: the same default target an ordinary context would address.
+    [[nodiscard]] std::optional<protocol_native::Identity> reading_target(const core::RuntimeSnapshot& scene) const {
+        return select_target_(scene);
     }
 
 private:

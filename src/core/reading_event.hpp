@@ -14,12 +14,11 @@
 namespace synth::core {
 
 // What the player just read. Copied game text only: it carries no claim that anyone else read or heard it.
-enum class ReadingKind : std::uint8_t { book, note, magazine, holotape, terminal };
+enum class ReadingKind : std::uint8_t { book, magazine, holotape, terminal };
 
 [[nodiscard]] constexpr std::string_view reading_kind_name(ReadingKind kind) noexcept {
     switch (kind) {
         case ReadingKind::book: return "book";
-        case ReadingKind::note: return "note";
         case ReadingKind::magazine: return "magazine";
         case ReadingKind::holotape: return "holotape";
         case ReadingKind::terminal: return "terminal";
@@ -182,16 +181,21 @@ public:
     static constexpr std::size_t capacity = 32;
     static constexpr std::chrono::minutes window{10};
 
-    [[nodiscard]] bool admit(ReadingKind kind, std::uint32_t form_id, std::string_view title, SnapshotClock::time_point now) {
+    // True when this reading was not seen inside the window. Does not record anything.
+    [[nodiscard]] bool fresh(ReadingKind kind, std::uint32_t form_id, std::string_view title, SnapshotClock::time_point now) const {
+        for (const auto& entry : entries_)
+            if (entry.form_id == form_id && entry.kind == kind && entry.title == title)
+                return !(now >= entry.at && now - entry.at < window);
+        return true;
+    }
+    // Record a reading only once it was accepted for delivery, so a dropped one never suppresses a re-read.
+    void remember(ReadingKind kind, std::uint32_t form_id, std::string_view title, SnapshotClock::time_point now) {
         for (auto& entry : entries_) {
             if (entry.form_id != form_id || entry.kind != kind || entry.title != title) continue;
-            const bool fresh = now >= entry.at && now - entry.at < window;
             entry.at = now;
-            return !fresh;
+            return;
         }
-        auto& slot = entries_[next_++ % capacity];
-        slot = {kind, form_id, std::string{title}, now};
-        return true;
+        entries_[next_++ % capacity] = {kind, form_id, std::string{title}, now};
     }
     void clear() { entries_ = {}; next_ = 0; }
 

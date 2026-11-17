@@ -261,7 +261,7 @@ void reading_event_tests(const std::string& root) {
     protocol_native::EventContext context{"session-reading-001","request-reading-001","turn-reading-001","flat","0.1.0","1.11.240",7,
         {"context.reading_events"},2,0};
     const protocol_native::Identity player{"0x00000014","Fallout4.esm","save-001","Sole Survivor"};
-    core::ReadingEvent note{1,core::ReadingKind::note,0x1F2A3,"Fallout4.esm","Sanctuary Hills Note","Dear Nate,\nThe key is under the mat.",false,{}};
+    core::ReadingEvent note{1,core::ReadingKind::book,0x1F2A3,"Fallout4.esm","Grognak the Barbarian #5","The barbarian raised his axe.\nThe cave fell silent.",false,{}};
     require(json::write(protocol_native::reading_event_value({note,120},context,player))==
         json::write(protocol_native::required(protocol_native::required(load("context-reading-event.json"),"payload"),"reading_event")),
         "reading event does not match the mirrored fixture");

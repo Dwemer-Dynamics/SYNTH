@@ -62,7 +62,7 @@ See [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md). No gameplay 
 
 - [x] Off game: bounded text cleaning, repeat suppression, bounded delivery queue, codec against the mirrored
   golden fixtures, closed-schema rejection of unnegotiated, VR, oversized and malformed readings.
-- [ ] Flat in game: activating a note or magazine in the world reports its title and text once; reading it again
+- [ ] Flat in game: activating a book or magazine in the world (with an NPC addressed) reports its title and text once; a paper note reports nothing; reading it again
   within ten minutes does not; load and main menu discard pending captures.
 - [ ] Flat in game: a terminal text entry and a terminal-launched holotape report once each; an unknown
   selection reports nothing. Confirm the terminal menu's last-selection record names the chosen entry.

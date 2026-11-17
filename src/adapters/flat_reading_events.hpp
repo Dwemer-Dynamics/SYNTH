@@ -55,7 +55,9 @@ public:
         if (!installed_ || !ui) return std::nullopt;
         std::optional<core::ReadingEvent> reading;
         const bool book = ui->GetMenuOpen("BookMenu"sv);
-        if (book && !book_open_) reading = book_reading(now);
+        // A world activation is only a candidate for a moment: a candidate no book menu claimed is dropped.
+        expire_candidate(now);
+        if (book && !book_open_) reading = book_reading(*ui, now);
         book_open_ = book;
         if (!reading) reading = terminal_reading(*ui, now);
         return reading;
@@ -67,10 +69,13 @@ private:
         RE::BSEventNotifyControl ProcessEvent(const RE::TESActivateEvent& event, RE::BSTEventSource<RE::TESActivateEvent>*) override {
             const auto* player = RE::PlayerCharacter::GetSingleton();
             if (player && event.actionRef.get() == player && event.objectActivated) {
-                if (const auto* base = event.objectActivated->GetObjectReference();
-                    base && base->GetFormType() == RE::ENUM_FORM_ID::kBOOK) {
+                const auto* base = event.objectActivated->GetObjectReference();
+                if (base && base->GetFormType() == RE::ENUM_FORM_ID::kBOOK) {
                     candidate_form_.store(base->GetFormID(), std::memory_order_release);
                     candidate_at_.store(core::SnapshotClock::now().time_since_epoch().count(), std::memory_order_release);
+                } else {
+                    // The player activated something else: an earlier book can no longer be what opens next.
+                    candidate_form_.store(0, std::memory_order_release);
                 }
             }
             return RE::BSEventNotifyControl::kContinue;
@@ -101,19 +106,28 @@ private:
     }
 
     // The book menu just opened: the item is the book the player activated a moment ago, if there is one.
-    static std::optional<core::ReadingEvent> book_reading(core::SnapshotClock::time_point now) {
-        const auto form_id = candidate_form_.exchange(0, std::memory_order_acq_rel);
+    static void expire_candidate(core::SnapshotClock::time_point now) noexcept {
+        if (candidate_form_.load(std::memory_order_acquire) == 0) return;
         const core::SnapshotClock::time_point at{core::SnapshotClock::duration{candidate_at_.load(std::memory_order_acquire)}};
-        if (form_id == 0 || now < at || now - at > std::chrono::seconds{10}) return std::nullopt;
+        if (now < at || now - at > candidate_window) candidate_form_.store(0, std::memory_order_release);
+    }
+
+    static std::optional<core::ReadingEvent> book_reading(RE::UI& ui, core::SnapshotClock::time_point now) {
+        const auto form_id = candidate_form_.exchange(0, std::memory_order_acq_rel);
+        // A book menu opened from the Pip-Boy is another item; the claim is only for a world activation.
+        if (form_id == 0 || ui.GetMenuOpen("PipboyMenu"sv)) return std::nullopt;
+        const core::SnapshotClock::time_point at{core::SnapshotClock::duration{candidate_at_.load(std::memory_order_acquire)}};
+        if (now < at || now - at > candidate_window) return std::nullopt;
         auto* book = RE::TESForm::GetFormByID<RE::TESObjectBOOK>(form_id);
         if (!book) return std::nullopt;
         RE::BSString description;
         static_cast<RE::TESDescription*>(book)->GetDescription(description, book);
         const std::string_view name{RE::TESFullName::GetFullName(*book)};
-        // Magazines and notes are book records; the vanilla keywords tell them apart when present.
+        // Paper notes are private (shared only on request) and never captured here. Magazines and notes are book
+        // records; the vanilla keywords tell them apart when present.
+        if (book->HasKeywordString("ObjectTypeNote"sv)) return std::nullopt;
         auto kind = core::ReadingKind::book;
         if (book->HasKeywordString("ObjectTypeMagazine"sv)) kind = core::ReadingKind::magazine;
-        else if (book->HasKeywordString("ObjectTypeNote"sv)) kind = core::ReadingKind::note;
         return make(kind, *book, name, description.c_str() ? std::string_view{description.c_str()} : std::string_view{}, now);
     }
 
@@ -162,6 +176,7 @@ private:
                     body, now);
     }
 
+    static constexpr std::chrono::seconds candidate_window{3};
     static inline ActivateSink sink_;
     static inline std::atomic_bool installed_{};
     static inline std::atomic_uint32_t candidate_form_{};

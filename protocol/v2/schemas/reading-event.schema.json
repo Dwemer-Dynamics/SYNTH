@@ -7,7 +7,7 @@
   "required": ["event_id", "kind", "title", "source", "text_truncated", "age_ms"],
   "properties": {
     "event_id": {"type": "string", "pattern": "^reading:[1-9][0-9]{0,15}$"},
-    "kind": {"enum": ["book", "note", "magazine", "holotape", "terminal"]},
+    "kind": {"enum": ["book", "magazine", "holotape", "terminal"]},
     "title": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$"},
     "source": {
       "type": "object",
