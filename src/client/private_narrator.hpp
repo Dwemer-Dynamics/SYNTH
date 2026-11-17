@@ -4,6 +4,7 @@
 #include "client/synth_client.hpp"
 #include "core/cancellation.hpp"
 #include "core/snapshot.hpp"
+#include "core/talking_object.hpp"
 #include "media_fetch/media_fetch.hpp"
 #include "presentation/dialogue_presentation.hpp"
 #include "protocol_native/v1_codec.hpp"
@@ -64,7 +65,7 @@ public:
         std::uint32_t timeout_ms{30'000};
     };
 
-    enum class Command { help, list, select, talk, npcs, scene, transcript, older, cancel };
+    enum class Command { help, list, select, talk, npcs, scene, transcript, older, cancel, object };
     struct TextCommand final {
         Command command{Command::help};
         std::string argument;
@@ -104,6 +105,8 @@ public:
         const auto space = rest.find(' ');
         const auto word = rest.substr(0, space);
         const auto argument = space == std::string_view::npos ? std::string_view{} : trim(rest.substr(space));
+        // Talking objects: `/narrator object [status | bind <number or name> | talk]`; the argument is parsed later.
+        if (word == "object") return TextCommand{Command::object, std::string{argument}};
         constexpr std::pair<std::string_view, Command> words[]{{"", Command::help}, {"help", Command::help},
             {"list", Command::list}, {"select", Command::select}, {"talk", Command::talk}, {"npcs", Command::npcs},
             {"npc", Command::npcs}, {"scene", Command::scene}, {"transcript", Command::transcript},
@@ -116,11 +119,19 @@ public:
 
     [[nodiscard]] static constexpr std::string_view help_text() noexcept {
         return "SYNTH private narrator: /narrator list, /narrator select <number or name>, /narrator talk, "
-               "/narrator npcs, /narrator scene, /narrator transcript, /narrator older, /narrator cancel";
+               "/narrator npcs, /narrator scene, /narrator transcript, /narrator older, /narrator cancel, /narrator object";
     }
 
     [[nodiscard]] bool ready() const noexcept { return client_.private_narrator_ready() && !terminal_.load(std::memory_order_acquire); }
-    [[nodiscard]] bool talking() const noexcept { return talking_.load(std::memory_order_acquire) && ready(); }
+    // Typed chat and push-to-talk go to the private lane: the selected narrator, or one addressed object.
+    [[nodiscard]] bool talking() const noexcept {
+        return ready() && (talking_.load(std::memory_order_acquire) || address().has_value());
+    }
+    // The addressed talking object, if any (game thread / workers; a copy).
+    [[nodiscard]] std::optional<std::string> addressed_object_name() const {
+        const auto current = address();
+        return current ? std::optional{current->display_name} : std::nullopt;
+    }
 
     [[nodiscard]] View view() const {
         std::scoped_lock lock{mutex_};
@@ -130,6 +141,7 @@ public:
     // Game thread. Routing preference only; it never touches the network.
     bool set_talking(bool narrator) {
         if (narrator && !ready()) { notify_("SYNTH private narrator is unavailable on this server"); return false; }
+        clear_address();
         talking_.store(narrator, std::memory_order_release);
         if (!narrator) { notify_("SYNTH is talking to NPCs"); return true; }
         const auto selected = view().state.selected;
@@ -157,8 +169,55 @@ public:
             else notify_("No older transcript page; use /narrator transcript to start again");
             break;
         case Command::cancel: (void)cancel(std::move(snapshot)); break;
+        case Command::object: object_command(std::move(snapshot), parsed->argument); break;
         }
         return true;
+    }
+
+    // Game thread. `/narrator object` reports the object in view, `bind` writes its one immutable binding to an unbound
+    // object definition, and `talk` addresses a bound object. The choice is made from the copied snapshot alone and
+    // never guesses between two nearby objects.
+    void object_command(Snapshot snapshot, std::string_view argument) {
+        if (!snapshot || !ready()) { notify_("SYNTH private narrator is unavailable on this server"); return; }
+        if (!client_.private_narrator_object_ready()) { notify_("SYNTH talking objects are unavailable on this server"); return; }
+        const auto space = argument.find(' ');
+        const auto word = argument.substr(0, space);
+        const auto start = space == std::string_view::npos ? std::string_view::npos : argument.find_first_not_of(' ', space);
+        const auto rest = start == std::string_view::npos ? std::string_view{} : argument.substr(start);
+        if (!word.empty() && word != "status" && word != "bind" && word != "talk") {
+            notify_("SYNTH talking objects: /narrator object, /narrator object bind <number or name>, /narrator object talk");
+            return;
+        }
+        const auto scan = core::scan_talking_object(*snapshot);
+        if (scan.status == core::TalkingObjectScanStatus::none) { notify_("SYNTH sees no object to talk to; look at one first"); return; }
+        if (scan.status == core::TalkingObjectScanStatus::ambiguous) { notify_("SYNTH sees more than one object; aim at a single one"); return; }
+        const auto& object = *scan.object;
+        const auto wire = to_wire(object.identity);
+        const auto state = view().state;
+        const auto bound = std::ranges::find_if(state.objects, [&](const auto& entry) { return entry.object == wire; });
+        if (word == "bind") {
+            if (bound != state.objects.end()) { notify_("SYNTH " + object.display_name + " already has a narrator; bindings never change"); return; }
+            const auto definition = unbound_object_definition(state, rest);
+            if (!definition) {
+                notify_("SYNTH object narrator not found; create an object narrator on the server Narrator page, then /narrator object bind <number>");
+                (void)refresh(std::move(snapshot));
+                return;
+            }
+            (void)submit_command(std::move(snapshot), protocol_native::NarratorAction::bind_object, *definition, false, {}, wire);
+            return;
+        }
+        if (word == "talk") {
+            if (bound == state.objects.end()) { notify_("SYNTH " + object.display_name + " has no narrator yet; /narrator object bind <number>"); return; }
+            cancel_local();
+            {
+                std::scoped_lock lock{mutex_};
+                address_ = Address{bound->definition_id, object.identity, wire, object.display_name};
+            }
+            talking_.store(false, std::memory_order_release);
+            notify_("SYNTH is talking privately to " + object.display_name + "; /narrator npcs to stop");
+            return;
+        }
+        notify_("SYNTH sees " + object.display_name + (bound == state.objects.end() ? ": no narrator bound; /narrator object bind <number>" : ": bound; /narrator object talk"));
     }
 
     [[nodiscard]] bool refresh(Snapshot snapshot, bool announce = false) {
@@ -322,13 +381,58 @@ private:
         return true;
     }
 
+    struct Address final {
+        std::string definition_id;
+        core::TalkingObjectIdentity identity;
+        protocol_native::NarratorObjectRef wire;
+        std::string display_name;
+    };
+
+    [[nodiscard]] std::optional<Address> address() const {
+        std::scoped_lock lock{mutex_};
+        return address_;
+    }
+    void clear_address() {
+        std::scoped_lock lock{mutex_};
+        address_.reset();
+    }
+
+    [[nodiscard]] static protocol_native::NarratorObjectRef to_wire(const core::TalkingObjectIdentity& identity) {
+        return {identity.ref_plugin, core::talking_object_wire_id(identity.ref_id), identity.base_plugin,
+                core::talking_object_wire_id(identity.base_id)};
+    }
+
+    // 1-based number into the object definitions not yet bound to an object in this state, else a case-insensitive name.
+    [[nodiscard]] static std::optional<std::string> unbound_object_definition(const protocol_native::NarratorState& state,
+                                                                              std::string_view argument) {
+        std::vector<const protocol_native::NarratorRef*> unbound;
+        for (const auto& definition : state.object_definitions)
+            if (std::ranges::none_of(state.objects, [&](const auto& bound) { return bound.definition_id == definition.definition_id; }))
+                unbound.push_back(&definition);
+        const auto lower = [](std::string_view value) {
+            std::string out{value};
+            std::ranges::transform(out, out.begin(), [](unsigned char ch) { return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch); });
+            return out;
+        };
+        std::size_t number{};
+        for (const auto ch : argument) {
+            if (ch < '0' || ch > '9' || number > 99) { number = 0; break; }
+            number = number * 10 + static_cast<std::size_t>(ch - '0');
+        }
+        if (number >= 1 && number <= unbound.size()) return unbound[number - 1]->definition_id;
+        for (const auto* definition : unbound)
+            if (!argument.empty() && lower(definition->display_name) == lower(argument)) return definition->definition_id;
+        return std::nullopt;
+    }
+
     [[nodiscard]] bool submit_command(Snapshot snapshot, protocol_native::NarratorAction action, std::string definition_id,
-                                      bool announce, std::string cursor = {}) {
+                                      bool announce, std::string cursor = {},
+                                      std::optional<protocol_native::NarratorObjectRef> bound_object = std::nullopt) {
         if (!admissible(snapshot)) return false;
         const auto accepted = network_.try_submit("network", tasks::TaskClass::background,
             tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{timeout_ms_}, session_,
             requests_.track_response([this, snapshot = std::move(snapshot), action, definition_id = std::move(definition_id), announce,
-                                      cursor = std::move(cursor)](const core::CancellationToken& cancellation) {
+                                      cursor = std::move(cursor), bound_object = std::move(bound_object)](const core::CancellationToken& cancellation) {
                 if (stopped(cancellation)) return;
                 try {
                     const auto context_turn = client_.begin_context_turn();
@@ -339,15 +443,16 @@ private:
                     }
                     const auto outcome = client_.send_narrator("narrator_command", context.context_binding,
                         [&](const protocol_native::EventContext& event) {
-                            return protocol_native::encode_narrator_command(event, action, definition_id, cursor);
+                            return protocol_native::encode_narrator_command(event, action, definition_id, cursor, bound_object);
                         });
-                    const auto mutating = action == protocol_native::NarratorAction::select;
+                    const auto mutating = action == protocol_native::NarratorAction::select || action == protocol_native::NarratorAction::bind_object;
                     if (!absorb(outcome, cancellation, mutating) || stopped(cancellation)) {
                         if (!stopped(cancellation)) notify_("SYNTH private narrator: " + failure(outcome));
                         return;
                     }
                     if (action == protocol_native::NarratorAction::cancel) notify_("SYNTH private narrator reply cancelled");
                     else if (action == protocol_native::NarratorAction::transcript) show_transcript();
+                    else if (action == protocol_native::NarratorAction::bind_object) notify_("SYNTH object narrator bound; /narrator object talk");
                     else if (announce) announce_state(action == protocol_native::NarratorAction::select);
                 } catch (const std::exception& error) {
                     if (!stopped(cancellation)) notify_(std::string{"SYNTH private narrator: "} + error.what());
@@ -362,7 +467,34 @@ private:
         if (!admissible(snapshot)) return false;
         protocol_native::NarratorTurn turn{kind, {}, {}, std::move(text), std::nullopt};
         std::optional<core::CancellationToken> owner;
-        {
+        // An addressed object takes typed and push-to-talk turns, never scene commentary (that is the narrator's). The
+        // exact identity must still be in this snapshot within range; nothing else is ever adopted in its place.
+        if (const auto current = address(); current && kind != protocol_native::NarratorTurnKind::scene) {
+            const auto found = core::locate_talking_object(*snapshot, current->identity);
+            if (!found) {
+                clear_address();
+                notify_("SYNTH " + current->display_name + " is out of reach; look at it and use /narrator object talk again");
+                return false;
+            }
+            bool loaded{};
+            {
+                std::scoped_lock lock{mutex_};
+                loaded = known_.has_value();
+                if (loaded) {
+                    turn.definition_id = current->definition_id;
+                    turn.state_id = state_.state_id;
+                    turn.object = current->wire;
+                    turn.object_name = found->display_name;
+                    if (turn_) turn_->cancel();
+                    turn_.emplace(session_);
+                    owner = turn_->token();
+                }
+            }
+            if (!loaded) {
+                notify_("SYNTH private narrator: state not loaded yet; try /narrator list");
+                return false;
+            }
+        } else {
             std::scoped_lock lock{mutex_};
             if (!known_ || !state_.selected) {
                 // Selection belongs to the save; never guess one.
@@ -536,6 +668,10 @@ private:
         if (code == "narrator_speech_unavailable" || code == "speech_unavailable") return "the narrator's profile has no voice";
         if (code == "narrator_provider_unsupported") return "the narrator's profile has no supported language model";
         if (code == "speech_not_recognized") return "speech was not recognized; try again";
+        if (code == "narrator_object_unavailable") return "talking objects are not available on this server yet";
+        if (code == "narrator_object_unbound") return "that object has no narrator; use /narrator object bind";
+        if (code == "narrator_object_mismatch") return "that is not the object this narrator belongs to";
+        if (code == "narrator_object_bound") return "that narrator or object is already bound";
         if (!code.empty()) return code;
         return outcome.detail.empty() ? std::string{"request failed"} : outcome.detail;
     }
@@ -552,6 +688,7 @@ private:
     const std::uint32_t timeout_ms_;
     const std::uint64_t transcript_lease_;
     std::atomic_bool talking_{};
+    std::optional<Address> address_;
     mutable std::mutex mutex_;
     std::optional<std::uint64_t> known_;
     protocol_native::NarratorState state_;
