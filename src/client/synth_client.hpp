@@ -153,6 +153,10 @@ public:
     [[nodiscard]] bool actor_stats_ready() const noexcept {
         return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Condition facts (radiation, addictions, effects, limbs) need this init's exact acknowledgement.
+    [[nodiscard]] bool actor_condition_ready() const noexcept {
+        return actor_condition_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     // Private narrator commands, turns and receipts require this init's exact acknowledgement.
     [[nodiscard]] bool uses_private_narrator_contract() const noexcept {
         const auto has = [this](std::string_view value) {
@@ -332,6 +336,7 @@ public:
             native_turn_negotiated_.store(false, std::memory_order_release);
             delivery_receipts_negotiated_.store(false, std::memory_order_release);
             actor_stats_negotiated_.store(false, std::memory_order_release);
+            actor_condition_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
             private_narrator_object_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
@@ -377,6 +382,9 @@ public:
             actor_stats_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->actor_stats &&
                 std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
+            actor_condition_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->actor_condition &&
+                std::ranges::find(options_.capabilities,"context.actor_condition")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
                 std::memory_order_release);
@@ -518,6 +526,7 @@ public:
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
         bool actor_stats_supported{};
+        bool actor_condition_supported{};
         bool location_ancestry_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
@@ -548,6 +557,7 @@ public:
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
             actor_stats_supported = actor_stats_ready();
+            actor_condition_supported = actor_condition_ready();
             companion_supported = companion_comments_ready();
             location_ancestry_supported = location_ancestry_ready();
         }
@@ -567,6 +577,7 @@ public:
             if (!combat_contacts_supported) state.combat_contacts.reset();
             if (!enemy_awareness_supported) state.enemy_awareness.reset();
             if (!actor_stats_supported) state.actor_stats.reset();
+            if (!actor_condition_supported) state.actor_condition.reset();
             if (state.inventory.size() <= inventory_limit) continue;
             state.inventory.resize(inventory_limit);
             state.inventory_observation = "partial";
@@ -1478,6 +1489,7 @@ private:
     std::atomic_bool native_turn_negotiated_{};
     std::atomic_bool delivery_receipts_negotiated_{};
     std::atomic_bool actor_stats_negotiated_{};
+    std::atomic_bool actor_condition_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
     std::atomic_bool private_narrator_object_negotiated_{};
     std::atomic_bool everyone_negotiated_{};

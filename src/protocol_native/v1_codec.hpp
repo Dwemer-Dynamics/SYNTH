@@ -88,6 +88,7 @@ struct ActorState {
     std::optional<bool> conversation_held;
     std::optional<bool> wait_held;
     std::optional<core::ActorStats> actor_stats;
+    std::optional<core::ActorCondition> actor_condition;
 };
 struct WorldState {
     std::string location, cell, worldspace, weather;
@@ -189,7 +190,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -510,7 +511,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "narrator_object"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "narrator_object"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -537,6 +538,8 @@ inline Line decode_line(std::string_view wire) {
             std::get<Status>(line.payload).delivery_receipts = required(payload, "delivery_receipts").as_bool();
         if (payload.find("narrator_object"))
             std::get<Status>(line.payload).narrator_object = required(payload, "narrator_object").as_bool();
+        if (payload.find("actor_condition"))
+            std::get<Status>(line.payload).actor_condition = required(payload, "actor_condition").as_bool();
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -637,6 +640,31 @@ inline std::pair<std::string, std::string> inventory_action_result(
         truncated = true;
     }
 }
+// Negotiated context.actor_condition. An unobserved read carries only its observation; the lists are bounded.
+inline json::Value actor_condition_value(const core::ActorCondition& value) {
+    if (!value.valid()) throw std::invalid_argument{"invalid actor condition"};
+    if (!value.observed) return json::Value{object({{"observation","unavailable"}})};
+    const auto entries=[](const std::vector<core::ActorConditionEntry>& source,bool with_kind) {
+        json::Value::Array out;
+        for (const auto& entry:source) {
+            char form[11];
+            std::snprintf(form,sizeof(form),"0x%08X",entry.form_id);
+            auto fields=object({{"form_id",std::string{form}},{"origin_plugin",entry.origin_plugin},{"name",entry.name}});
+            if (with_kind) fields.emplace_back("kind",entry.chem ? "chem" : "effect");
+            out.push_back(json::Value{std::move(fields)});
+        }
+        return out;
+    };
+    constexpr std::array limbs{"head","torso","left_arm","right_arm","left_leg","right_leg"};
+    json::Value::Array crippled;
+    for (const auto limb:value.crippled_limbs) crippled.push_back(json::Value{std::string{limbs[static_cast<std::size_t>(limb)]}});
+    return json::Value{object({{"observation","observed"},
+        {"radiation_percent",value.radiation_percent ? json::Value{*value.radiation_percent} : json::Value{}},
+        {"addictions",json::Value{entries(value.addictions,false)}},
+        {"effects",json::Value{entries(value.effects,true)}},
+        {"crippled_limbs",json::Value{std::move(crippled)}},
+        {"truncated",value.truncated}})};
+}
 inline json::Value combat_target_value(const CombatTargetState& value, const ActorState& owner) {
     const auto parse_form = [](const std::string& form) {
         std::uint32_t id{};
@@ -721,6 +749,7 @@ inline json::Value actor_state_value(const ActorState& value) {
         result.emplace_back("actor_stats",object({{"observation","base_current"},{"special",std::move(special)}}));
         }
     }
+    if (value.actor_condition) result.emplace_back("actor_condition", actor_condition_value(*value.actor_condition));
     if (value.combat_target) result.emplace_back("combat_target", combat_target_value(*value.combat_target, value));
     if (value.combat_contacts) {
         if (!value.alive || value.disabled || value.actor.form_id=="0x00000014")
@@ -1424,6 +1453,9 @@ inline std::string encode_context(const EventContext& context, std::string playt
             if (state.combat_target && (context.protocol_version != 2 ||
                 std::ranges::find(context.capabilities, "context.combat_targets") == context.capabilities.end()))
                 throw std::invalid_argument{"combat target capability was not negotiated"};
+            if (state.actor_condition && (context.protocol_version!=2 ||
+                std::ranges::find(context.capabilities,"context.actor_condition")==context.capabilities.end()))
+                throw std::invalid_argument{"actor condition requires negotiated v2 capability"};
             if (state.actor_stats && (context.protocol_version!=2 ||
                 std::ranges::find(context.capabilities,"context.actor_stats")==context.capabilities.end()))
                 throw std::invalid_argument{"actor stats require negotiated v2 capability"};

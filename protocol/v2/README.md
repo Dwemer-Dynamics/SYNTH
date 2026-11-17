@@ -53,6 +53,26 @@ permanent value is never reported as base. The server keeps it only in the
 bound session context snapshot and renders it as the actor's skills; it is never
 written to the NPC profile.
 
+## Actor condition (`context.actor_condition`)
+
+`context.actor_condition` is optional for flat and VR and v2-only. A v2 init that lists it
+is acknowledged with status `actor_condition: true`; a client sends
+`actor_states[].actor_condition` only after that acknowledgement, so an older server never
+receives the key and an older client simply never sends it. It is captured on the game
+thread for exactly the deep-captured actors (the player and the selected NPC), never by name.
+
+`observation: "unavailable"` carries nothing else. `observation: "observed"` carries all of:
+`radiation_percent` (0..100 or null when unreadable; the radiation actor value as a ratio of
+the permanent health value, not verified against the HUD), `addictions` (at most 8) and
+`effects` (at most 8, `kind` `chem` or `effect`), each entry an exact form id, origin plugin
+and a display name of 1..64 characters, `crippled_limbs` (unique, from `head`, `torso`,
+`left_arm`, `right_arm`, `left_leg`, `right_leg`) and `truncated`, true when a cap, an
+unreadable entry or a lost record means the lists may be incomplete. Empty lists with
+`truncated: false` mean the read found none. Low health and power armor reuse the existing
+`health_percent` and `in_power_armor` fields; they are not repeated. The server keeps the
+value only in the bound session context snapshot and projects one bounded condition line.
+It is never written to an NPC profile or history.
+
 ## Native typed turn and speech receipts (2026-11-09, Stage 1)
 
 `dialogue.native_turn` requires v2 and `dialogue.turn_ownership`. Only the init
