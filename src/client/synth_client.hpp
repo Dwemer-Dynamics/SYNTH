@@ -766,7 +766,9 @@ public:
             request_id = next_id("trigger");
             turn_id = binding.turn_id.empty() ? next_id("turn") : binding.turn_id;
             generation = generation_;
-            body = protocol_native::encode_trigger(carrier_context(request_id, turn_id, binding),
+            // External TTS is voiced by its own endpoint and is not part of a conversation.
+            body = protocol_native::encode_trigger(kind == "external_tts" ? context(request_id, turn_id, binding)
+                                                                           : carrier_context(request_id, turn_id, binding),
                                                    kind, actor, game_time_ticks,
                                                    kind == "external_reaction" ? external_text : std::nullopt,
                                                    kind == "external_tts" ? external_text : std::nullopt, capture_id, previous_context_sequence, player_event_serial, std::move(rechat_parent));
