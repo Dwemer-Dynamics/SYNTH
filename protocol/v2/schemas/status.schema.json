@@ -78,6 +78,9 @@
     },
     "observed_dialogue": {
       "type": "boolean"
+    },
+    "narrator_object": {
+      "type": "boolean"
     }
   }
 }

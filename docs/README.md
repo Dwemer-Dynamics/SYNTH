@@ -12,6 +12,8 @@ never flat or VR gameplay evidence.
 - [AGENTS](../AGENTS.md): engineering boundaries. [BRANCHES](../BRANCHES.md): branch policy.
 - [HANDOFF.md](HANDOFF.md): current baseline, session ownership, known gaps.
 - [ARCHITECTURE.md](ARCHITECTURE.md): adapter, thread and protocol boundaries.
+  Includes the [source map and where new code goes](ARCHITECTURE.md#source-map-and-where-new-code-goes).
+- [BUILD-AND-DEPLOY.md](BUILD-AND-DEPLOY.md): build, package and install quickstart.
 - [PROTOCOL.md](PROTOCOL.md) and [protocol/README.md](../protocol/README.md): the wire contract
   mirrored with Synthserver.
 
