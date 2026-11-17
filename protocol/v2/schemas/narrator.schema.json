@@ -29,7 +29,8 @@
             "state",
             "select",
             "cancel",
-            "transcript"
+            "transcript",
+            "bind_object"
           ]
         },
         "definition_id": {
@@ -38,6 +39,9 @@
         "cursor": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "object": {
+          "$ref": "#/$defs/object_identity"
         }
       },
       "allOf": [
@@ -45,7 +49,10 @@
           "if": {
             "properties": {
               "action": {
-                "const": "select"
+                "enum": [
+                  "select",
+                  "bind_object"
+                ]
               }
             }
           },
@@ -55,9 +62,40 @@
             ]
           },
           "else": {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "transcript"
+                }
+              }
+            },
+            "then": {},
+            "else": {
+              "not": {
+                "required": [
+                  "definition_id"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "bind_object"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "object"
+            ]
+          },
+          "else": {
             "not": {
               "required": [
-                "definition_id"
+                "object"
               ]
             }
           }
@@ -110,6 +148,14 @@
         },
         "media": {
           "$ref": "../../v1/schemas/media.schema.json"
+        },
+        "object": {
+          "$ref": "#/$defs/object_identity"
+        },
+        "object_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
         }
       },
       "allOf": [
@@ -172,6 +218,30 @@
                     "media"
                   ]
                 }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "object"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "typed",
+                  "voice"
+                ]
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "object_name"
               ]
             }
           }
@@ -331,6 +401,101 @@
         "next_cursor": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "object_definitions": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/narrator"
+          }
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/object_binding"
+          }
+        }
+      }
+    },
+    "object_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref_plugin",
+        "ref_id",
+        "base_plugin",
+        "base_id"
+      ],
+      "properties": {
+        "ref_plugin": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "maxLength": 255,
+              "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+            }
+          ]
+        },
+        "ref_id": {
+          "type": "string",
+          "pattern": "^0x(00|FF)[0-9A-F]{6}$"
+        },
+        "base_plugin": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+\\.(esm|esp|esl)$"
+        },
+        "base_id": {
+          "type": "string",
+          "pattern": "^0x00(?!000000)[0-9A-F]{6}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ref_plugin": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "ref_plugin"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ref_id": {
+                "pattern": "^0xFF[0-9A-F]{6}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "ref_id": {
+                "pattern": "^0x00(?!000000)[0-9A-F]{6}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "object_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "object"
+      ],
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/definition_id"
+        },
+        "object": {
+          "$ref": "#/$defs/object_identity"
         }
       }
     }
