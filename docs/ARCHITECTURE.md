@@ -51,6 +51,52 @@ GameThreadDispatcher <- typed command <- strict response router
 - `ActionRuntime`: allowlisted action decoding, exact target resolution, native execution/results.
 - `Diagnostics`: queue/task/generation/server/presentation/action health without secrets.
 
+## Source map and where new code goes
+
+`src/` is header-first C++23 grouped by layer. The groups, from the engine outward:
+
+| Directory | Role | Engine headers? |
+|---|---|---|
+| `src/core/`, `src/json/`, `src/protocol_native/`, `src/transport/`, `src/tasks/`, `src/context/`, `src/config/`, `src/actions/`, `src/targeting/`, `src/presentation/`, `src/audio/`, `src/voice/`, `src/diagnostics/` | Engine-free logic: snapshots, mailboxes, generation and cancellation, protocol, tasks, typed actions, presentation policy | No |
+| `src/runtime/` | `IFalloutRuntime`, `GameThreadDispatcher` and the other engine-facing interfaces | No |
+| `src/client/` | Session composition and feature delivery code (`PluginSession`, dialogue, speech, observed events, rechat); dozens of flat headers today | No |
+| `src/adapters/` | `Flat*` and `Vr*` runtimes and the CommonLib/F4SE bindings (`flat_*`, `commonlib_*`) | **Yes, the only place** |
+| `src/flat/`, `src/vr/` | Per-lane `plugin_entry.cpp` | Yes |
+| `src/integration/`, `src/input/`, `src/ui/`, `src/lifecycle/`, `src/media_*/`, `src/radio/` | Support areas for other mods, input, menus, lifecycle, media and the radio prototype | Only where already present |
+
+Tests mirror the layout under `tests/<area>/`; `tests/fake_server` and `tests/loopback_dialogue`
+exercise the protocol end to end.
+
+### Rule for new feature code
+
+New features use **`src/features/<name>/`**, as the CHIM 4 client does (`src/features/books`,
+`orders`, `trading`, ...), with these constraints that keep SYNTH's own boundaries:
+
+1. **A feature folder is engine-free.** It holds the feature's state, decisions, request building and
+   response handling as plain headers that include only `core`, `runtime`, `protocol_native` and
+   other engine-free groups. It never includes CommonLibF4/F4SE or game headers.
+2. **Engine access goes through `src/runtime/` interfaces.** If a feature needs a new engine
+   primitive, add it to `IFalloutRuntime` (engine-free signature) and implement it in
+   `src/adapters/flat_*.hpp` and `vr_*.hpp`. Never put adapter code inside a feature folder.
+3. **Flat and VR stay split in the adapters.** A feature does not branch on lane. It reads the
+   runtime capability manifest and degrades or refuses where VR lacks a path; lane-specific code lives
+   only in `src/adapters/` and the two `plugin_entry.cpp` files.
+4. **`src/client/plugin_session*.hpp` stays the composition root.** A feature exposes one small
+   owner object that the session creates and wires; the session does not grow feature logic.
+5. **Protocol types stay in `src/protocol_native/`** and are mirrored with Synthserver `protocol/`.
+6. **Tests go in `tests/features/<name>/`** (registered like the other native suites), plus a
+   `tests/fake_server` case when the wire changes.
+7. **No moves in feature PRs.** Existing `src/client/*` headers move into `src/features/<name>/` one
+   feature at a time in dedicated PRs. Until then, extend them in place only for bug fixes and hooks
+   that call the new feature owner.
+
+Why `src/features/<name>/` and not more flat files in `src/client/`: every new feature touches the
+same few directories today (`client`, `core`, `adapters`, `protocol_native`), which makes parallel work
+collide and hides what a feature owns. A feature folder gives one owner, one test directory and one
+note. Why not copy CHIM 4's folders wholesale: CHIM 4 organizes features around its engine layer, while SYNTH
+must keep the engine-free core plus adapters split and two runtime lanes. So the feature folder is
+the engine-free half only.
+
 ## Threading invariants
 
 1. The game thread never waits for HTTP, disk scans, STT/TTS, audio decode, or model work.

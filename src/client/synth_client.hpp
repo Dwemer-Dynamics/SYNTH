@@ -168,6 +168,14 @@ public:
     [[nodiscard]] bool private_narrator_ready() const noexcept {
         return private_narrator_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Talking objects (narrator.object.v1) are an additional grant on top of the private narrator.
+    [[nodiscard]] bool uses_private_narrator_object_contract() const noexcept {
+        return uses_private_narrator_contract() &&
+            std::ranges::find(options_.capabilities, "narrator.object.v1") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool private_narrator_object_ready() const noexcept {
+        return private_narrator_object_negotiated_.load(std::memory_order_acquire) && private_narrator_ready();
+    }
     // Everyone is offered and encoded only after this init carried a structured control_audience acknowledgement.
     [[nodiscard]] bool uses_everyone_contract() const noexcept {
         const auto has = [this](std::string_view value) {
@@ -330,6 +338,7 @@ public:
             actor_stats_negotiated_.store(false, std::memory_order_release);
             actor_condition_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
+            private_narrator_object_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
             combat_targets_negotiated_.store(false, std::memory_order_release);
             combat_contacts_negotiated_.store(false, std::memory_order_release);
@@ -385,6 +394,9 @@ public:
             private_narrator_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->private_narrator && uses_private_narrator_contract(),
                 std::memory_order_release);
+            private_narrator_object_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->private_narrator && status->narrator_object &&
+                uses_private_narrator_object_contract(), std::memory_order_release);
             everyone_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->control_audience && uses_everyone_contract(),
                 std::memory_order_release);
@@ -1479,6 +1491,7 @@ private:
     std::atomic_bool actor_stats_negotiated_{};
     std::atomic_bool actor_condition_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
+    std::atomic_bool private_narrator_object_negotiated_{};
     std::atomic_bool everyone_negotiated_{};
     bool halt_attempted_{};
     std::optional<InterruptedTurn> active_turn_anchor_;

@@ -78,6 +78,9 @@
     },
     "actor_condition": {
       "type": "boolean"
+    },
+    "narrator_object": {
+      "type": "boolean"
     }
   }
 }
