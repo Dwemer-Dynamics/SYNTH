@@ -1,5 +1,21 @@
 # SYNTH protocol v2
 
+## Optional wake-up channel (2026-11-18)
+
+`notify.wake` is an optional v2 capability. It only shortens waiting: the client still fetches everything over the
+ordinary HTTP protocol, and polling stays the fallback and the default. A client lists the capability in `init` only
+when its INI opt-in is on. A server that runs the notification channel answers with status `notify_wake: {"port": N}`
+(`N` 1024 to 65535); a server that does not run it, or that predates the capability, sends no `notify_wake`, so the
+client never connects. An older client never lists the capability and so never receives the key.
+
+The client connects a WebSocket to the host of its configured server URL on `N` and treats every frame as a hint
+(`schema/notify-hint.schema.json`). A frame is `{"schema":"synth.notify.hint.v1","type":"welcome"}` once after the
+handshake, or `{"type":"wake","topic":"speech"}` when stored speech state changed and the client's wait for ready
+speech should look again at once. Hints carry no message content, identifiers or secrets and grant nothing; an
+unknown, malformed or oversized frame is ignored. The channel is one-way (server to client); a client sends nothing.
+The client reconnects with a growing delay and never depends on the channel: a missed hint costs at most the normal
+poll interval.
+
 ## Location catalog export (2026-11-16)
 
 `location_catalog` is a v2 event, `context_sequence` 0, granted by the capability `world.location_catalog`; the init status

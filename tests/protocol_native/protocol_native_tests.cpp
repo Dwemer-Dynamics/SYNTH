@@ -747,9 +747,34 @@ void conversation_tests(const std::string& root) {
     require(protocol_native::carrier_conversation_id(protocol_native::encode_input_text(none,"Hi")).empty(),"absent id expected an echo");
 }
 
+// Optional wake-up channel (notify.wake): the init status carries the port only when the server runs the channel; an
+// older server sends no key, and a malformed or out-of-range value is refused rather than guessed.
+void notify_wake_tests() {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto status_line = [](const char* payload) {
+        return std::string{R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":)"} + payload + R"(,"context_sequence":0})";
+    };
+    const auto granted = protocol_native::decode_line(status_line(R"({"code":"init_accepted","notify_wake":{"port":8091}})"));
+    require(std::get<protocol_native::Status>(granted.payload).notify_wake_port == 8091, "notify_wake port lost");
+    const auto older = protocol_native::decode_line(status_line(R"({"code":"init_accepted"})"));
+    require(std::get<protocol_native::Status>(older.payload).notify_wake_port == 0, "wake-up port invented for a server that sent none");
+    const auto refused = [&](const char* payload) {
+        try { (void)protocol_native::decode_line(status_line(payload)); } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    require(refused(R"({"code":"init_accepted","notify_wake":{"port":80}})") &&
+            refused(R"({"code":"init_accepted","notify_wake":{"port":70000}})") &&
+            refused(R"({"code":"init_accepted","notify_wake":{}})") &&
+            refused(R"({"code":"init_accepted","notify_wake":{"port":8091,"host":"x"}})") &&
+            refused(R"({"code":"init_accepted","notify_wake":true})"),
+        "malformed notify_wake accepted");
+}
+
 int main(int argc,char** argv){
  try{
   actor_stats_tests();
+  notify_wake_tests();
   actor_condition_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);

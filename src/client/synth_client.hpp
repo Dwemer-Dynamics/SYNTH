@@ -4,6 +4,7 @@
 #include "client/http.hpp"
 #include "core/cancellation.hpp"
 #include "protocol_native/v1_codec.hpp"
+#include "transport/notify_wake.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,8 @@ struct SessionOptions final {
     std::uint32_t request_timeout_ms{30'000};
     std::size_t maximum_response_bytes{4U * 1024U * 1024U};
     std::uint64_t protocol_version{1};
+    // Called with the acknowledged wake-up port after an init, and with 0 when the session no longer has one.
+    std::function<void(std::uint16_t)> notify_wake_changed;
 };
 
 // Immutable acknowledgement owned by a turn, never inferred from the latest client state.
@@ -239,6 +242,10 @@ public:
     [[nodiscard]] bool enemy_awareness_ready() const noexcept {
         return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
     }
+    // The optional wake-up channel: signalled by its thread, waited on by speech polling. Never required.
+    [[nodiscard]] transport::WakeSignal& wake_signal() noexcept { return wake_signal_; }
+    [[nodiscard]] std::uint16_t notify_wake_port() const noexcept { return notify_wake_port_.load(std::memory_order_acquire); }
+
     [[nodiscard]] bool reading_events_ready() const noexcept {
         return reading_events_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
@@ -475,6 +482,9 @@ public:
                 status->code.starts_with("init_") && status->code.ends_with("_accepted") && status->reading_events &&
                 std::ranges::find(options_.capabilities,"context.reading_events")!=options_.capabilities.end(),
                 std::memory_order_release);
+            // Only a server that runs the channel acknowledges it, and only to a client that opted in and listed it.
+            set_notify_wake_port(supported_init && status->code.starts_with("init_") && status->code.ends_with("_accepted") &&
+                std::ranges::find(options_.capabilities,"notify.wake")!=options_.capabilities.end() ? status->notify_wake_port : 0);
             location_ancestry_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->location_ancestry &&
                 std::ranges::find(options_.capabilities,"context.location_ancestry")!=options_.capabilities.end() &&
@@ -1597,6 +1607,12 @@ private:
     std::atomic_bool observed_dialogue_negotiated_{};
     std::atomic_bool trade_negotiated_{};
     std::atomic_bool reading_events_negotiated_{};
+    void set_notify_wake_port(std::uint16_t port) {
+        if (notify_wake_port_.exchange(port, std::memory_order_acq_rel) == port && port == 0) return;
+        if (options_.notify_wake_changed) options_.notify_wake_changed(port);
+    }
+    std::atomic<std::uint16_t> notify_wake_port_{};
+    transport::WakeSignal wake_signal_;
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};
