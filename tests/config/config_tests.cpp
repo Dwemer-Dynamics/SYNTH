@@ -173,7 +173,7 @@ void test_settings_catalog_matches_configuration() {
             }
         }
     }
-    CHECK(interactive == 47);
+    CHECK(interactive == 48);
 
     // Every framework hotkey identifier must resolve to a catalog keybind row,
     // otherwise the reconcile pass would drop a rebind on the floor.
