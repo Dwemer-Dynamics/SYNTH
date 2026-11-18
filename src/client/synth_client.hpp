@@ -153,6 +153,10 @@ public:
     [[nodiscard]] bool actor_stats_ready() const noexcept {
         return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Condition facts (radiation, addictions, effects, limbs) need this init's exact acknowledgement.
+    [[nodiscard]] bool actor_condition_ready() const noexcept {
+        return actor_condition_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     // Private narrator commands, turns and receipts require this init's exact acknowledgement.
     [[nodiscard]] bool uses_private_narrator_contract() const noexcept {
         const auto has = [this](std::string_view value) {
@@ -218,6 +222,16 @@ public:
     }
     [[nodiscard]] bool reading_events_ready() const noexcept {
         return reading_events_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    // Confirmed NPC sales: granted only by an init whose acknowledgement carries trade_confirmation, over the
+    // player-payment contract it extends. Older servers and VR never acknowledge it.
+    [[nodiscard]] bool uses_trade_contract() const noexcept {
+        return uses_player_caps_contract() &&
+            std::ranges::find(options_.capabilities, "action.barter") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "action.trade_confirmation") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool trade_ready() const noexcept {
+        return trade_negotiated_.load(std::memory_order_acquire) && player_caps_ready();
     }
     [[nodiscard]] bool observed_dialogue_ready() const noexcept {
         return observed_dialogue_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
@@ -335,6 +349,7 @@ public:
             native_turn_negotiated_.store(false, std::memory_order_release);
             delivery_receipts_negotiated_.store(false, std::memory_order_release);
             actor_stats_negotiated_.store(false, std::memory_order_release);
+            actor_condition_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
             private_narrator_object_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
@@ -343,6 +358,7 @@ public:
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
             location_ancestry_negotiated_.store(false, std::memory_order_release);
             observed_dialogue_negotiated_.store(false, std::memory_order_release);
+            trade_negotiated_.store(false, std::memory_order_release);
             reading_events_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
@@ -381,6 +397,9 @@ public:
             actor_stats_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->actor_stats &&
                 std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
+            actor_condition_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->actor_condition &&
+                std::ranges::find(options_.capabilities,"context.actor_condition")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
                 std::memory_order_release);
@@ -442,6 +461,7 @@ public:
             player_item_negotiated_.store(player_item_support, std::memory_order_release);
             const bool player_caps_support = supported_init && (player_item_support || status->code == "init_player_caps_inventory_accepted") && uses_player_caps_contract();
             player_caps_negotiated_.store(player_caps_support, std::memory_order_release);
+            trade_negotiated_.store(player_caps_support && status->trade_confirmation && uses_trade_contract(), std::memory_order_release);
             const bool caps_support = supported_init && (gift_menu_support || player_item_support || player_caps_support || status->code == "init_caps_inventory_accepted") && uses_caps_contract();
             caps_negotiated_.store(caps_support, std::memory_order_release);
             const bool transfer_support = supported_init && (gift_menu_support || player_item_support || caps_support || status->code == "init_transfer_inventory_accepted") && uses_transfer_contract();
@@ -528,6 +548,7 @@ public:
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
         bool actor_stats_supported{};
+        bool actor_condition_supported{};
         bool location_ancestry_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
@@ -560,6 +581,7 @@ public:
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
             actor_stats_supported = actor_stats_ready();
+            actor_condition_supported = actor_condition_ready();
             companion_supported = companion_comments_ready();
             location_ancestry_supported = location_ancestry_ready();
         }
@@ -579,6 +601,7 @@ public:
             if (!combat_contacts_supported) state.combat_contacts.reset();
             if (!enemy_awareness_supported) state.enemy_awareness.reset();
             if (!actor_stats_supported) state.actor_stats.reset();
+            if (!actor_condition_supported) state.actor_condition.reset();
             if (state.inventory.size() <= inventory_limit) continue;
             state.inventory.resize(inventory_limit);
             state.inventory_observation = "partial";
@@ -1473,6 +1496,7 @@ private:
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
     std::atomic_bool observed_dialogue_negotiated_{};
+    std::atomic_bool trade_negotiated_{};
     std::atomic_bool reading_events_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
@@ -1491,6 +1515,7 @@ private:
     std::atomic_bool native_turn_negotiated_{};
     std::atomic_bool delivery_receipts_negotiated_{};
     std::atomic_bool actor_stats_negotiated_{};
+    std::atomic_bool actor_condition_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
     std::atomic_bool private_narrator_object_negotiated_{};
     std::atomic_bool everyone_negotiated_{};

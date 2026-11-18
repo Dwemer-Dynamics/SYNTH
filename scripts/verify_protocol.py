@@ -245,6 +245,10 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") in {"synth.event.v2", "synth.response.line.v2"} and payload_type in narrator_payloads:
         catalog_path = PROTOCOL / "v2/schemas/narrator.schema.json"
         payload_schema = {"$ref": "#/$defs/" + narrator_payloads[payload_type]}
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "action"             and value.get("payload", {}).get("action", {}).get("name") == "barter":
+        catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
+        payload_schema = {"type": "object", "additionalProperties": False, "required": ["action"],
+                          "properties": {"action": {"$ref": "barter-action.schema.json"}}}
     if value.get("schema") == "synth.response.line.v2" and payload_type == "social_task":
         catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
         payload_schema = {"type": "object", "additionalProperties": False, "required": ["task"],

@@ -2,6 +2,7 @@
 
 #include "audio/dialogue_audio.hpp"
 #include "audio/native_playback.hpp"
+#include "audio/wave_silence.hpp"
 #include "client/conversation_holds.hpp"
 #include "client/rechat_prefetch.hpp"
 #include "client/speech_facing_binding.hpp"
@@ -387,6 +388,9 @@ private:
         if (media_fetch::sha256_hex(bytes) != media.sha256) {
             throw std::runtime_error{"native TTS media hash mismatch"};
         }
+        // Digital silence is no speech: the empty result sends the line to its text-only caption.
+        // The caller records media_failed and notifies once, as for every other failed preparation.
+        if (audio::wave_is_silent(bytes)) return {};
         if (stopped(cancellation) ||
             tasks::TaskLanes::Clock::now() >= deadline) return {};
         trace_->record(diagnostics::ConversationStage::media_prepared,

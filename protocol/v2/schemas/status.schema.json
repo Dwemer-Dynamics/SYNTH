@@ -76,6 +76,12 @@
     "observed_dialogue": {
       "type": "boolean"
     },
+    "trade_confirmation": {
+      "type": "boolean"
+    },
+    "actor_condition": {
+      "type": "boolean"
+    },
     "narrator_object": {
       "type": "boolean"
     },

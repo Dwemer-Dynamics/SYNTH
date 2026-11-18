@@ -95,6 +95,7 @@ public:
                       .locale = "en-US",
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
                           configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available,
+                          trade::prompt().installed(),
                           reading_events_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
@@ -1160,6 +1161,8 @@ private:
         }
         // A Follow/Sit/Stop order applies only for the exact reply line it rode on, once, in a live turn.
         if (is_order_action(action->name) && !order_replies_.claim(line, *action, cancellation)) return;
+        // A sale offer likewise applies only for the exact reply line it rode on, once: no box for a line never accepted.
+        if (action->name == "barter" && !order_replies_.claim(line, *action, cancellation)) return;
         conversation_holds_.suspend(cancellation); // Release participants before any requested action is dispatched.
         actions_.enqueue(*action, snapshot, response_binding(line, cancellation));
     }

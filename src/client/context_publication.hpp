@@ -10,6 +10,7 @@
 #include "client/save_checkpoint.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/synth_client.hpp"
+#include "trade/confirmed_trade.hpp"
 #include "client/order_action.hpp"
 #include "client/wait_action.hpp"
 #include "config/config.hpp"
@@ -125,6 +126,7 @@ public:
                                                              bool companion_comments = false,
                                                              bool observed_dialogue_available = false,
                                                              bool orders_available = false,
+                                                             bool trade_confirmation_available = false,
                                                              bool reading_events_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
@@ -133,7 +135,7 @@ public:
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
             "profiles.dynamic.refresh", "diary.manual.npc", "diary.manual.narrator", "diary.manual.player", "diary.batch.status",
-            "context.actor_state", "context.actor_stats", "context.actor_factions", "context.combat_targets", "context.world",
+            "context.actor_state", "context.actor_stats", "context.actor_condition", "context.actor_factions", "context.combat_targets", "context.world",
             "context.loaded_plugins", "context.quests",
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
@@ -165,6 +167,11 @@ public:
             result.push_back("action.player_item_inventory");
             result.push_back("action.open_inventory");
             result.push_back("action.gift_menu_inventory");
+            // Confirmed NPC sales need a confirmation presenter; without one the capability is never offered.
+            if (trade_confirmation_available) {
+                result.push_back("action.barter");
+                result.push_back("action.trade_confirmation");
+            }
             result.push_back("context.inventory_512");
             result.push_back("context.player_events");
             result.push_back("dialogue.player_reactions");
@@ -487,6 +494,7 @@ public:
                     actor.combat_target().actor ? actor.combat_target().actor->race : std::string{}},
             };
             if (client_.actor_stats_ready()) state.actor_stats=actor.actor_stats();
+            if (client_.actor_condition_ready() && actor.actor_condition()) state.actor_condition=actor.actor_condition();
             if (actor.conversation_held()) state.conversation_held=true;
             if (snapshot.variant()==core::RuntimeVariant::flat && actor.wait_held().has_value()) state.wait_held=actor.wait_held();
             append_actor_combat_observations(state, actor, client_.combat_contacts_ready(), client_.enemy_awareness_ready());

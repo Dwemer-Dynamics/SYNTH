@@ -95,6 +95,7 @@ public:
     bool player_item_support{};
     bool gift_menu_support{};
     bool actor_stats_support{};
+    bool actor_condition_support{};
     bool rechat_scene_support{};
     bool combat_targets_support{};
     std::optional<synth::json::Value> combat_contacts_ack;
@@ -145,6 +146,7 @@ public:
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
             if (actor_stats_support) payload.emplace_back("actor_stats",true);
+            if (actor_condition_support) payload.emplace_back("actor_condition",true);
             if(social_support)payload.emplace_back("social_tasks",true);
             if(location_ancestry_support)payload.emplace_back("location_ancestry",true);
             if (rechat_scene_support) payload.emplace_back("rechat_scene",true);
@@ -237,19 +239,22 @@ public:
 int main() {
     // Full flat clients receive a specialized accepted code, not the minimal loopback's init_accepted.
     for (int mode=0;mode<4;++mode) {
-        BindingEchoTransport wire;wire.gift_menu_support=true;wire.actor_stats_support=mode!=1;
+        BindingEchoTransport wire;wire.gift_menu_support=true;wire.actor_stats_support=mode!=1;wire.actor_condition_support=mode!=1;
         synth::client::SessionOptions options{.runtime_session_id="stats:full-flat",.runtime_variant="flat",
             .client_version="test",.runtime_version="1.11.240",
             .capabilities={"context.actor_stats","action.gift_menu_inventory","action.open_inventory",
-                "action.inventory_observation","dialogue.turn_ownership"},.protocol_version=2};
+                "action.inventory_observation","dialogue.turn_ownership","context.actor_condition"},.protocol_version=2};
         if (mode==2) options.capabilities.erase(options.capabilities.begin());
         if (mode==3) wire.fault=BindingEchoTransport::Fault::truncated;
         synth::client::SynthClient candidate{wire,options};
         (void)candidate.initialize(1,false);
         CHECK(candidate.actor_stats_ready()==(mode==0));
-        wire.actor_stats_support=false;wire.fault=BindingEchoTransport::Fault::none;
+        // The condition acknowledgement is independent: accepted, listed and not faulted.
+        CHECK(candidate.actor_condition_ready()==(mode==0 || mode==2));
+        wire.actor_stats_support=false;wire.actor_condition_support=false;wire.fault=BindingEchoTransport::Fault::none;
         (void)candidate.initialize(2,false);
         CHECK(!candidate.actor_stats_ready());
+        CHECK(!candidate.actor_condition_ready());
     }
     try {
         using namespace synth;
