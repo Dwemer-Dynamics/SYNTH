@@ -1,5 +1,16 @@
 # SYNTH protocol v2
 
+## Location catalog export (2026-11-16)
+
+`location_catalog` is a v2 event, `context_sequence` 0, granted by the capability `world.location_catalog`; the init status
+carries `location_catalog: true` only when the init listed it and the server stores the catalog. Payload `mode` is `batch` (1 to 50 locations with `export_id`,
+`sequence`, `final`) or `upsert` (exactly one location, first entry in a game session). A location is `ref`, `name`,
+`keywords`, `markers` and optionally `editor_id`, `parent_ref`, `cleared`, `discovered`; every form is plugin-local
+(`origin_plugin`, `local_form_id` as six uppercase hex digits, never a runtime form). An exterior marker carries its
+`worldspace`; an interior marker has none. The server answers with status `location_catalog_accepted` and a JSON `detail`
+of counts and per-record refusals, or refuses the whole request on a shape violation. Until storage exists nothing is stored
+(`stored: false`). Design: `docs/LOCATION-CATALOG.md`.
+
 ## Explicit Everyone audience (2026-11-13)
 
 `dialogue.everyone` is v2-only and is granted only with `control.menu`. Only an

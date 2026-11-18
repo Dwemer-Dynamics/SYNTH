@@ -127,7 +127,8 @@ public:
                                                              bool observed_dialogue_available = false,
                                                              bool orders_available = false,
                                                              bool trade_confirmation_available = false,
-                                                             bool reading_events_available = false) {
+                                                             bool reading_events_available = false,
+                                                             bool location_catalog_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts", "dialogue.conversation",
@@ -181,6 +182,8 @@ public:
             if (observed_dialogue_available) result.push_back("context.observed_dialogue");
             // Reading capture is an audited flat adapter; VR never advertises it.
             if (reading_events_available) result.push_back("context.reading_events");
+            // Only a flat adapter that can read the BGSLocation set offers the catalog export; VR never does yet.
+            if (location_catalog_available) result.push_back("world.location_catalog");
             result.push_back("context.quest_tracking");
             result.push_back("dialogue.quest_reactions");
         }

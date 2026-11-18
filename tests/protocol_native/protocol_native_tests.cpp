@@ -1,6 +1,7 @@
 #include "protocol_native/v1_codec.hpp"
 #include "client/wait_action.hpp"
 #include "client/speech_receipts.hpp"
+#include "client/location_export.hpp"
 #include "tasks/task_lanes.hpp"
 #include <fstream>
 #include <iostream>
@@ -35,6 +36,97 @@ void actor_stats_tests() {
     values[0]=core::ActorStatValue{0,std::numeric_limits<double>::infinity()};refused=false;
     try { (void)actor.with_actor_stats(values); } catch (const std::invalid_argument&) { refused=true; }
     if (!refused) throw std::runtime_error{"non-finite stat accepted"};
+}
+
+// The location catalog request: wire shape equal to the shared fixture's, bounds enforced before the server sees a record,
+// and the export state machine's batching, pacing, answer counting and first-entry rules, all without an engine.
+void location_catalog_tests(const std::string& root) {
+    using namespace synth;
+    using core::PluginForm;
+    const auto form=[](std::uint32_t id){return PluginForm{"Fallout4.esm",id};};
+    const auto location=[&](std::uint32_t id){
+        core::CatalogLocation value;value.ref=form(id);value.name="Place";value.markers.push_back(
+            core::CatalogMarker{core::CatalogMarkerType::location_center,form(0x0A1B10),form(0x1E5D),true,std::nullopt,{0.0,128.0,64.0},false});
+        return value;
+    };
+    // Same data as protocol/v2/fixtures/valid/location-catalog-upsert.json (Dugout Inn), compared field by field.
+    core::CatalogLocation dugout=location(0x395C);
+    dugout.name="Dugout Inn";dugout.parent=form(0x2CEF);dugout.keywords={"LocTypeInn"};
+    protocol_native::EventContext context{"session-flat-001","request-locations-002","turn-locations-001","flat","0.1.0","1.10.163",7,
+        {"world.location_catalog"},2,0};
+    protocol_native::LocationCatalogRequest upsert{protocol_native::LocationCatalogMode::upsert,"playthrough-001","",0,false,{dugout}};
+    const auto encoded=json::parse(protocol_native::encode_location_catalog(context,upsert));
+    std::ifstream in{root+"/protocol/v2/fixtures/valid/location-catalog-upsert.json"};
+    std::stringstream fixture_text;fixture_text<<in.rdbuf();
+    const auto fixture=json::parse(fixture_text.str());
+    const auto& have=protocol_native::required(protocol_native::required(encoded,"payload"),"locations").as_array().at(0);
+    const auto& want=protocol_native::required(protocol_native::required(fixture,"payload"),"locations").as_array().at(0);
+    for(const auto key:{"ref","name","parent_ref","keywords","markers"})
+        if(json::write(protocol_native::required(have,key))!=json::write(protocol_native::required(want,key)))
+            throw std::runtime_error{std::string{"location catalog wire differs from fixture: "}+key};
+    if(protocol_native::text(encoded,"type")!="location_catalog" || protocol_native::integer(encoded,"context_sequence")!=0 ||
+       protocol_native::required(protocol_native::required(encoded,"payload"),"mode").as_string()!="upsert" ||
+       protocol_native::required(encoded,"payload").find("export_id"))
+        throw std::runtime_error{"location catalog upsert envelope"};
+    const auto refused=[&](auto change){
+        auto bad=upsert;change(bad);bool thrown=false;
+        try{(void)protocol_native::encode_location_catalog(context,bad);}catch(const std::invalid_argument&){thrown=true;}
+        return thrown;
+    };
+    if(!refused([](auto& r){r.locations[0].name.clear();}) || !refused([](auto& r){r.locations[0].markers[0].worldspace=core::CatalogWorldspace{};}) ||
+       !refused([](auto& r){r.locations[0].ref.local_form_id=0xFF000123U;}) || !refused([](auto& r){r.locations[0].markers[0].position.x=1e12;}) ||
+       !refused([](auto& r){r.export_id="export-001";}) || !refused([](auto& r){r.locations.push_back(r.locations[0]);}) ||
+       !refused([](auto& r){r.locations[0].keywords={"A","A"};}))
+        throw std::runtime_error{"location catalog bound accepted"};
+    auto unnegotiated=context;unnegotiated.capabilities.clear();bool thrown=false;
+    try{(void)protocol_native::encode_location_catalog(unnegotiated,upsert);}catch(const std::invalid_argument&){thrown=true;}
+    if(!thrown) throw std::runtime_error{"location catalog sent without the capability"};
+    auto bound=context;bound.context_sequence=3;thrown=false;
+    try{(void)protocol_native::encode_location_catalog(bound,upsert);}catch(const std::invalid_argument&){thrown=true;}
+    if(!thrown) throw std::runtime_error{"location catalog bound to a context"};
+
+    // Export: 120 readable, 3 unreadable and one record that breaks a bound -> batches of 50, final on the last.
+    client::LocationExport run{"playthrough-001"};
+    std::vector<PluginForm> ids;for(std::uint32_t id=1;id<=124;++id) ids.push_back(form(id));
+    const client::LocationExport::Reader reader=[&](const PluginForm& f)->std::optional<core::CatalogLocation>{
+        if(f.local_form_id%40==0) return std::nullopt;                     // 40, 80, 120: unreadable
+        auto value=location(f.local_form_id);if(f.local_form_id==7) value.name.clear();return value; // 7: unnamed, dropped
+    };
+    if(!run.begin("export-001",ids) || run.begin("export-002",ids)) throw std::runtime_error{"export start rules"};
+    std::size_t batches=0,carried=0;bool final_seen=false;
+    while(auto batch=run.next_batch(reader)){
+        if(run.next_batch(reader)) throw std::runtime_error{"a batch was built before the previous answer"};
+        if(batch->sequence!=batches || batch->locations.size()>core::maximum_catalog_batch || final_seen) throw std::runtime_error{"batch order"};
+        final_seen=batch->final;carried+=batch->locations.size();++batches;
+        const bool bad_answer=batches==2;                                  // the second batch fails at the server
+        const std::size_t server_refused=batches==1?1U:0U;
+        run.answered(client::LocationCatalogAnswer{!bad_answer,batch->locations.size(),batch->locations.size()-server_refused,server_refused,!bad_answer});
+    }
+    const auto& progress=run.progress();
+    if(progress.running || !final_seen || batches!=3 || carried!=120 || progress.total!=124 || progress.sent!=124)
+        throw std::runtime_error{"export batching"};
+    if(progress.accepted!=69 || progress.refused!=55) throw std::runtime_error{"export counts"};
+    // Stop ends the run after the batch on its way.
+    client::LocationExport stopping{"playthrough-001"};
+    if(!stopping.begin("export-003",ids)) throw std::runtime_error{"stopping export start"};
+    auto first=stopping.next_batch(reader);stopping.stop();stopping.answered({true,first->locations.size(),first->locations.size(),0,true});
+    if(stopping.next_batch(reader) || stopping.progress().running || stopping.progress().message!="Stopped") throw std::runtime_error{"export stop"};
+    // An accepted-but-not-stored answer counts nothing as accepted, ends the run and leaves it re-runnable.
+    client::LocationExport unstored{"playthrough-001"};
+    if(!unstored.begin("export-004",ids)) throw std::runtime_error{"unstored export start"};
+    auto held=unstored.next_batch(reader);unstored.answered({true,held->locations.size(),held->locations.size(),0,false});
+    if(unstored.progress().running || !unstored.progress().server_not_storing || unstored.progress().accepted!=0 ||
+       unstored.progress().message!="Server not storing locations yet" || unstored.next_batch(reader) || !unstored.begin("export-005",ids))
+        throw std::runtime_error{"export against a server that does not store"};
+    // First entry: once per session, never an unreadable or invalid location.
+    client::LocationExport entry{"playthrough-001"};
+    const auto once=entry.upsert_on_first_entry(form(0x395C),reader);
+    if(!once || once->mode!=protocol_native::LocationCatalogMode::upsert || once->locations.size()!=1 || entry.upsert_on_first_entry(form(0x395C),reader) ||
+       entry.upsert_on_first_entry(form(40),reader) || entry.upsert_on_first_entry(form(7),reader))
+        throw std::runtime_error{"first-entry upsert"};
+    // A malformed, truncated or foreign acknowledgement is a failed batch.
+    client::RequestOutcome outcome;outcome.status=client::RequestStatus::complete;
+    if(client::location_catalog_answer(outcome).accepted) throw std::runtime_error{"empty outcome accepted"};
 }
 
 // Condition wire shape, bounds and the capability gate, without an engine.
@@ -665,6 +757,7 @@ int main(int argc,char** argv){
   if(argc==2) observed_dialogue_tests(argv[1]);
   if(argc==2) conversation_tests(argv[1]);
   if(argc==2) reading_event_tests(argv[1]);
+  if(argc==2) location_catalog_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};

@@ -6,6 +6,7 @@
 #include "core/quest_event_mailbox.hpp"
 #include "core/player_event_sampler.hpp"
 #include "core/event_witness.hpp"
+#include "core/location_catalog.hpp"
 #include "core/reading_event.hpp"
 #include "client/actor_event_binding.hpp"
 #include "runtime/social_task_codec.hpp"
@@ -197,7 +198,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; bool conversation{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; bool conversation{}; bool location_catalog{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -534,7 +535,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "conversation", "narrator_object"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "conversation", "narrator_object", "location_catalog"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -569,6 +570,8 @@ inline Line decode_line(std::string_view wire) {
             std::get<Status>(line.payload).trade_confirmation = required(payload, "trade_confirmation").as_bool();
         if (payload.find("reading_events"))
             std::get<Status>(line.payload).reading_events = required(payload, "reading_events").as_bool();
+        if (payload.find("location_catalog"))
+            std::get<Status>(line.payload).location_catalog = required(payload, "location_catalog").as_bool();
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -1057,6 +1060,81 @@ inline std::string encode_speech_receipt(const EventContext& context, const Spee
     return encode_event(context, "speech_receipt", json::Value{object({
         {"dialogue_request_id", receipt.dialogue_request_id}, {"line_id", receipt.line_id},
         {"character", identity_value(receipt.character)}, {"outcome", outcome}})});
+}
+// Location catalog export (protocol/v2/schemas/location-catalog.schema.json). Unbound to any context: it describes
+// the game, so the event carries context_sequence 0. A batch is the export; an upsert is one first-entry location.
+enum class LocationCatalogMode { batch, upsert };
+struct LocationCatalogRequest {
+    LocationCatalogMode mode{LocationCatalogMode::batch};
+    std::string playthrough_id;
+    // Batch only.
+    std::string export_id;
+    std::uint64_t sequence{};
+    bool final{};
+    std::vector<core::CatalogLocation> locations;
+};
+inline json::Value catalog_form_value(const core::PluginForm& form) {
+    char local[16];
+    std::snprintf(local, sizeof local, "0x%06X", static_cast<unsigned>(form.local_form_id));
+    return json::Value{object({{"origin_plugin", form.origin_plugin}, {"local_form_id", std::string{local}}})};
+}
+inline json::Value catalog_point_value(const core::CatalogPoint& point) {
+    return json::Value{object({{"x", point.x}, {"y", point.y}, {"z", point.z}})};
+}
+inline json::Value catalog_worldspace_value(const core::CatalogWorldspace& worldspace) {
+    auto result = object({{"ref", catalog_form_value(worldspace.ref)}});
+    if (!worldspace.editor_id.empty()) result.emplace_back("editor_id", worldspace.editor_id);
+    if (!worldspace.name.empty()) result.emplace_back("name", worldspace.name);
+    if (worldspace.parent) result.emplace_back("parent_ref", catalog_form_value(*worldspace.parent));
+    result.emplace_back("uses_parent_map", worldspace.uses_parent_map);
+    return json::Value{std::move(result)};
+}
+inline json::Value catalog_location_value(const core::CatalogLocation& location) {
+    json::Value::Array keywords;
+    for (const auto& keyword : location.keywords) keywords.emplace_back(keyword);
+    json::Value::Array markers;
+    for (const auto& marker : location.markers) {
+        auto value = object({{"type", core::catalog_marker_name(marker.type)}, {"ref", catalog_form_value(marker.ref)}});
+        if (marker.cell) value.emplace_back("cell_ref", catalog_form_value(*marker.cell));
+        value.emplace_back("interior", marker.interior);
+        if (marker.worldspace) value.emplace_back("worldspace", catalog_worldspace_value(*marker.worldspace));
+        value.emplace_back("position", catalog_point_value(marker.position));
+        value.emplace_back("disabled", marker.disabled);
+        markers.emplace_back(json::Value{std::move(value)});
+    }
+    auto result = object({{"ref", catalog_form_value(location.ref)}, {"name", location.name}});
+    if (!location.editor_id.empty()) result.emplace_back("editor_id", location.editor_id);
+    if (location.parent) result.emplace_back("parent_ref", catalog_form_value(*location.parent));
+    result.emplace_back("keywords", std::move(keywords));
+    if (location.cleared) result.emplace_back("cleared", *location.cleared);
+    if (location.discovered) result.emplace_back("discovered", *location.discovered);
+    result.emplace_back("markers", std::move(markers));
+    return json::Value{std::move(result)};
+}
+// A record that breaks a bound throws; the export drops such a record before it reaches here.
+inline std::string encode_location_catalog(const EventContext& context, const LocationCatalogRequest& request) {
+    const bool batch = request.mode == LocationCatalogMode::batch;
+    if (context.protocol_version != 2 || context.context_sequence != 0 ||
+        std::ranges::find(context.capabilities, "world.location_catalog") == context.capabilities.end())
+        throw std::invalid_argument{"location catalog requires the negotiated v2 capability"};
+    if (!runtime::social_id(request.playthrough_id) || request.locations.empty() ||
+        request.locations.size() > (batch ? core::maximum_catalog_batch : std::size_t{1}) ||
+        (batch ? (!runtime::social_id(request.export_id) || request.sequence > 9'007'199'254'740'991ULL)
+               : (!request.export_id.empty() || request.sequence != 0 || request.final)))
+        throw std::invalid_argument{"location catalog request is not bounded"};
+    json::Value::Array locations;
+    for (const auto& location : request.locations) {
+        if (!location.valid()) throw std::invalid_argument{"location catalog record is invalid"};
+        locations.emplace_back(catalog_location_value(location));
+    }
+    auto payload = object({{"mode", batch ? "batch" : "upsert"}, {"playthrough_id", request.playthrough_id}});
+    if (batch) {
+        payload.emplace_back("export_id", request.export_id);
+        payload.emplace_back("sequence", request.sequence);
+        payload.emplace_back("final", request.final);
+    }
+    payload.emplace_back("locations", std::move(locations));
+    return encode_event(context, "location_catalog", json::Value{std::move(payload)});
 }
 // Private narrator requests (protocol/v2/schemas/narrator.schema.json). All three are bound to an acknowledged
 // context and require the negotiated capability set; a receipt names its exact reply and checkpoint.
