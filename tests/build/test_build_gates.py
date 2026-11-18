@@ -861,7 +861,8 @@ class PowerShellBuildScriptTests(unittest.TestCase):
         flat = publication.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr) {", 1)[0]
         self.assertIn("if (trade_confirmation_available) {", flat)
         session = read("src/client/plugin_session.hpp")
-        self.assertIn("trade::prompt().installed()),", session)
+        # The presenter state is the trade_confirmation_available argument; tolerate argument-list reflow.
+        self.assertRegex(session, r"orders_available,\s*trade::prompt\(\)\.installed\(\)\s*,")
         self.assertIn("observed_dialogue_available, orders_available,", session)
         self.assertIn('action->name == "barter" && !order_replies_.claim(line, *action, cancellation)', session)
         self.assertIn('result.push_back("action.trade_confirmation");', flat)
