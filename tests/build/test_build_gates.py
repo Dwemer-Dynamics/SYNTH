@@ -664,6 +664,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
             "PipVision",
             "OpenMicMute",
             "WriteDiary",
+            "CancelConversation",
         ):
             with self.subTest(hotkey=key):
                 self.assertIn(f'"{key}"', catalog)
@@ -687,7 +688,7 @@ class MenuFrameworkSurfaceTests(unittest.TestCase):
         # Unbound is the shipped default for every hotkey.
         hotkeys = shipped.split("[Hotkeys]", 1)[1].split("[AutoActivate]", 1)[0]
         bindings = [line for line in hotkeys.splitlines() if "=" in line]
-        self.assertEqual(len(bindings), 8)
+        self.assertEqual(len(bindings), 9)
         for line in bindings:
             with self.subTest(line=line):
                 self.assertTrue(line.strip().endswith("=0"))
@@ -854,6 +855,20 @@ class PowerShellBuildScriptTests(unittest.TestCase):
             binding = "hotkeys.hard_halt" if lane == "flat" else "configuration.hotkeys.hard_halt"
             manual_halt = entry.split(f"hotkey_pressed({binding})", 1)[1].split("return;", 1)[0]
             self.assertIn("session->hard_halt();", manual_halt)
+
+    def test_confirmed_trade_is_advertised_only_with_a_presenter_and_never_on_vr(self) -> None:
+        publication = read("src/client/context_publication.hpp")
+        flat = publication.split("if (variant == core::RuntimeVariant::flat) {", 1)[1].split("if (variant == core::RuntimeVariant::vr) {", 1)[0]
+        self.assertIn("if (trade_confirmation_available) {", flat)
+        session = read("src/client/plugin_session.hpp")
+        self.assertIn("trade::prompt().installed()),", session)
+        self.assertIn("observed_dialogue_available, orders_available,", session)
+        self.assertIn('action->name == "barter" && !order_replies_.claim(line, *action, cancellation)', session)
+        self.assertIn('result.push_back("action.trade_confirmation");', flat)
+        self.assertEqual(publication.count('"action.barter"'), 1)
+        framework = read("src/ui/menu_framework_ui.hpp")
+        self.assertIn("trade::prompt().set_installed(true);", framework)
+        self.assertIn("trade_prompt_tick();", framework)
 
     def test_microphone_turn_publishes_owned_context_before_dialogue(self) -> None:
         session = read("src/client/plugin_session.hpp")

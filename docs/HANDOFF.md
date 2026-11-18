@@ -1,5 +1,13 @@
 # SYNTH developer handoff
 
+## Confirmed NPC trade candidate
+
+An NPC can offer to sell the player one stack of one item for caps; the player answers in a Menu Framework Yes/Cancel box and
+only Yes moves the item and the caps, with the existing paired receipt. Flat only; the capability is advertised only when
+the Menu Framework is installed. Offer, stale, decline and a half-done sale are covered by native tests with a fake runtime;
+the Menu Framework window and the native transfers are not proven in the game. See [CONFIRMED-TRADE.md](CONFIRMED-TRADE.md)
+and [ALPHA-ACCEPTANCE.md](ALPHA-ACCEPTANCE.md#confirmed-npc-trade). Paired with the server `action.trade_confirmation` contract.
+
 ## Auto Chat candidate
 
 Explicit `AUTOCHAT` mode on the existing Control mode list: the server rewrites typed or voice
@@ -53,6 +61,13 @@ wait script and compiled nothing new. A loopback prompt check with a fake provid
 reaches only the granted witness. A source review found no wrong-grant defect; audio start and
 queue pressure remain in-game checks. There is no model-answer review, game run or migration. See
 [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md).
+
+## Player reading candidate
+
+Flat-only `context.reading_events` carries the bounded title and text of a book, magazine,
+terminal entry or terminal-launched holotape the player just read, one per context, through the existing
+observation timeline on the server. The off-game contract, codec and queue are tested; the adapter is
+not checked in game, and Pip-Boy inventory reads are not captured. See [READING-EVENTS.md](READING-EVENTS.md).
 
 ## NPC biography and SPECIAL candidate
 
@@ -209,7 +224,9 @@ or the save happened does not decide it.
 cover. A speech receipt raises it only on an exact `speech_receipt_accepted` for
 `audio_completed` stored as `spoken`, or explicit `text_presented` stored as `presented`.
 Ordinary enrollment requires pending or ready speech. Known text-only lines keep their existing
-history path. A caption reading timer produces no presentation receipt. The session must also be uncancelled and
+history path. A native `/talk` text-only caption (no TTS, failed or silent TTS) that completes its reading window
+uncancelled sends `text_presented`; an ordinary line's caption timer produces no presentation receipt, and a queued,
+replaced or cancelled caption sends none. The session must also be uncancelled and
 not terminal, in the same generation, with its writer current. Other sources raise the frontier
 too. On flat, an accepted dialogue line raises it when it arrives, before presentation. That is not
 a heard signal. With delivery receipts negotiated, every dispatched typed or voice input raises it

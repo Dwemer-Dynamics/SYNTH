@@ -64,6 +64,61 @@ permanent value is never reported as base. The server keeps it only in the
 bound session context snapshot and renders it as the actor's skills; it is never
 written to the NPC profile.
 
+## Actor condition (`context.actor_condition`)
+
+`context.actor_condition` is optional for flat and VR and v2-only. A v2 init that lists it
+is acknowledged with status `actor_condition: true`; a client sends
+`actor_states[].actor_condition` only after that acknowledgement, so an older server never
+receives the key and an older client simply never sends it. It is captured on the game
+thread for exactly the deep-captured actors (the player and the selected NPC), never by name.
+
+`observation: "unavailable"` carries nothing else. `observation: "observed"` carries all of:
+`radiation_percent` (0..100 or null when unreadable; the radiation actor value as a ratio of
+the permanent health value, not verified against the HUD), `addictions` (at most 8) and
+`effects` (at most 8, `kind` `chem` or `effect`), each entry an exact form id, origin plugin
+and a display name of 1..64 characters, `crippled_limbs` (unique, from `head`, `torso`,
+`left_arm`, `right_arm`, `left_leg`, `right_leg`) and `truncated`, true when a cap, an
+unreadable entry or a lost record means the lists may be incomplete. Empty lists with
+`truncated: false` mean the read found none. Low health and power armor reuse the existing
+`health_percent` and `in_power_armor` fields; they are not repeated. The server keeps the
+value only in the bound session context snapshot and projects one bounded condition line.
+It is never written to an NPC profile or history.
+
+## Confirmed NPC trade (2026-11-16)
+
+An NPC may offer to sell the player one stack of one item it carries for caps. The offer is a
+`barter` action (`action.barter`); the player answers in a Yes/Cancel box; only Yes moves anything.
+It is flat only. `action.trade_confirmation` requires `action.barter`, `action.player_caps_inventory`
+(and so the caps/paired-transfer contracts), `action.give_item_to`, `action.transfer_inventory`,
+`action.inventory_observation` and `dialogue.turn_ownership`. Only an init whose status carries
+`trade_confirmation: true` grants it; older acknowledgements and VR never do.
+
+**Offer.** An `action` line whose `payload.action` is `barter-action.schema.json`. It carries `reply_line_id`, the NPC's
+own first dialogue line of the same response, and at most one offer is issued per response; the client shows no box unless it accepted
+that line from the same turn, and a line carries one offer. The NPC is
+`actor`, the captured Sole Survivor (`0x00000014`) is `target`, `arguments` are `item` (display name),
+`item_form_id`, `item_origin_plugin`, `count` (1..99; the server offers 1) and `price` (whole caps,
+1..100000), `deadline_ms` is 60000. The client's box stays up 45 s, and the server accepts a receipt for 5 minutes past the deadline
+(a grace for speech queuing and transport), so a sale the client completed inside its window is never refused. The server issues it only for a typed or spoken turn (never rechat,
+narrator or action-result continuations), only when the NPC's complete observed inventory holds exactly
+one unequipped stack of that name (never caps), the price is at most ten times the stack's base value
+(never below 25 caps) and the player's observed caps cover it. The offer is an ordinary action intent;
+no new storage exists.
+
+**Client.** The client never moves anything on receipt of the offer. It shows a confirmation box, and
+discards the offer without a box if the generation, scene or actors no longer match. On Yes it
+re-reads both inventories and caps and only proceeds when they still equal what the box described;
+otherwise it reports a stale result. Cancel, a closed box and a timeout move nothing.
+
+**Receipt.** Every outcome is one `synth.action.transfer-result.v2` (`inventory` = NPC, `recipient_inventory`
+= player, both after the answer). `status` and `detail` are exactly one of: `succeeded` / `trade_completed`;
+`cancelled` / `player_declined`; `cancelled` / `stale_cell_changed`, `stale_inventory_changed`,
+`stale_caps_changed` or `stale_actor_unavailable`; `timed_out` / `expired`. The server accepts
+`succeeded` only before the offer's deadline and, from the admitted context, verifies the item
+and caps each moved exactly once (NPC item `-count`, caps `+price`; player item `+count`, caps `-price`).
+An unverifiable success is reported to the NPC as unverified, never as a sale. The NPC is told the
+outcome in a follow-up; client text is never copied into it.
+
 ## Native typed turn and speech receipts (2026-11-09, Stage 1)
 
 `dialogue.native_turn` requires v2 and `dialogue.turn_ownership`. Only the init
@@ -84,8 +139,9 @@ modes), `target_missing`, `target_not_placed_reference` (dynamic `0xFF`),
 `npc_not_registered` (no `actor_identity`-bound profile),
 `llm_connector_unsupported` (non-`openaijson`, reasoning or quickstart-managed),
 `load_order_identity_ambiguous` (a second identity row for the same plugin-local
-reference) or `tts_profile_unsupported` (the profile's own TTS connector is absent
-or not portable; there is no server-wide or other-provider fallback). Once
+reference). Voice is optional: a profile whose own TTS connector is absent or not portable is
+still admitted, and a line whose speech cannot be queued is still delivered (see "Voice is
+optional" below). There is no server-wide or other-provider fallback. Once
 admitted, failure, empty, oversized (more than 12 lines, a line over 1000
 characters, or 16 KiB total) or incomplete provider output ends the turn with a
 terminal error; nothing is truncated. The route emits no actions; audio/STT,
@@ -106,8 +162,26 @@ the stored state; a different outcome conflicts. Wrong request, line, character,
 turn, generation, context or a retired session is rejected. Only spoken and
 presented lines enter conversation history; generated, interrupted and failed
 lines are never heard. The client sends `audio_completed` only after native audio
-finishes. The reading timer is not renderer evidence, so the client never sends
-`text_presented` in this slice. Receipts are not retried.
+finishes. Receipts are not retried.
+
+### Voice is optional
+
+A `/talk` turn does not need a working voice. When the speaking profile has no portable TTS
+connector, or one line's speech cannot be queued, the server emits that line's `dialogue`
+without a `speech` block (the schema has always allowed this: text only) and the turn
+completes normally. The same fallback applies to a line whose speech is queued but later
+reports `failed`, never becomes ready before its deadline, or decodes to digital silence
+(every PCM sample at zero level; the server refuses to publish such audio and the client
+refuses to play it). No new field, capability or status code is involved. Cancellation still
+ends the turn as before.
+
+The client shows the caption of a text-only line for its reading window (about 1.5 s plus
+55 ms per character, 3 to 30 s) and, once that window completes uncancelled, sends
+`text_presented`. A caption that was replaced, cancelled, discarded or never reached its
+reading window sends nothing, so the line stays unheard. The server stores `text_presented`
+as `presented`, which inserts the same heard history row as `audio_completed` stores as
+`spoken`. The reading window is the client's evidence that the line was shown, not an
+acknowledgement from the renderer.
 
 ## Ordinary NPC delivery receipts
 
@@ -137,6 +211,16 @@ exact line has an accepted heard receipt. The client also waits for that receipt
 An accepted receipt survives cancellation. Cancellation can revoke a pending
 line before its first receipt commits. The marker is rejected without a bound identified speaker or
 together with `native_turn`. Older clients and servers see no change.
+
+## Conversation continuity and line lifecycle (`dialogue.conversation`)
+
+`dialogue.conversation` is optional, requires v2 and `dialogue.turn_ownership`, and is independent of `dialogue.native_turn` and `dialogue.delivery_receipts`. Only the init whose status carries `conversation: true` grants it. Without that acknowledgement the client sends none of the fields below, and a server that does not know the capability ignores it.
+
+`conversation_id` is a lowercase UUID (version 1-8, variant 8-b) that the client creates when a conversation starts. The server never creates or changes it. It is an optional payload field of `input_text`, `input_audio` and every `trigger` kind (rechat, ambient, NPC-NPC and the reaction kinds; the shipped client leaves it off `external_tts`, which its own endpoint voices), and it is stored with the admitted event bytes. Every response to such a request echoes it unchanged on its `response_start` payload, on both dialogue lanes, and only then; the client refuses a response whose echo differs from what it sent. Receipts, contexts, cancels and every other event never carry it. A conversation groups several rechat chains; it does not replace them. The server prefers same-conversation history rows when history fills its row limit (the prompt order stays chronological) and scopes cancellation by it. The client keeps it in memory only. A new generation (load or reconnect), a player cell change, an explicit cancel, a halt or a long idle gap end the conversation, and the next player request starts a new one.
+
+Every delivered NPC line ends as spoken (`audio_completed` or `text_presented`), interrupted, skipped or failed. `skipped` is a new `speech_receipt` outcome for a line the player never heard because it was discarded before it started; it requires the capability, is stored unheard (like `failed`) and the stored receipt keeps the distinct outcome. `interrupted` keeps its meaning for a line cut off after it started; with the capability the line stays in context marked ` [cut off]`, and it is still never heard: it releases no rechat child and feeds no memory or relationship learning. Without the capability an `interrupted` line is never heard, as before. A client sends `interrupted` instead of `skipped` to a server that did not acknowledge the capability.
+
+The `cancel` event has an extended form, accepted only with the capability. `{"scope":"conversation","reason":R,"conversation_id":ID}` revokes every in-flight or completed-undelivered request of that conversation in the session generation, exactly like a single-request cancel (completed player input stays as historical learning, its delivery is revoked); `{"scope":"request","reason":R,"cancel_request_id":ID}` is the single-request form with a reason. `R` is `player_cancel`, `dialogue_closed`, `conversation_reset` or `superseded`, and is recorded in the stored cancel event. Nothing a revoked request produces afterwards is delivered, enrolled or remembered. A receipt for a line of a revoked request is refused (`receipt_owner_mismatch`, HTTP 409) and the client never retries a receipt, so a line cut off by an explicit conversation cancel is deliberately not kept in context; only a line interrupted without a cancel is kept, marked ` [cut off]`. The bare `{"cancel_request_id":ID}` form and `halt` are unchanged.
 
 ## Player caps payment contract foundation (2026-09-08)
 

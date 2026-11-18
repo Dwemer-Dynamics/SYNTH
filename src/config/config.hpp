@@ -26,6 +26,7 @@ struct ServerConfig {
     std::uint32_t connect_timeout_ms{2'000};
     std::uint32_t request_timeout_ms{30'000};
     bool allow_remote{false};
+    bool connection_notice{true}; // Tell the player when the server stops answering and when it returns.
 };
 
 struct RuntimeConfig {
@@ -57,6 +58,8 @@ struct HotkeysConfig {
     std::uint32_t pip_vision{};
     std::uint32_t open_mic_mute{};
     std::uint32_t write_diary{};
+    // Explicit player cancel of the live conversation (dialogue.conversation); unbound by default.
+    std::uint32_t cancel_conversation{};
 };
 
 struct ActivationConfig {
@@ -309,6 +312,8 @@ inline void apply(Config& config,
         config.server.request_timeout_ms = parse_range(value, 1, 300'000, qualified);
     else if (section == "Server" && key == "AllowRemote")
         config.server.allow_remote = parse_bool(value, qualified);
+    else if (section == "Server" && key == "ConnectionNotice")
+        config.server.connection_notice = parse_bool(value, qualified);
     else if (section == "Runtime" && key == "Enabled")
         config.runtime.enabled = parse_bool(value, qualified);
     else if (section == "Runtime" && key == "LogLevel")
@@ -339,6 +344,8 @@ inline void apply(Config& config,
         config.hotkeys.open_mic_mute = parse_range(value, 0, 255, qualified);
     else if (section == "Hotkeys" && key == "WriteDiary")
         config.hotkeys.write_diary = parse_range(value, 0, 255, qualified);
+    else if (section == "Hotkeys" && key == "CancelConversation")
+        config.hotkeys.cancel_conversation = parse_range(value, 0, 255, qualified);
     else if (section == "AutoActivate" && key == "Enabled")
         config.activation.enabled = parse_bool(value, qualified);
     else if (section == "AutoActivate" && key == "AutoAddHostile")

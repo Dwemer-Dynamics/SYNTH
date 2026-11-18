@@ -40,6 +40,9 @@
     "delivery_receipts": {
       "type": "boolean"
     },
+    "conversation": {
+      "type": "boolean"
+    },
     "actor_stats": {
       "type": "boolean"
     },
@@ -79,7 +82,16 @@
     "observed_dialogue": {
       "type": "boolean"
     },
+    "trade_confirmation": {
+      "type": "boolean"
+    },
+    "actor_condition": {
+      "type": "boolean"
+    },
     "narrator_object": {
+      "type": "boolean"
+    },
+    "reading_events": {
       "type": "boolean"
     }
   }

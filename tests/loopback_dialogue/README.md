@@ -40,7 +40,7 @@ initializers, so that warning is disabled. Clang doesn't need the flag.
 
 The harness starts the driver as `loopback_dialogue_driver http://127.0.0.1:PORT`, which runs the
 default `dialogue` scenario (13 requests). An optional second argument selects the scenario:
-`dialogue` (same as omitting it), `companion`, `witness` or `autochat` (see below). At each
+`dialogue` (same as omitting it), `companion`, `witness`, `autochat` or `voice` (see below). At each
 `PHASE <name> <json>` line on stdout, the driver waits for `GO` on stdin. Any other reply, or
 stdin closing, aborts the run.
 
@@ -58,6 +58,15 @@ exact target form with the `Fallout4.esm` origin plugin and the run's playthroug
 The driver prints evidence on lines that start with `LOOPBACK `. It prints `DONE` and exits 0
 only if every client-side check passed. Otherwise it prints `FAILED <reason>` and exits 1. A bad
 argument prints usage and exits 2.
+
+## Voice scenario
+
+`voice` runs against a target whose profile has no TTS connector (voice is optional). Phases: `context`
+(the harness registers the NPC with no TTS connector and scripts the provider's answer) and `receipt`
+(the harness checks that the line was stored, that exactly one `presented` utterance and one heard history row
+exist, and that the receipt ran once). The driver checks that the reply line has no speech block, that a cancelled
+caption sends no receipt and that a fully shown caption sends one `text_presented` receipt the server accepts as
+`presented`. It uses the shared `speech_receipt_hook`; the Windows caption timer is not compiled here.
 
 ## Companion scenario (opt-in)
 
@@ -131,3 +140,7 @@ Limits of the Auto Chat scenario:
 - A rechat continuation is not covered. The server README explains why. The voice roots stand in
   for the microphone with fixed WAV bytes. No recording, playback or game audio is involved.
 - The resends are duplicate-delivery probes. Production never retries a request.
+
+## Conversation scenario
+
+`loopback_dialogue_driver URL conversation` drives `dialogue.conversation` on both dialogue lanes against a fixture companion (Piper, SYNTHETIC captured state): three turns (ordinary, `/talk`, ordinary) in one conversation whose id every response echoes; a heard, an interrupted and a skipped line reported through the shipped caption hooks and receipt exchange; the next prompt on each lane; a cell change that starts a new conversation (the driver calls `observe_cell` as `ContextPublication` does); a scoped cancel of a request held at the provider; and a client without the capability. The hotkey and `PluginSession::cancel_conversation` need Windows headers and are covered only by the flat build.

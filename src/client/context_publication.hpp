@@ -6,9 +6,11 @@
 #include "client/dialogue_requests.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
+#include "client/reading_event_delivery.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/social_task_delivery.hpp"
 #include "client/synth_client.hpp"
+#include "trade/confirmed_trade.hpp"
 #include "client/order_action.hpp"
 #include "client/wait_action.hpp"
 #include "config/config.hpp"
@@ -124,15 +126,17 @@ public:
                                                              bool companion_comments = false,
                                                              bool observed_dialogue_available = false,
                                                              bool orders_available = false,
+                                                             bool trade_confirmation_available = false,
+                                                             bool reading_events_available = false,
                                                              bool location_catalog_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
-            "dialogue.delivery_receipts",
+            "dialogue.delivery_receipts", "dialogue.conversation",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
             "profiles.dynamic.refresh", "diary.manual.npc", "diary.manual.narrator", "diary.manual.player", "diary.batch.status",
-            "context.actor_state", "context.actor_stats", "context.actor_factions", "context.combat_targets", "context.world",
+            "context.actor_state", "context.actor_stats", "context.actor_condition", "context.actor_factions", "context.combat_targets", "context.world",
             "context.loaded_plugins", "context.quests",
             "context.nearby_items", "context.points_of_interest", "agents.manage",
             "action.inspect_actor", "action.inspect_surroundings",
@@ -164,6 +168,11 @@ public:
             result.push_back("action.player_item_inventory");
             result.push_back("action.open_inventory");
             result.push_back("action.gift_menu_inventory");
+            // Confirmed NPC sales need a confirmation presenter; without one the capability is never offered.
+            if (trade_confirmation_available) {
+                result.push_back("action.barter");
+                result.push_back("action.trade_confirmation");
+            }
             result.push_back("context.inventory_512");
             result.push_back("context.player_events");
             result.push_back("dialogue.player_reactions");
@@ -171,6 +180,8 @@ public:
             if (companion_comments) result.push_back("dialogue.companion_combat_comments");
             // Only an audited flat sampler offers first-observed vanilla dialogue; VR never does.
             if (observed_dialogue_available) result.push_back("context.observed_dialogue");
+            // Reading capture is an audited flat adapter; VR never advertises it.
+            if (reading_events_available) result.push_back("context.reading_events");
             // Only a flat adapter that can read the BGSLocation set offers the catalog export; VR never does yet.
             if (location_catalog_available) result.push_back("world.location_catalog");
             result.push_back("context.quest_tracking");
@@ -370,8 +381,14 @@ public:
                                          const std::shared_ptr<const ActorEventDelivery::Prepared>& actor_events = {},
                                          const protocol_native::ControlSelection& controls = {},
                                          const runtime::SocialTaskDescriptor* social_pair = nullptr,
-                                         const DialogueObservationDelivery::Prepared& observed_dialogue = {}) {
+                                         const DialogueObservationDelivery::Prepared& observed_dialogue = {},
+                                         const ReadingEventDelivery::Prepared& reading = {}) {
         const auto& snapshot = *owned_snapshot;
+        // A reading owns its scene and shares the publication with nothing else. It is recorded for the one
+        // addressed actor only, so a context without that actor is refused here and never sent.
+        if (reading && (reading->scene != owned_snapshot || !target || quest_events || player_event || actor_events ||
+            social_pair || observed_dialogue))
+            throw std::invalid_argument{"reading context does not own this scene"};
         if (observed_dialogue && (observed_dialogue->scene != owned_snapshot || target || quest_events || player_event ||
             actor_events || social_pair))
             throw std::invalid_argument{"observed dialogue context does not own this scene"};
@@ -480,6 +497,7 @@ public:
                     actor.combat_target().actor ? actor.combat_target().actor->race : std::string{}},
             };
             if (client_.actor_stats_ready()) state.actor_stats=actor.actor_stats();
+            if (client_.actor_condition_ready() && actor.actor_condition()) state.actor_condition=actor.actor_condition();
             if (actor.conversation_held()) state.conversation_held=true;
             if (snapshot.variant()==core::RuntimeVariant::flat && actor.wait_held().has_value()) state.wait_held=actor.wait_held();
             append_actor_combat_observations(state, actor, client_.combat_contacts_ready(), client_.enemy_awareness_ready());
@@ -598,7 +616,10 @@ public:
                                        actor_events ? std::optional{actor_events->packet(core::SnapshotClock::now())} : std::nullopt,
                                        observed_dialogue ? std::optional{protocol_native::NativeDialogueObservation{
                                            observed_dialogue->observation, observation_age_ms(*observed_dialogue->scene)}}
-                                                         : std::nullopt);
+                                                         : std::nullopt,
+                                       reading ? std::optional{protocol_native::NativeReadingEvent{
+                                           reading->event, reading_age_ms(reading->event)}}
+                                               : std::nullopt);
         if (!cancellation.is_cancelled() && !save_writer_current()) {
             outcome.status = RequestStatus::stale_response;
             outcome.detail = "save writer revoked";
@@ -611,6 +632,8 @@ public:
             if (snapshot.generation().value() != acknowledged_world_generation_ ||
                 snapshot.frame() >= acknowledged_world_frame_) {
                 acknowledged_world_context_ = context::world_observation(snapshot);
+                // A different player cell ends the conversation; the next player request starts a new one.
+                if (snapshot.world()) (void)client_.conversation().observe_cell(snapshot.world()->cell);
                 if (auto quests = context::quest_observation(snapshot)) {
                     acknowledged_quest_context_ = std::move(quests);
                     acknowledged_quest_sequence_ = outcome.context_binding.sequence;
@@ -647,12 +670,26 @@ public:
     }
 
 private:
+public:
+    // The actor a reading would be recorded for: the same default target an ordinary context would address.
+    [[nodiscard]] std::optional<protocol_native::Identity> reading_target(const core::RuntimeSnapshot& scene) const {
+        return select_target_(scene);
+    }
+
+private:
     // Retries keep the original capture, so the age grows; a backwards clock is a validation failure.
     [[nodiscard]] static std::uint64_t observation_age_ms(const core::RuntimeSnapshot& scene) {
         const auto now = core::SnapshotClock::now();
         if (now < scene.captured_at()) throw std::invalid_argument{"observed dialogue clock moved backwards"};
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - scene.captured_at()).count());
+    }
+
+    [[nodiscard]] static std::uint64_t reading_age_ms(const core::ReadingEvent& reading) {
+        const auto now = core::SnapshotClock::now();
+        if (now < reading.observed_at) throw std::invalid_argument{"reading clock moved backwards"};
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - reading.observed_at).count());
     }
 
     [[nodiscard]] static protocol_native::Identity identity(const core::ActorSnapshot& actor) {

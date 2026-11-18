@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/conversation.schema.json",
+  "title": "SYNTH v2 conversation continuity (dialogue.conversation)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "response_start": {
+      "$ref": "#/$defs/response_start"
+    }
+  },
+  "$defs": {
+    "conversation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "response_start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server_version"
+      ],
+      "properties": {
+        "server_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "conversation_id": {
+          "$ref": "#/$defs/conversation_id"
+        }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cancel_request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversation_id": {
+          "$ref": "#/$defs/conversation_id"
+        },
+        "scope": {
+          "enum": [
+            "request",
+            "conversation"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "player_cancel",
+            "dialogue_closed",
+            "conversation_reset",
+            "superseded"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "cancel_request_id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "scope"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "conversation_id"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "scope",
+            "reason",
+            "cancel_request_id"
+          ],
+          "not": {
+            "required": [
+              "conversation_id"
+            ]
+          },
+          "properties": {
+            "scope": {
+              "const": "request"
+            }
+          }
+        },
+        {
+          "required": [
+            "scope",
+            "reason",
+            "conversation_id"
+          ],
+          "not": {
+            "required": [
+              "cancel_request_id"
+            ]
+          },
+          "properties": {
+            "scope": {
+              "const": "conversation"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

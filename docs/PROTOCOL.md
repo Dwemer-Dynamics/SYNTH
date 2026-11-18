@@ -8,6 +8,29 @@ The v1 contract remains unchanged.
 
 The optional v2 `context.actor_stats` capability adds seven exact-actor SPECIAL base/current pairs or unknown entries to the bound session snapshot. Clients require the explicit `actor_stats: true` init acknowledgement, including specialized `init_*_accepted` status codes. Wholly unread observations are `unavailable`. Values are never profile fields or generic history. See `protocol/v2/README.md` for the mirrored shape and bounds.
 
+## Actor condition (radiation, addictions, effects, limbs)
+
+The optional v2 `context.actor_condition` capability adds one `actor_states[].actor_condition` object for the
+deep-captured actors (the player and the selected NPC): `radiation_percent`, up to eight `addictions`, up to
+eight active `effects` (`chem` or `effect`), unique `crippled_limbs` and `truncated`. Clients send it only after
+the explicit `actor_condition: true` init acknowledgement, so older servers never see the key and older clients
+never send it. Low health and power armor are not repeated: they reuse `health_percent` (when attested) and
+`in_power_armor`. See `protocol/v2/README.md` for the mirrored shape and bounds.
+
+The server projects at most one condition line for the player and the exact responder
+(`lib/synth_actor_condition.php`, `ContextManager::situation`): clauses are fixed templates, names are plain
+text normalised to 64 characters, deduplicated case-insensitively and capped, the line is capped at 700
+characters, and an actor with nothing noteworthy is omitted. The values are copied from the turn's claimed
+snapshot only (exact form, origin plugin and playthrough, never a name), are not live and are never written
+to a profile or history. A client without the capability still gets low health and power armor. The general
+setting `CONDITION_CONTEXT_ENABLED` (Context group, default on) removes the line. Nothing is stored beyond
+the existing snapshot and there are no new tables.
+
+Unverified in game: the radiation ratio and the limb rule (limb condition value driven to zero while its
+base is positive) have not been compared with the HUD; addictions are recognised by numeric spell type 10
+because the pinned CommonLibF4 only forward-declares the enum; the VR adapter does not read the active-effect
+list and reports `truncated: true`; chems are alchemy-item sources that are not food.
+
 ## Installed generic gift menu
 
 The shared wording check is installed for every NPC. Named offers such as
@@ -643,3 +666,7 @@ turn-cancel lane before image processing. A cancelled anchor blocks late server 
 Gallery active/delete/lock controls remain respected; locking only extends scene TTL, never
 ancestry visibility. Current-generation edited descriptions remain supported. Versioned
 manual visual-knowledge edits across saved timelines are still unfinished parity work.
+
+## Conversation continuity and line lifecycle
+
+The optional `dialogue.conversation` capability (v2, with `dialogue.turn_ownership`; acknowledged by `conversation: true` on the init status) gives each conversation a client-created UUID, sent on `input_text`, `input_audio` and every `trigger` and echoed by the server on every `response_start`; the client refuses a response that echoes anything else. `ConversationContinuity` keeps it in memory: a new generation (load or reconnect), a player cell change (observed when a context is acknowledged), an explicit cancel, a halt or ten idle minutes retire it, and the next player request starts a new one. A line discarded before it started playing is reported `skipped`; one cut off after it started is `interrupted` (an older server is sent `interrupted` for both). The `CancelConversation` hotkey (`[Hotkeys]`, unbound by default, flat and VR) drops the conversation's local work like a superseding line and sends `cancel` with `scope: conversation`; `StopTalking` still halts. The v2 protocol README is the normative text.

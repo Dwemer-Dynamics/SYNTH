@@ -753,6 +753,35 @@
           },
           "payload": {
             "required": [
+              "reading_event"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "capabilities": {
+            "contains": {
+              "const": "context.reading_events"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
               "actor_events"
             ]
           }
@@ -1339,6 +1368,38 @@
       "if": {
         "properties": {
           "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "actor_states"
+            ],
+            "properties": {
+              "actor_states": {
+                "contains": {
+                  "required": [
+                    "actor_condition"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "context.actor_condition"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "social_task_request"
           }
         }
@@ -1863,6 +1924,59 @@
       }
     },
     {
+      "$comment": "trade-confirmation-capability",
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "action.trade_confirmation"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "action.barter"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.player_caps_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.give_item_to"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.transfer_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.inventory_observation"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "if": {
         "properties": {
           "type": {
@@ -1975,6 +2089,26 @@
           }
         }
       }
+    },
+    {
+      "$comment": "conversation-capability-prerequisite",
+      "if": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.turn_ownership"}}}}
+    },
+    {
+      "$comment": "conversation-id-carriers",
+      "if": {"properties": {"type": {"enum": ["input_text", "input_audio", "trigger"]}, "payload": {"required": ["conversation_id"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
+    },
+    {
+      "$comment": "conversation-cancel-extended",
+      "if": {"properties": {"type": {"const": "cancel"}, "payload": {"anyOf": [{"required": ["scope"]}, {"required": ["reason"]}, {"required": ["conversation_id"]}]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
+    },
+    {
+      "$comment": "conversation-skipped-receipt",
+      "if": {"properties": {"type": {"const": "speech_receipt"}, "payload": {"properties": {"outcome": {"const": "skipped"}}, "required": ["outcome"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
     },
     {
       "if": {

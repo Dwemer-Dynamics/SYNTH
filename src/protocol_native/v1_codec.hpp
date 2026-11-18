@@ -7,6 +7,7 @@
 #include "core/player_event_sampler.hpp"
 #include "core/event_witness.hpp"
 #include "core/location_catalog.hpp"
+#include "core/reading_event.hpp"
 #include "client/actor_event_binding.hpp"
 #include "runtime/social_task_codec.hpp"
 
@@ -89,6 +90,7 @@ struct ActorState {
     std::optional<bool> conversation_held;
     std::optional<bool> wait_held;
     std::optional<core::ActorStats> actor_stats;
+    std::optional<core::ActorCondition> actor_condition;
 };
 struct WorldState {
     std::string location, cell, worldspace, weather;
@@ -134,6 +136,11 @@ struct NativeDialogueObservation {
     core::DialogueObservation observation;
     std::uint64_t age_ms{};
 };
+// One thing the player just read; age is observation to encoding, so a retry keeps the original capture.
+struct NativeReadingEvent {
+    core::ReadingEvent event;
+    std::uint64_t age_ms{};
+};
 struct NearbyItemState {
     std::string reference_id, base_form_id, cell_form_id;
     std::optional<std::string> reference_origin_plugin;
@@ -176,7 +183,8 @@ struct Action {
     // Companion orders only: the line_id of the reply dialogue line this order rides on.
     std::string reply_line_id;
 };
-struct Start { std::string server_version; };
+// conversation_id is the request's own id echoed by the server (dialogue.conversation); empty when none.
+struct Start { std::string server_version; std::string conversation_id; };
 struct Dialogue {
     Speaker speaker;
     std::string text;
@@ -190,7 +198,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}; bool location_catalog{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; bool conversation{}; bool location_catalog{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -237,6 +245,18 @@ inline void closed_object(const json::Value& value,
         if (std::ranges::find(allowed, std::string_view{key}) == allowed.end())
             throw std::invalid_argument{"unknown protocol field: " + key};
     }
+}
+// A conversation_id is a lowercase UUID the client created: 8-4-4-4-12 lowercase hex, version 1-8, variant 8-b.
+[[nodiscard]] inline bool valid_conversation_id(std::string_view value) noexcept {
+    if (value.size() != 36) return false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; continue; }
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        if (i == 14 && (c < '1' || c > '8')) return false;
+        if (i == 19 && c != '8' && c != '9' && c != 'a' && c != 'b') return false;
+    }
+    return true;
 }
 inline std::string text(const json::Value& object, std::string_view key) {
     const auto& value = required(object, key);
@@ -426,8 +446,11 @@ inline Line decode_line(std::string_view wire) {
         throw std::invalid_argument{"invalid response runtime lane"};
     const auto type=text(root,"type"); const auto& payload=required(root,"payload");
     if(type=="response_start") {
-        closed_object(payload, {"server_version"});
-        line.payload=Start{text(payload,"server_version")};
+        if (version == 2) closed_object(payload, {"server_version", "conversation_id"});
+        else closed_object(payload, {"server_version"});
+        std::string echoed = payload.find("conversation_id") ? text(payload,"conversation_id") : std::string{};
+        if (payload.find("conversation_id") && !valid_conversation_id(echoed)) throw std::invalid_argument{"invalid conversation echo"};
+        line.payload=Start{text(payload,"server_version"), std::move(echoed)};
     }
     else if(type=="dialogue") {
         if (version == 2) closed_object(payload, {"speaker", "text", "media", "speech", "listener", "native_turn", "receipt_required"});
@@ -487,7 +510,8 @@ inline Line decode_line(std::string_view wire) {
         if (const auto* value=a.find("target")) target=identity(*value);
         const auto& arguments=required(a,"arguments");
         if (!arguments.is_object()) throw std::invalid_argument{"action arguments are not an object"};
-        closed_object(arguments, {"target_name", "item", "amount", "location", "message", "instruction", "speed"});
+        closed_object(arguments, {"target_name", "item", "amount", "location", "message", "instruction", "speed",
+                                  "item_form_id", "item_origin_plugin", "count", "price"});
         line.payload=Action{text(a,"action_id"),text(a,"idempotency_key"),text(a,"name"),
                             text(a,"capability"),identity(required(a,"actor")),std::move(target),
                             arguments,integer(a,"deadline_ms"),a.find("reply_line_id")?text(a,"reply_line_id"):std::string{}};
@@ -511,7 +535,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "control_audience", "delivery_receipts", "narrator_object", "location_catalog"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "conversation", "narrator_object", "location_catalog"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -536,8 +560,16 @@ inline Line decode_line(std::string_view wire) {
         }
         if (payload.find("delivery_receipts"))
             std::get<Status>(line.payload).delivery_receipts = required(payload, "delivery_receipts").as_bool();
+        if (payload.find("conversation"))
+            std::get<Status>(line.payload).conversation = required(payload, "conversation").as_bool();
         if (payload.find("narrator_object"))
             std::get<Status>(line.payload).narrator_object = required(payload, "narrator_object").as_bool();
+        if (payload.find("actor_condition"))
+            std::get<Status>(line.payload).actor_condition = required(payload, "actor_condition").as_bool();
+        if (payload.find("trade_confirmation"))
+            std::get<Status>(line.payload).trade_confirmation = required(payload, "trade_confirmation").as_bool();
+        if (payload.find("reading_events"))
+            std::get<Status>(line.payload).reading_events = required(payload, "reading_events").as_bool();
         if (payload.find("location_catalog"))
             std::get<Status>(line.payload).location_catalog = required(payload, "location_catalog").as_bool();
     }
@@ -640,6 +672,31 @@ inline std::pair<std::string, std::string> inventory_action_result(
         truncated = true;
     }
 }
+// Negotiated context.actor_condition. An unobserved read carries only its observation; the lists are bounded.
+inline json::Value actor_condition_value(const core::ActorCondition& value) {
+    if (!value.valid()) throw std::invalid_argument{"invalid actor condition"};
+    if (!value.observed) return json::Value{object({{"observation","unavailable"}})};
+    const auto entries=[](const std::vector<core::ActorConditionEntry>& source,bool with_kind) {
+        json::Value::Array out;
+        for (const auto& entry:source) {
+            char form[11];
+            std::snprintf(form,sizeof(form),"0x%08X",entry.form_id);
+            auto fields=object({{"form_id",std::string{form}},{"origin_plugin",entry.origin_plugin},{"name",entry.name}});
+            if (with_kind) fields.emplace_back("kind",entry.chem ? "chem" : "effect");
+            out.push_back(json::Value{std::move(fields)});
+        }
+        return out;
+    };
+    constexpr std::array limbs{"head","torso","left_arm","right_arm","left_leg","right_leg"};
+    json::Value::Array crippled;
+    for (const auto limb:value.crippled_limbs) crippled.push_back(json::Value{std::string{limbs[static_cast<std::size_t>(limb)]}});
+    return json::Value{object({{"observation","observed"},
+        {"radiation_percent",value.radiation_percent ? json::Value{*value.radiation_percent} : json::Value{}},
+        {"addictions",json::Value{entries(value.addictions,false)}},
+        {"effects",json::Value{entries(value.effects,true)}},
+        {"crippled_limbs",json::Value{std::move(crippled)}},
+        {"truncated",value.truncated}})};
+}
 inline json::Value combat_target_value(const CombatTargetState& value, const ActorState& owner) {
     const auto parse_form = [](const std::string& form) {
         std::uint32_t id{};
@@ -724,6 +781,7 @@ inline json::Value actor_state_value(const ActorState& value) {
         result.emplace_back("actor_stats",object({{"observation","base_current"},{"special",std::move(special)}}));
         }
     }
+    if (value.actor_condition) result.emplace_back("actor_condition", actor_condition_value(*value.actor_condition));
     if (value.combat_target) result.emplace_back("combat_target", combat_target_value(*value.combat_target, value));
     if (value.combat_contacts) {
         if (!value.alive || value.disabled || value.actor.form_id=="0x00000014")
@@ -917,6 +975,8 @@ struct EventContext {
     std::vector<std::string> capabilities;
     std::uint64_t protocol_version{1};
     std::uint64_t context_sequence{};
+    // The conversation this request belongs to (dialogue.conversation); empty sends none. Set only for a negotiated session.
+    std::string conversation_id;
 };
 inline std::string encode_event(const EventContext& context, std::string type, json::Value payload) {
     if (context.protocol_version != 1 && context.protocol_version != 2)
@@ -971,7 +1031,7 @@ inline bool placed_reference_form(std::string_view form) noexcept {
         !(upper_f(form[2]) && upper_f(form[3]));
 }
 // Terminal delivery outcome of one native-turn line. Text and speaker are read from the server record.
-enum class SpeechReceiptOutcome { audio_completed, text_presented, interrupted, failed };
+enum class SpeechReceiptOutcome { audio_completed, text_presented, interrupted, failed, skipped };
 struct SpeechReceipt {
     std::string dialogue_request_id, line_id;
     Identity character;
@@ -992,9 +1052,11 @@ inline std::string encode_speech_receipt(const EventContext& context, const Spee
         !placed_reference_form(receipt.character.form_id) || receipt.character.origin_plugin.empty() ||
         !runtime::social_id(receipt.character.playthrough_id))
         throw std::invalid_argument{"speech receipt does not own its native-turn line"};
+    // skipped needs dialogue.conversation; an older server sees the released interrupted outcome instead.
     const char* outcome = receipt.outcome == SpeechReceiptOutcome::audio_completed ? "audio_completed" :
         receipt.outcome == SpeechReceiptOutcome::text_presented ? "text_presented" :
-        receipt.outcome == SpeechReceiptOutcome::interrupted ? "interrupted" : "failed";
+        receipt.outcome == SpeechReceiptOutcome::interrupted ? "interrupted" :
+        receipt.outcome == SpeechReceiptOutcome::skipped ? (has("dialogue.conversation") ? "skipped" : "interrupted") : "failed";
     return encode_event(context, "speech_receipt", json::Value{object({
         {"dialogue_request_id", receipt.dialogue_request_id}, {"line_id", receipt.line_id},
         {"character", identity_value(receipt.character)}, {"outcome", outcome}})});
@@ -1191,6 +1253,15 @@ inline bool valid_control_mode(std::string_view mode) {
 inline bool everyone_audience_mode(std::string_view mode) { return mode == "STANDARD" || mode == "SHOUT"; }
 
 // Optional negotiated settings are copied at turn admission, never read from a later menu selection.
+// Player-input and trigger payloads carry the conversation only when the init negotiated dialogue.conversation.
+inline void append_conversation_id(json::Value::Object& payload, const EventContext& context) {
+    if (context.conversation_id.empty()) return;
+    if (context.protocol_version != 2 || !valid_conversation_id(context.conversation_id) ||
+        std::ranges::find(context.capabilities, "dialogue.conversation") == context.capabilities.end() ||
+        std::ranges::find(context.capabilities, "dialogue.turn_ownership") == context.capabilities.end())
+        throw std::invalid_argument{"conversation id requires the negotiated conversation capability"};
+    payload.emplace_back("conversation_id", context.conversation_id);
+}
 inline void append_control_selection(json::Value::Object& payload, const EventContext& context, const ControlSelection& selection) {
     if (selection.mode.empty() && selection.audience == AudienceIntent::normal && selection.audience_reset_epoch == 0) return;
     if (context.protocol_version != 2 || !valid_control_mode(selection.mode) || selection.model_slot < 1 || selection.model_slot > 4 ||
@@ -1226,6 +1297,7 @@ inline std::string encode_input_text(const EventContext& context, std::string te
                                      TextIntent intent = TextIntent::unmarked) {
     auto payload = object({{"text",std::move(text_value)}});
     append_control_selection(payload, context, selection);
+    append_conversation_id(payload, context);
     if (intent == TextIntent::conversation) {
         // Auto Chat rewrites the player's line server-side; it never borrows the native /talk route.
         if (selection.mode == "AUTOCHAT") throw std::invalid_argument{"conversation intent cannot use Auto Chat"};
@@ -1240,6 +1312,7 @@ inline std::string encode_input_audio(const EventContext& context, const Media& 
     auto encoded_media = media_value(value);
     auto payload = object({{"media",std::move(encoded_media)}});
     append_control_selection(payload, context, selection);
+    append_conversation_id(payload, context);
     return encode_event(context,"input_audio",json::Value{std::move(payload)});
 }
 
@@ -1449,6 +1522,25 @@ inline json::Value observed_dialogue_value(const NativeDialogueObservation& valu
                     : reference(evidence.scene.worldspace_form_id, evidence.scene.worldspace_origin_plugin)}})}},
             {"actors", std::move(witnesses)}})}}})};
 }
+// Copied game text for one reading. Title and text are re-bounded on encode so no caller can widen the contract.
+inline json::Value reading_event_value(const NativeReadingEvent& value, const EventContext& context, const Identity& player) {
+    const auto& reading = value.event;
+    if (!reading.valid() || value.age_ms > core::RuntimeGeneration::maximum_wire_value ||
+        context.protocol_version != 2 || context.runtime_variant != "flat" || player.playthrough_id.empty() ||
+        std::ranges::find(context.capabilities, "context.reading_events") == context.capabilities.end())
+        throw std::invalid_argument{"invalid or unnegotiated reading event"};
+    char form[11]{};
+    std::snprintf(form, sizeof(form), "0x%08X", reading.form_id);
+    auto fields = object({
+        {"event_id", "reading:" + std::to_string(reading.serial)},
+        {"kind", std::string{core::reading_kind_name(reading.kind)}},
+        {"title", reading.title},
+        {"source", json::Value{object({{"form_id", std::string{form}}, {"origin_plugin", reading.origin_plugin}})}}});
+    if (!reading.text.empty()) fields.emplace_back("text", reading.text);
+    fields.emplace_back("text_truncated", reading.text_truncated);
+    fields.emplace_back("age_ms", value.age_ms);
+    return json::Value{std::move(fields)};
+}
 inline std::string encode_context(const EventContext& context, std::string playthrough_id,
                                   std::uint64_t sequence, const Identity& player,
                                   const std::optional<Identity>& target,
@@ -1466,7 +1558,8 @@ inline std::string encode_context(const EventContext& context, std::string playt
                                   const std::optional<NativeQuestBatch>& quest_events = std::nullopt,
                                   const std::optional<NativePlayerEvent>& player_event = std::nullopt,
                                   const std::optional<NativeActorBatch>& actor_events = std::nullopt,
-                                  const std::optional<NativeDialogueObservation>& observed_dialogue = std::nullopt) {
+                                  const std::optional<NativeDialogueObservation>& observed_dialogue = std::nullopt,
+                                  const std::optional<NativeReadingEvent>& reading_event = std::nullopt) {
     if (quest_events && (context.protocol_version != 2 || context.runtime_variant != "flat" ||
         std::ranges::find(context.capabilities, "context.quest_events") == context.capabilities.end()))
         throw std::invalid_argument{"native quest batches require negotiated v2 flat capability"};
@@ -1485,6 +1578,7 @@ inline std::string encode_context(const EventContext& context, std::string playt
     if (actor_events) payload.emplace_back("actor_events",actor_events_value(*actor_events,context,player));
     if (player_event) payload.emplace_back("player_event", player_event_value(*player_event, context, player));
     if (observed_dialogue) payload.emplace_back("observed_dialogue", observed_dialogue_value(*observed_dialogue, context, player));
+    if (reading_event) payload.emplace_back("reading_event", reading_event_value(*reading_event, context, player));
     if (loaded_context) payload.emplace_back("loaded_context", json::Value{object({
         {"playthrough_id", loaded_context->playthrough_id}, {"session_id", loaded_context->session_id},
         {"generation", loaded_context->generation}, {"context_sequence", loaded_context->context_sequence}})});
@@ -1502,6 +1596,9 @@ inline std::string encode_context(const EventContext& context, std::string playt
             if (state.combat_target && (context.protocol_version != 2 ||
                 std::ranges::find(context.capabilities, "context.combat_targets") == context.capabilities.end()))
                 throw std::invalid_argument{"combat target capability was not negotiated"};
+            if (state.actor_condition && (context.protocol_version!=2 ||
+                std::ranges::find(context.capabilities,"context.actor_condition")==context.capabilities.end()))
+                throw std::invalid_argument{"actor condition requires negotiated v2 capability"};
             if (state.actor_stats && (context.protocol_version!=2 ||
                 std::ranges::find(context.capabilities,"context.actor_stats")==context.capabilities.end()))
                 throw std::invalid_argument{"actor stats require negotiated v2 capability"};
@@ -1624,6 +1721,7 @@ inline std::string encode_trigger(const EventContext& context, std::string kind,
         if (rechat_parent->scene_context_sequence)
             payload.emplace_back("scene_context_sequence", *rechat_parent->scene_context_sequence);
     }
+    append_conversation_id(payload, context);
     return encode_event(context,"trigger",json::Value{std::move(payload)});
 }
 
@@ -1695,6 +1793,38 @@ inline std::string encode_diary_request(const EventContext& context, const Ident
     return encode_diary_request(context, DiaryRequest{
         role == DiaryRole::npc ? std::vector<Identity>{actor} : std::vector<Identity>{},
         role == DiaryRole::player, role == DiaryRole::narrator});
+}
+// The conversation a carrier event (player input or trigger) put on the wire, or empty. A response to it must echo
+// exactly this id on its start line.
+[[nodiscard]] inline std::string carrier_conversation_id(std::string_view wire_event) {
+    try {
+        const auto event = json::parse(wire_event);
+        const auto* type = event.find("type");
+        const auto* payload = event.find("payload");
+        if (!type || !payload || (type->as_string() != "input_text" && type->as_string() != "input_audio" && type->as_string() != "trigger"))
+            return {};
+        const auto* id = payload->find("conversation_id");
+        return id ? id->as_string() : std::string{};
+    } catch (...) { return {}; }
+}
+// Why the player cancelled; the server records it and keeps the allowlist.
+enum class ConversationCancelReason { player_cancel, dialogue_closed, conversation_reset, superseded };
+[[nodiscard]] inline std::string_view conversation_cancel_reason(ConversationCancelReason reason) noexcept {
+    switch (reason) {
+        case ConversationCancelReason::dialogue_closed: return "dialogue_closed";
+        case ConversationCancelReason::conversation_reset: return "conversation_reset";
+        case ConversationCancelReason::superseded: return "superseded";
+        default: return "player_cancel";
+    }
+}
+// Explicit cancel of everything in flight for one conversation (scope "conversation").
+inline std::string encode_conversation_cancel(const EventContext& context, const std::string& conversation_id, ConversationCancelReason reason) {
+    if (context.protocol_version != 2 || !valid_conversation_id(conversation_id) ||
+        std::ranges::find(context.capabilities, "dialogue.conversation") == context.capabilities.end() ||
+        std::ranges::find(context.capabilities, "dialogue.turn_ownership") == context.capabilities.end())
+        throw std::invalid_argument{"conversation cancel requires the negotiated conversation capability"};
+    return encode_event(context, "cancel", json::Value{object({{"scope", "conversation"},
+        {"reason", std::string{conversation_cancel_reason(reason)}}, {"conversation_id", conversation_id}})});
 }
 inline std::string encode_cancel(const EventContext& context, std::string cancel_request_id) {
     return encode_event(context,"cancel",json::Value{object({{"cancel_request_id",std::move(cancel_request_id)}})});

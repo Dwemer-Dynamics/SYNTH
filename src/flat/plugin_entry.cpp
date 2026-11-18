@@ -18,6 +18,7 @@
 #include "adapters/flat_pickup_inspection.hpp" // Read-only preparation; not a pickup capability.
 #include "adapters/flat_actor_event_capture.hpp"
 #include "adapters/flat_vanilla_dialogue.hpp"
+#include "adapters/flat_reading_events.hpp"
 #include "adapters/commonlib_actions.hpp"
 #include "adapters/commonlib_capture.hpp"
 #include "adapters/commonlib_external_requests.hpp"
@@ -25,6 +26,7 @@
 #include "adapters/commonlib_save_context.hpp"
 #include "adapters/flat_social_visit.hpp"
 #include "runtime/game_thread_dispatcher.hpp"
+#include "client/connection_notice.hpp"
 #include "client/plugin_session_host.hpp"
 #include "core/player_inventory_refresh.hpp"
 #include "input/press_gesture.hpp"
@@ -58,6 +60,10 @@ std::unique_ptr<synth::adapters::FlatFalloutRuntime> runtime;
 std::unique_ptr<synth::runtime::GameThreadDispatcher> dispatcher;
 std::unique_ptr<synth::client::PluginSession> session;
 std::unique_ptr<synth::client::PluginSessionHost> session_host;
+// Server up/down notices; independent of the session so an outage is reported while no session exists.
+synth::client::ConnectionWatch connection_watch{[](const synth::config::ServerConfig& server) {
+    return std::make_unique<synth::client::WinHttpTransport>(server.base_url, server.connect_timeout_ms);
+}};
 std::unique_ptr<synth::client::ActorEventSceneBinder> actor_event_binder;
 std::uint64_t actor_event_epoch{};
 std::uint64_t actor_event_binding_losses{};
@@ -65,6 +71,9 @@ std::uint64_t actor_event_binding_losses{};
 synth::core::DialogueResidencyTracker vanilla_dialogue_tracker;
 const void* vanilla_dialogue_session{};
 std::uint64_t vanilla_dialogue_generation{}, vanilla_dialogue_epoch{}, vanilla_dialogue_losses{};
+// Game-pump-owned: what the player read recently (repeat reads are not new news) and what could not be kept.
+synth::core::ReadingRecents reading_recents;
+std::uint64_t reading_losses{};
 synth::core::PlayerInventoryRefresh player_inventory_refresh;
 std::uint64_t inventory_change_revision{};
 std::uint64_t pending_session_request{};
@@ -406,7 +415,8 @@ void queue_session_initialization(
     }
     pending_session_request = session_host->request_initialize(snapshot, *dispatcher, lifetime,
         synth::adapters::FlatRestEvents::available(), synth::adapters::FlatQuestEvents::available(),
-        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported());
+        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported(),
+        synth::adapters::FlatReadingEvents::available());
     if (pending_session_request != 0) {
         REX::INFO("SYNTH runtime: session initialization queued off the game thread");
     }
@@ -442,6 +452,7 @@ void adopt_session_result(synth::core::SnapshotClock::time_point now) {
     if (local_configuration) {
         auto effective = session->configuration();
         effective.hotkeys = local_configuration->hotkeys;
+        effective.server.connection_notice = local_configuration->server.connection_notice;
         configuration_reconnect_pending = effective != *local_configuration;
     }
     player_inventory_refresh.reset(runtime->generation().value(), now);
@@ -480,6 +491,7 @@ void reload_settings_if_changed(synth::core::SnapshotClock::time_point now, bool
             auto session_settings = session->configuration();
             // Hotkeys are game-thread-owned; active workers retain their immutable session config.
             session_settings.hotkeys = local_configuration->hotkeys;
+            session_settings.server.connection_notice = local_configuration->server.connection_notice;
             configuration_reconnect_pending = session_settings != *local_configuration;
         }
         publish_ui_configuration();
@@ -600,6 +612,8 @@ void pump_runtime_impl() {
     reload_settings_if_changed(now);
     trace_pump_phase("session adoption");
     adopt_session_result(now);
+    if (local_configuration) connection_watch.pump(local_configuration->server, now, present_notification);
+    else if (session) connection_watch.pump(session->configuration().server, now, present_notification);
     if (session && session->initialization_failed()) {
         session->drain_notifications(present_notification);
         invalidate_sessions();
@@ -852,6 +866,32 @@ void pump_runtime_impl() {
             }
         }
         session->pump_observed_dialogue();
+        if (!session->reading_events_ready()) {
+            synth::adapters::FlatReadingEvents::reset();reading_recents.clear();
+        } else {
+            // Reading happens inside menus that pause the world, so it is sampled on every pump like first-observed dialogue.
+            if (session->reading_event_capture_ready()) {
+                if (auto reading=synth::adapters::FlatReadingEvents::poll(now)) {
+                    const auto owner_session=session.get();const auto generation=runtime->generation();
+                    auto scene=runtime->capture_snapshot(now,synth::runtime::RuntimeCapturePurpose::actor_events);
+                    // Capture can re-enter lifecycle callbacks; a superseded owner keeps nothing.
+                    if (session.get()!=owner_session || runtime->generation()!=generation) return;
+                    const bool fresh=scene && scene->generation()==generation &&
+                        scene->player().playthrough_id()==synth::adapters::commonlib::playthrough_id() &&
+                        reading_recents.fresh(reading->kind,reading->form_id,reading->title,now);
+                    if (fresh) {
+                        reading->serial=session->next_reading_serial();
+                        const auto kind=reading->kind;const auto form=reading->form_id;const auto title=reading->title;
+                        const bool accepted=session->observe_reading(scene,std::move(*reading));
+                        // Only an accepted reading suppresses a re-read; a dropped one stays readable.
+                        if (accepted) reading_recents.remember(kind,form,title,now);
+                        else ++reading_losses;
+                        REX::INFO("SYNTH reading: {} observation admitted {} losses {}",synth::core::reading_kind_name(kind),accepted,reading_losses);
+                    }
+                }
+            }
+            session->pump_reading_events();
+        }
         if (!menu_mode && session->player_event_sample_due(now)) {
             trace_pump_phase("player event sample");
             const auto* owner_session = session.get();
@@ -1178,6 +1218,8 @@ void pump_runtime_impl() {
                 (void)session->request_control();
             } else present_notification("SYNTH control menu unavailable; check F4SE Menu Framework");
         }
+        // Explicit player cancel of the live conversation. Unlike Halt it leaves the session running.
+        if (session && hotkey_pressed(hotkeys.cancel_conversation)) session->cancel_conversation();
         if (session && hotkey_pressed(hotkeys.hard_halt)) {
             cancel_control_wait();
             synth::adapters::commonlib::FlatWaitPackage::cancel_all();
@@ -1302,6 +1344,7 @@ void apply_lifecycle(LifecycleAction action) {
     switch (action) {
     case LifecycleAction::ready:
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
+        connection_watch.game_loaded(synth::core::SnapshotClock::now());
         break;
     case LifecycleAction::invalidate:
         invalidate_sessions(true);
@@ -1319,9 +1362,11 @@ void apply_lifecycle(LifecycleAction action) {
         pip_vision_gesture.reset();
         profile_timer_paused_at = {};
         runtime_ready_after = synth::core::SnapshotClock::now() + std::chrono::seconds{2};
+        connection_watch.game_loaded(synth::core::SnapshotClock::now());
         (void)runtime->invalidate();
         break;
     case LifecycleAction::stop:
+        connection_watch.stop();
         EngineMainUpdatePump::request_stop();
         if (dispatcher != nullptr) {
             dispatcher->stop_accepting(true);
@@ -1409,6 +1454,7 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
         (void)synth::adapters::FlatQuestEvents::install();
         (void)synth::adapters::FlatActorEvents::install();
         (void)synth::adapters::FlatInventoryChanges::install();
+        (void)synth::adapters::FlatReadingEvents::install();
         // F4SE maps every plugin before dispatching this, so the optional
         // F4SE Menu Framework module resolves regardless of plugins.txt order.
         // Registration is a no-op when the framework is not installed.
