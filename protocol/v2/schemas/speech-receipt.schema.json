@@ -28,7 +28,8 @@
         "audio_completed",
         "text_presented",
         "interrupted",
-        "failed"
+        "failed",
+        "skipped"
       ]
     }
   }

@@ -101,6 +101,8 @@ public:
     std::optional<synth::json::Value> combat_contacts_ack;
     std::optional<synth::json::Value> enemy_awareness_ack;
     bool ambient_npc_support{};
+    bool conversation_support{};      // init conversation ACK, and the carrier's conversation echoed on response_start
+    bool corrupt_conversation_echo{}; // echo another conversation
     std::optional<synth::json::Value> ambient_npc_ack;
     std::optional<synth::protocol_native::Identity> dialogue_listener;
     std::optional<synth::json::Value> everyone_ack;      // init control_audience
@@ -140,12 +142,21 @@ public:
                 protocol_native::integer(event, "context_sequence") + std::uint64_t{last && fault == Fault::sequence ? 1U : 0U});
             return json::write(json::Value{std::move(fields)}) + "\n";
         };
-        std::string body = line("response_start", json::Value{protocol_native::object({{"server_version", "test"}})});
-        if ((everyone_ack || social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
+        auto start = protocol_native::object({{"server_version", "test"}});
+        if (conversation_support) {
+            const auto type = protocol_native::text(event, "type");
+            const auto* sent = type == "input_text" || type == "input_audio" || type == "trigger"
+                ? protocol_native::required(event, "payload").find("conversation_id") : nullptr;
+            if (sent) start.emplace_back("conversation_id", corrupt_conversation_echo
+                ? std::string{"b8e2a470-1c9d-4f63-a5e8-0d7c3b6a2f94"} : sent->as_string());
+        }
+        std::string body = line("response_start", json::Value{std::move(start)});
+        if ((conversation_support || everyone_ack || social_support || location_ancestry_support || enemy_awareness_ack || combat_contacts_ack || ambient_npc_ack || ambient_npc_support || combat_targets_support || rechat_scene_support || gift_menu_support || player_item_support || player_caps_support || caps_support || transfer_support || consumption_support || action_inventory_support || inventory_support || actor_support || quest_support || quest_tracking_support || quest_reaction_support || player_support || player_reaction_support) && protocol_native::text(event, "type") == "init") {
             const auto code = gift_menu_support ? "init_gift_menu_inventory_accepted" : player_item_support ? "init_player_item_inventory_accepted" : player_caps_support ? "init_player_caps_inventory_accepted" : caps_support ? "init_caps_inventory_accepted" : transfer_support ? "init_transfer_inventory_accepted" : consumption_support ? "init_consume_inventory_accepted" : action_inventory_support ? "init_action_inventory_accepted" : inventory_support ? "init_inventory_512_accepted" : actor_support ? "init_actor_events_accepted" : player_reaction_support ? "init_player_reactions_accepted" : player_support ? "init_player_events_accepted" : quest_reaction_support ? "init_quest_reactions_accepted" : quest_support ? (quest_tracking_support ? "init_quest_events_tracking_accepted" : "init_quest_events_accepted")
                                             : quest_tracking_support ? "init_quest_tracking_accepted" : "init_accepted";
             auto payload=protocol_native::object({{"code", code}});
             if (actor_stats_support) payload.emplace_back("actor_stats",true);
+            if (conversation_support) payload.emplace_back("conversation",true);
             if (actor_condition_support) payload.emplace_back("actor_condition",true);
             if(social_support)payload.emplace_back("social_tasks",true);
             if(location_ancestry_support)payload.emplace_back("location_ancestry",true);
@@ -236,7 +247,123 @@ public:
 };
 }
 
+// dialogue.conversation through the real SynthClient and a fake server: negotiation, one id across turns, a reset,
+// the echo contract and the scoped cancel.
+void conversation_client_tests() {
+    using namespace synth;
+    const std::vector<std::string> caps{"dialogue.text","dialogue.turn_ownership","dialogue.conversation"};
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm","save:conv","Player"};
+    const protocol_native::Identity jun{"0x0001A4D7","Fallout4.esm","save:conv","Jun"};
+    const auto make = [&](BindingEchoTransport& wire, std::vector<std::string> capabilities) {
+        return std::make_unique<client::SynthClient>(wire, client::SessionOptions{.runtime_session_id="conv:client",.runtime_variant="flat",
+            .client_version="test",.runtime_version="1.11.240",.capabilities=std::move(capabilities),.protocol_version=2});
+    };
+    const auto sent_ids = [](const BindingEchoTransport& wire) {
+        std::vector<std::string> ids;
+        for (const auto& request : wire.requests) {
+            const auto event = json::parse(request.body);
+            const auto type = protocol_native::text(event, "type");
+            if (type != "input_text" && type != "trigger") continue;
+            const auto* id = protocol_native::required(event, "payload").find("conversation_id");
+            ids.push_back(id ? id->as_string() : std::string{});
+        }
+        return ids;
+    };
+    const auto publish = [&](client::SynthClient& session) {
+        const auto scene = session.publish_context(0,"save:conv",player,jun,{},{},std::nullopt,{},{},{});
+        CHECK(scene.status == client::RequestStatus::complete);
+        return scene.context_binding;
+    };
+    {
+        // Negotiated: three turns and a trigger keep one conversation; its echo is verified.
+        BindingEchoTransport wire; wire.conversation_support = true;
+        auto session = make(wire, caps);
+        CHECK(session->initialize(1,false).status == client::RequestStatus::complete);
+        CHECK(session->conversation_ready());
+        auto binding = publish(*session);
+        CHECK(session->send_text("one",{},binding).status == client::RequestStatus::complete);
+        CHECK(session->send_text("two",{},binding).status == client::RequestStatus::complete);
+        CHECK(session->trigger("bored",jun,{},std::nullopt,std::nullopt,binding).status == client::RequestStatus::complete);
+        CHECK(session->send_text("three",{},binding).status == client::RequestStatus::complete);
+        const auto ids = sent_ids(wire);
+        CHECK(ids.size() == 4 && !ids[0].empty() && protocol_native::valid_conversation_id(ids[0]));
+        CHECK(ids[0] == ids[1] && ids[1] == ids[2] && ids[2] == ids[3]);
+        // A cell change, then the next request, starts a different conversation.
+        CHECK(session->conversation().observe_cell("Sanctuary Hills") == std::nullopt);
+        CHECK(session->conversation().observe_cell("Red Rocket") == ids[0]);
+        CHECK(session->send_text("four",{},binding).status == client::RequestStatus::complete);
+        const auto after_cell = sent_ids(wire);
+        CHECK(after_cell.size() == 5 && after_cell[4] != ids[0] && protocol_native::valid_conversation_id(after_cell[4]));
+        // A reload or reconnect (a new generation) ends it too.
+        CHECK(session->initialize(2,false).status == client::RequestStatus::complete);
+        binding = publish(*session);
+        CHECK(session->send_text("five",{},binding).status == client::RequestStatus::complete);
+        const auto after_load = sent_ids(wire);
+        CHECK(after_load.size() == 6 && after_load[5] != after_cell[4] && after_load[5] != ids[0]);
+        // An explicit cancel names the live conversation and why, retires it, and the next input starts a new one.
+        const auto live = after_load[5];
+        // The key press retires the conversation and captures its id; the network task later names exactly that id.
+        const auto ended = session->end_conversation_for_cancel();
+        CHECK(ended && *ended == live && session->conversation().current().empty());
+        // Speech right after the cancel starts a NEW conversation, and a cell change before the cancel is sent loses
+        // nothing: the cancel still names the id captured at the key press.
+        CHECK(session->send_text("quick",{},binding).status == client::RequestStatus::complete);
+        const auto quick = sent_ids(wire).back();
+        CHECK(quick != live && session->conversation().current() == quick);
+        CHECK(session->conversation().observe_cell("Concord") == quick);
+        const auto cancelled = session->cancel_conversation(*ended, protocol_native::ConversationCancelReason::player_cancel);
+        CHECK(cancelled && cancelled->status == client::RequestStatus::complete);
+        const auto cancel = json::parse(wire.requests.back().body);
+        CHECK(protocol_native::text(cancel,"type") == "cancel");
+        CHECK(protocol_native::text(protocol_native::required(cancel,"payload"),"scope") == "conversation");
+        CHECK(protocol_native::text(protocol_native::required(cancel,"payload"),"reason") == "player_cancel");
+        CHECK(protocol_native::text(protocol_native::required(cancel,"payload"),"conversation_id") == live);
+        CHECK(protocol_native::required(cancel,"payload").find("cancel_request_id") == nullptr);
+        CHECK(!session->end_conversation_for_cancel());  // nothing live: nothing to cancel
+        CHECK(session->send_text("six",{},binding).status == client::RequestStatus::complete);
+        const auto after_cancel = sent_ids(wire);
+        CHECK(after_cancel.size() == 8 && after_cancel[7] != live && after_cancel[7] != quick);
+    }
+    {
+        // A response that echoes another conversation is refused, not delivered.
+        BindingEchoTransport wire; wire.conversation_support = true;
+        auto session = make(wire, caps);
+        CHECK(session->initialize(1,false).status == client::RequestStatus::complete);
+        const auto binding = publish(*session);
+        wire.corrupt_conversation_echo = true;
+        CHECK(session->send_text("one",{},binding).status == client::RequestStatus::stale_response);
+    }
+    {
+        // An old server (no acknowledgement) or an old client (no capability): no field, no cancel, no skipped.
+        for (const bool advertised : {true, false}) {
+            BindingEchoTransport wire; wire.conversation_support = false; wire.rechat_scene_support = true;
+            auto session = make(wire, advertised ? caps : std::vector<std::string>{"dialogue.text","dialogue.turn_ownership"});
+            CHECK(session->initialize(1,false).status == client::RequestStatus::complete);
+            CHECK(!session->conversation_ready());
+            const auto binding = publish(*session);
+            CHECK(session->send_text("one",{},binding).status == client::RequestStatus::complete);
+            CHECK(sent_ids(wire) == std::vector<std::string>{std::string{}});
+            CHECK(!session->end_conversation_for_cancel());
+            CHECK(wire.requests.back().body.find("\"conversation_id\"") == std::string::npos);
+        }
+    }
+    // Idle ends a conversation; only a request that carried the id counts as activity.
+    {
+        client::ConversationContinuity continuity{std::chrono::seconds{60}};
+        const auto start = client::ConversationContinuity::Clock::now();
+        const auto first = continuity.touch(start);
+        CHECK(protocol_native::valid_conversation_id(first));
+        CHECK(continuity.touch(start + std::chrono::seconds{50}) == first);
+        CHECK(continuity.touch(start + std::chrono::seconds{100}) == first);   // 50 s after the last request
+        const auto second = continuity.touch(start + std::chrono::seconds{200});
+        CHECK(second != first && continuity.last_end() == client::ConversationEnd::idle);
+        CHECK(continuity.current() == second && continuity.end(client::ConversationEnd::halt) == second && continuity.current().empty());
+        CHECK(client::ConversationContinuity::format_uuid_v4({}) == "00000000-0000-4000-8000-000000000000");
+    }
+}
+
 int main() {
+    conversation_client_tests();
     // Full flat clients receive a specialized accepted code, not the minimal loopback's init_accepted.
     for (int mode=0;mode<4;++mode) {
         BindingEchoTransport wire;wire.gift_menu_support=true;wire.actor_stats_support=mode!=1;wire.actor_condition_support=mode!=1;

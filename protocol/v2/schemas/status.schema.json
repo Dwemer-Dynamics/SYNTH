@@ -40,6 +40,9 @@
     "delivery_receipts": {
       "type": "boolean"
     },
+    "conversation": {
+      "type": "boolean"
+    },
     "actor_stats": {
       "type": "boolean"
     },

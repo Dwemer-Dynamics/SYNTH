@@ -130,7 +130,7 @@ public:
                                                              bool reading_events_available = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
-            "dialogue.delivery_receipts",
+            "dialogue.delivery_receipts", "dialogue.conversation",
             "runtime.retirement", "context.saved_anchor", "media.binary", "context.actor_identity",
             "media.image.upload", "visual_context.capture", "visual_context.describe",
             "visual_context.portrait",
@@ -629,6 +629,8 @@ public:
             if (snapshot.generation().value() != acknowledged_world_generation_ ||
                 snapshot.frame() >= acknowledged_world_frame_) {
                 acknowledged_world_context_ = context::world_observation(snapshot);
+                // A different player cell ends the conversation; the next player request starts a new one.
+                if (snapshot.world()) (void)client_.conversation().observe_cell(snapshot.world()->cell);
                 if (auto quests = context::quest_observation(snapshot)) {
                     acknowledged_quest_context_ = std::move(quests);
                     acknowledged_quest_sequence_ = outcome.context_binding.sequence;

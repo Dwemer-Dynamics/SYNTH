@@ -408,6 +408,35 @@ public:
         }
     }
 
+    // Explicit player cancel (the CancelConversation hotkey): drops the live conversation's local work like a
+    // superseding line does (queued speech is skipped, the line being spoken is cut off, actions and rechat are
+    // cleared) and tells the server to stop that conversation's in-flight work. Unlike a halt the session keeps
+    // running, and the next player request starts a new conversation. Needs the negotiated dialogue.conversation
+    // capability; without it nothing happens, so the released halt and interrupt behaviour is unchanged.
+    void cancel_conversation() noexcept {
+        try {
+            // The id is retired and captured here, on the game thread at the key press; the network task only names it.
+            auto ended = client_.end_conversation_for_cancel();
+            if (!ended) return;
+            (void)begin_player_turn();
+            const auto submitted = network_.try_submit(
+                "network", tasks::TaskClass::current_turn,
+                tasks::TaskLanes::Clock::now() + std::chrono::seconds{2}, cancellation_.token(),
+                [this, id = std::move(*ended)](const core::CancellationToken&) {
+                    try {
+                        const auto outcome = client_.cancel_conversation(id);
+                        if (outcome && outcome->status != RequestStatus::complete && outcome->status != RequestStatus::cancelled)
+                            push_notification("SYNTH conversation stopped locally; server cancellation was not acknowledged");
+                    } catch (const std::exception&) {
+                        push_notification("SYNTH conversation stopped locally; server cancellation failed");
+                    }
+                });
+            if (submitted != tasks::SubmitResult::accepted)
+                push_notification("SYNTH conversation stopped locally; server cancellation could not be queued");
+            else push_notification("SYNTH conversation cancelled");
+        } catch (...) {}
+    }
+
     template <class Present>
     void drain_notifications(Present&& present) { notifications_.drain(std::forward<Present>(present)); }
 

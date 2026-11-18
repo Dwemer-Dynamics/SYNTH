@@ -112,10 +112,14 @@ private:
 // Completed native audio proves a heard line. A text-only line (no TTS, failed or silent TTS) is heard once its
 // caption has been shown for the whole reading window: text_complete (uncancelled) is text_presented. A caption
 // that was only queued, replaced, cancelled or discarded never claims presentation.
+// A line cut off after it started is interrupted; one that never started is skipped (sent as interrupted to a
+// server that did not negotiate dialogue.conversation, which is what it always was).
 [[nodiscard]] inline std::optional<protocol_native::SpeechReceiptOutcome> speech_receipt_outcome(
     presentation::DialogueDelivery terminal, bool cancelled) noexcept {
     using presentation::DialogueDelivery;
     if (terminal == DialogueDelivery::spoken && !cancelled) return protocol_native::SpeechReceiptOutcome::audio_completed;
+    if (terminal == DialogueDelivery::skipped)
+        return cancelled ? protocol_native::SpeechReceiptOutcome::skipped : protocol_native::SpeechReceiptOutcome::failed;
     if (terminal == DialogueDelivery::text_complete && !cancelled) return protocol_native::SpeechReceiptOutcome::text_presented;
     if (terminal == DialogueDelivery::discarded || terminal == DialogueDelivery::spoken)
         return cancelled ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::failed;

@@ -24,7 +24,9 @@ namespace synth::presentation {
 
 // text_complete means the caption was active for its whole reading window (a text-only line, or voice that failed or
 // was silent); the client reports it as text_presented. Cancelled or discarded captions never reach it.
-enum class DialogueDelivery { pending, playing, spoken, reading, text_complete, discarded };
+// skipped is only ever reported to on_terminal, never stored: a line discarded before it started playing or
+// reading, so the player heard none of it. A line discarded after it started is reported as discarded.
+enum class DialogueDelivery { pending, playing, spoken, reading, text_complete, discarded, skipped };
 
 struct DialogueCaption final {
     std::uint64_t generation{};
@@ -69,7 +71,9 @@ struct DialogueCaption final {
         }
         if (on_terminal && (state == DialogueDelivery::spoken || state == DialogueDelivery::text_complete ||
             state == DialogueDelivery::discarded) && !terminal_reported->exchange(true, std::memory_order_acq_rel)) {
-            try { on_terminal(state, cancellation.is_cancelled() || scene_rejected()); } catch (...) {}
+            const auto reported = state == DialogueDelivery::discarded && previous == DialogueDelivery::pending
+                ? DialogueDelivery::skipped : state;
+            try { on_terminal(reported, cancellation.is_cancelled() || scene_rejected()); } catch (...) {}
         }
     }
 

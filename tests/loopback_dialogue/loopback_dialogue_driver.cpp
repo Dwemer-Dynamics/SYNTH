@@ -35,10 +35,16 @@
 // runs. Two replacement sessions restored from co-saves before and after the generated lines then make one /talk each.
 // The PlayerDialogue departure watch that decides to cancel needs Windows headers and is not compiled here.
 //
+// The opt-in "conversation" scenario drives dialogue.conversation on both lanes against a fixture companion, Piper, with
+// SYNTHETIC captured actor state: three turns (ordinary, /talk, ordinary) in one conversation whose id every response echoes;
+// a heard, an interrupted and a skipped line reported through the shipped caption hooks and receipt exchange; the next prompt on
+// each lane; a player cell change that starts a new conversation (the driver calls observe_cell as ContextPublication does);
+// an explicit scoped cancel of a request held at the provider; and an older client without the capability on the same server.
+//
 // The opt-in "voice" scenario is one /talk to a target whose profile has no TTS connector: its line has no speech block,
 // a cancelled caption sends no receipt, and a fully shown caption sends one text_presented receipt the server must store.
 //
-// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice]   (any non-loopback address is refused)
+// Usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice|conversation]   (any non-loopback address is refused)
 #include "client/http.hpp"
 #include "client/save_checkpoint.hpp"
 #include "client/speech_receipts.hpp"
@@ -1079,13 +1085,222 @@ int run_autochat(std::string_view base) {
 
 } // namespace
 
+// ---- Conversation scenario (opt-in): dialogue.conversation on both dialogue lanes ----
+
+// One conversation turn on either lane and its single receipt-owned NPC line.
+struct ConversationTurn final {
+    client::RequestOutcome context, reply;
+    protocol_native::Line line;
+    std::string conversation;  // what the response's start line echoed
+};
+
+std::string echoed_conversation(const client::RequestOutcome& reply) {
+    const auto* start = reply.lines.empty() ? nullptr : std::get_if<protocol_native::Start>(&reply.lines.front().payload);
+    CHECK(start);
+    return start->conversation_id;
+}
+
+// native: an explicit /talk. Otherwise an ordinary unmarked question on the legacy route.
+ConversationTurn converse(Writer& s, std::string question, bool native) {
+    ConversationTurn turn;
+    if (native) {
+        auto talk = s.talk(std::move(question));
+        turn.context = std::move(talk.context);
+        turn.reply = std::move(talk.reply);
+        turn.line = talk.line;
+    } else {
+        auto asked = s.ask(std::move(question), protocol_native::TextIntent::unmarked);
+        CHECK(asked.reply.status == client::RequestStatus::complete);
+        turn.context = std::move(asked.context);
+        turn.reply = std::move(asked.reply);
+        std::size_t owned{};
+        for (const auto& line : turn.reply.lines) {
+            const auto* said = std::get_if<protocol_native::Dialogue>(&line.payload);
+            if (said && said->receipt_required) { turn.line = line; ++owned; }
+        }
+        CHECK(owned == 1);
+    }
+    turn.conversation = echoed_conversation(turn.reply);
+    return turn;
+}
+
+const protocol_native::Dialogue& said_by(const ConversationTurn& turn) { return std::get<protocol_native::Dialogue>(turn.line.payload); }
+
+// The terminal delivery of a line through the shipped caption hook and the shared receipt exchange SpeechDelivery's drain
+// runs. heard: audio finished; interrupted: cut off after it started playing; skipped: discarded before it started.
+enum class Ending { heard, interrupted, skipped };
+client::SpeechReceiptExchange deliver(Writer& s, const ConversationTurn& turn, Ending ending, bool native) {
+    const auto outbox = std::make_shared<client::SpeechReceiptOutbox>();
+    core::CancellationSource line_turn{s.owner.token()};
+    const auto& said = said_by(turn);
+    const auto player = s.actor(player_form, "Sole Survivor");
+    presentation::DialogueCaption caption{.generation = turn.line.generation, .text = said.text, .cancellation = line_turn.token(),
+        .request_id = turn.line.request_id, .line_id = turn.line.line_id, .context_sequence = turn.line.context_sequence,
+        .on_terminal = native ? client::speech_receipt_hook(outbox, turn.line, said, s.synth.native_turn_ready())
+                              : client::ordinary_speech_receipt_hook(outbox, turn.line, said, player, s.synth.delivery_receipts_ready())};
+    CHECK(caption.on_terminal);
+    if (ending == Ending::heard) {
+        caption.mark_delivery(presentation::DialogueDelivery::playing);
+        caption.mark_delivery(presentation::DialogueDelivery::spoken);
+    } else {
+        if (ending == Ending::interrupted) caption.mark_delivery(presentation::DialogueDelivery::playing);
+        line_turn.cancel();  // the player cancelled or spoke over it
+        caption.mark_delivery(presentation::DialogueDelivery::discarded);
+    }
+    auto pending = outbox->take(turn.line.generation);
+    CHECK(pending.size() == 1);
+    const auto expected = ending == Ending::heard ? protocol_native::SpeechReceiptOutcome::audio_completed
+        : ending == Ending::interrupted ? protocol_native::SpeechReceiptOutcome::interrupted : protocol_native::SpeechReceiptOutcome::skipped;
+    // A server that did not negotiate dialogue.conversation is sent the released interrupted outcome for a skipped line.
+    CHECK(pending.front().receipt.outcome == expected);
+    return client::exchange_speech_receipt(s.synth, pending.front(), s.owner.token(), s.terminal, {});
+}
+
+json::Value::Object turn_fields(const Writer& s, const ConversationTurn& turn) {
+    return {{"session", s.session}, {"request_id", turn.reply.request_id}, {"line_id", turn.line.line_id},
+        {"context_sequence", turn.line.context_sequence}, {"conversation_id", turn.conversation},
+        {"text", said_by(turn).text}, {"receipt_required", json::Value{said_by(turn).receipt_required}},
+        {"native_turn", json::Value{said_by(turn).native_turn}}};
+}
+
+int run_conversation(std::string_view base) {
+    LoopbackHttpTransport transport{base};
+    core::SaveContextStore store;
+    const auto fill = [] { core::PlaythroughUuid bytes{}; bytes.fill(0x6c); return std::optional{bytes}; };
+    CHECK(store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
+    auto capabilities = dialogue_capabilities();
+    capabilities.emplace_back("dialogue.turn_cancel");
+    capabilities.emplace_back("dialogue.delivery_receipts");
+    capabilities.emplace_back("dialogue.conversation");
+    client::append_wait_capabilities(capabilities, core::RuntimeVariant::flat);
+    Writer s{transport, "loopback-conversation", 1, store, capabilities};
+    CHECK(s.synth.conversation_ready() && s.synth.delivery_receipts_ready());
+    s.target_form_id = piper_form;
+    s.target_name = "Piper";
+    const auto piper = s.actor(piper_form, "Piper");
+    protocol_native::ActorState captured{.actor = piper, .base_form_id = std::string{piper_base_form},
+        .base_origin_plugin = "Fallout4.esm", .x = 96.0, .y = 128.0, .z = 0.0, .distance = 160.0, .alive = true, .level = 12,
+        .race = "HumanRace", .sex = "female", .teammate = true, .health_percent = 100.0, .action_points_percent = 100.0,
+        .line_of_sight = "visible", .life_state = "alive", .posture = "normal", .health_percent_available = true,
+        .action_points_percent_available = true, .wait_held = false};
+    captured.actor_stats = core::ActorStats{};
+    s.actor_states = {captured};
+    s.audience_observation = "complete";
+
+    const auto first = s.publish();
+    phase("conv_context", {{"session", s.session}, {"playthrough_id", s.playthrough}, {"context_request_id", first.request_id},
+        {"conversation_ready", json::Value{s.synth.conversation_ready()}}});
+    const auto activation = s.synth.activate(piper, "manual", first.context_binding);
+    CHECK(activation.status == client::RequestStatus::complete);
+
+    // Three turns on both lanes (ordinary, /talk, ordinary) belong to one conversation, echoed by every response.
+    const auto a = converse(s, "Piper, how is the settlement?", false);
+    phase("conv_turn_a", turn_fields(s, a));
+    const auto b = converse(s, "Piper, tell me about Diamond City.", true);
+    phase("conv_turn_b", turn_fields(s, b));
+    const auto c = converse(s, "Piper, any news from the Minutemen?", false);
+    phase("conv_turn_c", turn_fields(s, c));
+    CHECK(!a.conversation.empty() && a.conversation == b.conversation && b.conversation == c.conversation);
+    CHECK(a.conversation == s.synth.conversation().current());
+
+    // Line lifecycle across both lanes: heard (audio finished), interrupted (cut off after it started), skipped (never started).
+    const auto heard = deliver(s, a, Ending::heard, false);
+    const auto cut = deliver(s, b, Ending::interrupted, true);
+    const auto skipped = deliver(s, c, Ending::skipped, false);
+    CHECK(heard.accepted_state == "spoken" && cut.accepted_state == "interrupted" && skipped.accepted_state == "failed");
+    phase("conv_receipts", {{"session", s.session}, {"a", json::Value{turn_fields(s, a)}}, {"b", json::Value{turn_fields(s, b)}}, {"c", json::Value{turn_fields(s, c)}}});
+
+    // The next prompt on each lane keeps the heard line, keeps the cut-off line marked, and never carries the skipped one.
+    const auto d = converse(s, "Piper, one more thing about the settlement.", false);
+    CHECK(d.conversation == a.conversation);
+    phase("conv_followup_ordinary", turn_fields(s, d));
+    const auto e = converse(s, "Piper, tell me about Diamond City again.", true);
+    CHECK(e.conversation == a.conversation);
+    phase("conv_followup_native", turn_fields(s, e));
+
+    // A player cell change ends the conversation; the next request starts a new one.
+    CHECK(s.synth.conversation().observe_cell("Sanctuary Hills") == std::nullopt);
+    CHECK(s.synth.conversation().observe_cell("Concord") == a.conversation);
+    const auto f = converse(s, "Piper, we are in Concord now.", false);
+    CHECK(!f.conversation.empty() && f.conversation != a.conversation);
+    phase("conv_reset", turn_fields(s, f));
+
+    // An explicit player cancel stops a request held at the provider, and nothing it produces is delivered late.
+    json::Value::Object held_fields;
+    {
+        core::CancellationSource turn{s.owner.token()};
+        client::RequestOutcome context;
+        {
+            const auto hold = s.synth.begin_context_turn();
+            context = s.publish();
+        }
+        auto binding = context.context_binding;
+        binding.cancellation = turn.token();
+        client::RequestOutcome reply;
+        std::string failure;
+        std::thread worker{[&] {
+            try { reply = s.synth.send_text("Piper, hold that thought.", {}, binding, {}, protocol_native::TextIntent::unmarked); }
+            catch (const std::exception& error) { failure = error.what(); }
+        }};
+        struct Join final {
+            core::CancellationSource& turn;
+            std::thread& worker;
+            ~Join() { turn.cancel(); if (worker.joinable()) worker.join(); }
+        } join{turn, worker};
+        phase("conv_held", {{"session", s.session}, {"conversation_id", f.conversation}});
+        // What PluginSession::cancel_conversation does: the local turn first, then the scoped server cancel.
+        const auto ended = s.synth.end_conversation_for_cancel();
+        CHECK(ended && *ended == f.conversation);
+        turn.cancel();
+        const auto cancelled = s.synth.cancel_conversation(*ended, protocol_native::ConversationCancelReason::player_cancel);
+        const auto* accepted = cancelled ? only_status(*cancelled) : nullptr;
+        CHECK(cancelled && cancelled->status == client::RequestStatus::complete && accepted && accepted->code == "cancel_accepted");
+        worker.join();
+        CHECK(failure.empty() && reply.status == client::RequestStatus::cancelled);
+        CHECK(s.synth.conversation().current().empty());
+        held_fields = {{"session", s.session}, {"request_id", reply.request_id}, {"cancel_request_id", cancelled->request_id},
+            {"conversation_id", f.conversation}};
+    }
+    phase("conv_cancelled", std::move(held_fields));
+    const auto g = converse(s, "Piper, are you still there?", false);
+    CHECK(g.conversation != a.conversation && g.conversation != f.conversation);
+    phase("conv_after_cancel", turn_fields(s, g));
+
+    // An older client, one that never asked for dialogue.conversation, still works unchanged on the same server.
+    core::SaveContextStore old_store;
+    CHECK(old_store.start_new_game(fill).resolution == core::IdentityResolution::new_game);
+    auto old_capabilities = dialogue_capabilities();
+    old_capabilities.emplace_back("dialogue.delivery_receipts");
+    client::append_wait_capabilities(old_capabilities, core::RuntimeVariant::flat);
+    Writer old{transport, "loopback-conversation-old", 1, old_store, old_capabilities};
+    CHECK(!old.synth.conversation_ready() && old.synth.delivery_receipts_ready());
+    old.target_form_id = piper_form;
+    old.target_name = "Piper";
+    old.actor_states = {captured};
+    old.audience_observation = "complete";
+    const auto old_first = old.publish();
+    CHECK(old.synth.activate(piper, "manual", old_first.context_binding).status == client::RequestStatus::complete);
+    const auto old_a = converse(old, "Piper, how is the settlement?", false);
+    CHECK(old_a.conversation.empty() && !old.synth.end_conversation_for_cancel());
+    // An interrupted line is released behaviour for it: stored interrupted, never entering context.
+    const auto old_cut = deliver(old, old_a, Ending::interrupted, false);
+    CHECK(old_cut.accepted_state == "interrupted");
+    phase("conv_old_client", {{"session", old.session}, {"a", json::Value{turn_fields(old, old_a)}}});
+    const auto old_b = converse(old, "Piper, one more thing.", false);
+    CHECK(old_b.conversation.empty());
+    phase("conv_old_followup", turn_fields(old, old_b));
+    std::cout << "DONE" << std::endl;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const std::string_view scenario = argc == 3 ? argv[2] : "dialogue";
-    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness" && scenario != "autochat" && scenario != "voice")) {
-        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice]\n";
+    if ((argc != 2 && argc != 3) || (scenario != "dialogue" && scenario != "companion" && scenario != "witness" && scenario != "autochat" && scenario != "voice" && scenario != "conversation")) {
+        std::cerr << "usage: loopback_dialogue_driver http://127.0.0.1:PORT [dialogue|companion|witness|autochat|voice|conversation]\n";
         return 2;
     }
     try {
+        if (scenario == "conversation") return run_conversation(argv[1]);
         if (scenario == "witness") return run_witness(argv[1]);
         if (scenario == "autochat") return run_autochat(argv[1]);
         if (scenario == "voice") return run_voice(argv[1]);

@@ -12,7 +12,7 @@ Mode/model selectors wait for a validated server acknowledgement. Profile refres
 
 ## Layout and first use
 
-Open **SYNTH > Hotkeys** and bind **Chatbox** or **Hold to Talk**, plus **SYNTH Control**. All eight keys remain unbound by default. Hold to Talk also needs its toggle enabled on Sound. Without the flat Menu Framework, configure keys in `SYNTH_custom.ini`; VR keeps the limits below.
+Open **SYNTH > Hotkeys** and bind **Chatbox** or **Hold to Talk**, plus **SYNTH Control**. All nine keys remain unbound by default. Hold to Talk also needs its toggle enabled on Sound. Without the flat Menu Framework, configure keys in `SYNTH_custom.ini`; VR keeps the limits below.
 
 Chat Mode groups the same nine choices under Conversation, Narration, Direction and Context Injection. These headings do not create independent switches: exactly one mode remains selected, with unchanged wire values and acknowledgement behavior. Model Slot selects a server-configured slot; provider/model setup stays in the server dashboard and availability depends on the NPC profile. Dynamic Profiles rebuilds profile details after Control closes.
 
@@ -20,7 +20,7 @@ NPC Activation holds the activation distances and hostile/creature policy. Heari
 
 ## Bindings and lanes
 
-All eight `[Hotkeys]` scan codes (`TalkToNPC`, `ToggleVoice`, `StopTalking`, `SYNTHControl`, `OpenMicMute`, `ManualActivate`, `PipVision`, `WriteDiary`) ship as 0, meaning unbound. SYNTH's INI chain is authoritative and the game thread polls it in both lanes.
+All nine `[Hotkeys]` scan codes (`TalkToNPC`, `ToggleVoice`, `StopTalking`, `SYNTHControl`, `OpenMicMute`, `ManualActivate`, `PipVision`, `WriteDiary`, `CancelConversation`) ship as 0, meaning unbound. SYNTH's INI chain is authoritative and the game thread polls it in both lanes.
 
 | Surface | Flat with Menu Framework | Flat without framework | VR |
 |---|---|---|---|

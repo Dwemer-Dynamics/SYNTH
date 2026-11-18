@@ -372,6 +372,7 @@ Control and lifecycle:
 - [ ] Actions: each enabled capability runs once, with ownership and truthful results.
       Pickup stays disabled.
 - [ ] Halt (`StopTalking`) and interrupt stop speech and pending work without a late reply.
+- [ ] Cancel Conversation (`CancelConversation`, unbound by default): bound in flat and VR, it stops the line being spoken, drops queued replies, and a later reply to that conversation never plays; the next thing said starts a new conversation and the session stays up. Not yet exercised in game.
 - [x] Saved history after Stop: publish an addressed public NPC-pair result,
       Stop, make a later manual save, reload it and verify both directed readers
       retain the same accepted result. The observed flat failure reused an older

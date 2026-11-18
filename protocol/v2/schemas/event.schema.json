@@ -2069,6 +2069,26 @@
       }
     },
     {
+      "$comment": "conversation-capability-prerequisite",
+      "if": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.turn_ownership"}}}}
+    },
+    {
+      "$comment": "conversation-id-carriers",
+      "if": {"properties": {"type": {"enum": ["input_text", "input_audio", "trigger"]}, "payload": {"required": ["conversation_id"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
+    },
+    {
+      "$comment": "conversation-cancel-extended",
+      "if": {"properties": {"type": {"const": "cancel"}, "payload": {"anyOf": [{"required": ["scope"]}, {"required": ["reason"]}, {"required": ["conversation_id"]}]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
+    },
+    {
+      "$comment": "conversation-skipped-receipt",
+      "if": {"properties": {"type": {"const": "speech_receipt"}, "payload": {"properties": {"outcome": {"const": "skipped"}}, "required": ["outcome"]}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "dialogue.conversation"}}}}
+    },
+    {
       "if": {
         "properties": {
           "type": {

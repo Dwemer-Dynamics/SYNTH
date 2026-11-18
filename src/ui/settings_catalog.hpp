@@ -114,7 +114,7 @@ struct HotkeyBinding final {
 
 // `SYNTH.VoiceChat` keeps its original identifier although the control is now
 // labelled Hold to Talk, so saved framework bindings still resolve.
-inline constexpr std::array<HotkeyBinding, 8> hotkey_bindings{{
+inline constexpr std::array<HotkeyBinding, 9> hotkey_bindings{{
     {"SYNTH.Chatbox", "TalkToNPC", "Chatbox"},
     {"SYNTH.VoiceChat", "ToggleVoice", "Hold to Talk"},
     {"SYNTH.HaltActions", "StopTalking", "Halt AI Actions"},
@@ -123,18 +123,19 @@ inline constexpr std::array<HotkeyBinding, 8> hotkey_bindings{{
     {"SYNTH.ManualActivate", "ManualActivate", "Manual AI Activate"},
     {"SYNTH.PipVision", "PipVision", "Use PipVision"},
     {"SYNTH.WriteDiary", "WriteDiary", "Write NPC Diary"},
+    {"SYNTH.CancelConversation", "CancelConversation", "Cancel Conversation"},
 }};
 
 namespace detail {
 
-// All eight keyboard bindings live on this page, each exactly once. Target text
+// All nine keyboard bindings live on this page, each exactly once. Target text
 // follows the flat conversation policy: the crosshair NPC first, otherwise the
 // nearest eligible NPC within hearing range for the current chat mode. The
 // visible notes say where a rebind takes effect: the framework registry only
 // mirrors SYNTH's INI for conflict checks and is never read back.
 inline constexpr Setting hotkeys_page[] = {
     {"Start here: bind Chatbox or Hold to Talk, plus SYNTH Control.",
-     "Open SYNTH > Hotkeys to assign keys. All eight start unbound. Chatbox opens text dialogue; "
+     "Open SYNTH > Hotkeys to assign keys. All nine start unbound. Chatbox opens text dialogue; "
      "Hold to Talk records while held. SYNTH Control chooses the chat mode and server model slot.",
      "", "", SettingKind::note},
     {"Bindings", "", "", "", SettingKind::section},
@@ -182,6 +183,10 @@ inline constexpr Setting hotkeys_page[] = {
      "Hotkeys", "PipVision", SettingKind::keybind, 0, 255, 1},
     {"Write NPC Diary", "Point at an NPC and press once to request a diary entry. Unbound by default.",
      "Hotkeys", "WriteDiary", SettingKind::keybind, 0, 255, 1},
+    {"Cancel Conversation",
+     "Stop the current conversation: pending replies are dropped, a line being spoken is cut off, and the "
+     "next thing you say starts a new conversation. Unlike Halt AI Actions it keeps SYNTH running. Unbound by default.",
+     "Hotkeys", "CancelConversation", SettingKind::keybind, 0, 255, 1},
 };
 
 inline constexpr Setting auto_activate_page[] = {
@@ -342,6 +347,7 @@ inline constexpr std::array<Page, 6> pages{{
         if (key == "PipVision") return configuration.hotkeys.pip_vision;
         if (key == "OpenMicMute") return configuration.hotkeys.open_mic_mute;
         if (key == "WriteDiary") return configuration.hotkeys.write_diary;
+        if (key == "CancelConversation") return configuration.hotkeys.cancel_conversation;
     } else if (section == "AutoActivate") {
         if (key == "Enabled") return boolean(configuration.activation.enabled);
         if (key == "AutoAddHostile") return boolean(configuration.activation.include_hostile);
