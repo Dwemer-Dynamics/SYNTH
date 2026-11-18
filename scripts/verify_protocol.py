@@ -361,6 +361,11 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
             raise ValidationError(f"{path}: native quest batch requires v2 flat capability")
         if any(event["visibility_sequence"] >= payload["snapshot_sequence"] for event in payload["quest_events"]["events"]):
             raise ValidationError(f"{path}: quest visibility witness must precede context or use zero")
+    if payload_type == "context" and "reading_event" in payload:
+        if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.reading_events" not in value.get("capabilities", []):
+            raise ValidationError(f"{path}: reading event requires negotiated v2 flat capability")
+        if int(payload["reading_event"]["event_id"][8:]) > 9007199254740991:
+            raise ValidationError(f"{path}: reading event ID exceeds wire-safe integer")
     if payload_type == "context" and "loaded_context" in payload:
         if "context.saved_anchor" not in value.get("capabilities", []) or payload["loaded_context"]["playthrough_id"] != payload["playthrough_id"]:
             raise ValidationError(f"{path}: unnegotiated or cross-playthrough loaded context")

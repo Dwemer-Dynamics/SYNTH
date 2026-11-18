@@ -84,6 +84,9 @@
     },
     "narrator_object": {
       "type": "boolean"
+    },
+    "reading_events": {
+      "type": "boolean"
     }
   }
 }

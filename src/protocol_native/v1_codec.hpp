@@ -6,6 +6,7 @@
 #include "core/quest_event_mailbox.hpp"
 #include "core/player_event_sampler.hpp"
 #include "core/event_witness.hpp"
+#include "core/reading_event.hpp"
 #include "client/actor_event_binding.hpp"
 #include "runtime/social_task_codec.hpp"
 
@@ -134,6 +135,11 @@ struct NativeDialogueObservation {
     core::DialogueObservation observation;
     std::uint64_t age_ms{};
 };
+// One thing the player just read; age is observation to encoding, so a retry keeps the original capture.
+struct NativeReadingEvent {
+    core::ReadingEvent event;
+    std::uint64_t age_ms{};
+};
 struct NearbyItemState {
     std::string reference_id, base_form_id, cell_form_id;
     std::optional<std::string> reference_origin_plugin;
@@ -190,7 +196,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -512,7 +518,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "control_audience", "delivery_receipts", "narrator_object"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "narrator_object"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -543,6 +549,8 @@ inline Line decode_line(std::string_view wire) {
             std::get<Status>(line.payload).actor_condition = required(payload, "actor_condition").as_bool();
         if (payload.find("trade_confirmation"))
             std::get<Status>(line.payload).trade_confirmation = required(payload, "trade_confirmation").as_bool();
+        if (payload.find("reading_events"))
+            std::get<Status>(line.payload).reading_events = required(payload, "reading_events").as_bool();
     }
     else if(type=="response_end") {
         closed_object(payload, {"status"});
@@ -1403,6 +1411,25 @@ inline json::Value observed_dialogue_value(const NativeDialogueObservation& valu
                     : reference(evidence.scene.worldspace_form_id, evidence.scene.worldspace_origin_plugin)}})}},
             {"actors", std::move(witnesses)}})}}})};
 }
+// Copied game text for one reading. Title and text are re-bounded on encode so no caller can widen the contract.
+inline json::Value reading_event_value(const NativeReadingEvent& value, const EventContext& context, const Identity& player) {
+    const auto& reading = value.event;
+    if (!reading.valid() || value.age_ms > core::RuntimeGeneration::maximum_wire_value ||
+        context.protocol_version != 2 || context.runtime_variant != "flat" || player.playthrough_id.empty() ||
+        std::ranges::find(context.capabilities, "context.reading_events") == context.capabilities.end())
+        throw std::invalid_argument{"invalid or unnegotiated reading event"};
+    char form[11]{};
+    std::snprintf(form, sizeof(form), "0x%08X", reading.form_id);
+    auto fields = object({
+        {"event_id", "reading:" + std::to_string(reading.serial)},
+        {"kind", std::string{core::reading_kind_name(reading.kind)}},
+        {"title", reading.title},
+        {"source", json::Value{object({{"form_id", std::string{form}}, {"origin_plugin", reading.origin_plugin}})}}});
+    if (!reading.text.empty()) fields.emplace_back("text", reading.text);
+    fields.emplace_back("text_truncated", reading.text_truncated);
+    fields.emplace_back("age_ms", value.age_ms);
+    return json::Value{std::move(fields)};
+}
 inline std::string encode_context(const EventContext& context, std::string playthrough_id,
                                   std::uint64_t sequence, const Identity& player,
                                   const std::optional<Identity>& target,
@@ -1420,7 +1447,8 @@ inline std::string encode_context(const EventContext& context, std::string playt
                                   const std::optional<NativeQuestBatch>& quest_events = std::nullopt,
                                   const std::optional<NativePlayerEvent>& player_event = std::nullopt,
                                   const std::optional<NativeActorBatch>& actor_events = std::nullopt,
-                                  const std::optional<NativeDialogueObservation>& observed_dialogue = std::nullopt) {
+                                  const std::optional<NativeDialogueObservation>& observed_dialogue = std::nullopt,
+                                  const std::optional<NativeReadingEvent>& reading_event = std::nullopt) {
     if (quest_events && (context.protocol_version != 2 || context.runtime_variant != "flat" ||
         std::ranges::find(context.capabilities, "context.quest_events") == context.capabilities.end()))
         throw std::invalid_argument{"native quest batches require negotiated v2 flat capability"};
@@ -1439,6 +1467,7 @@ inline std::string encode_context(const EventContext& context, std::string playt
     if (actor_events) payload.emplace_back("actor_events",actor_events_value(*actor_events,context,player));
     if (player_event) payload.emplace_back("player_event", player_event_value(*player_event, context, player));
     if (observed_dialogue) payload.emplace_back("observed_dialogue", observed_dialogue_value(*observed_dialogue, context, player));
+    if (reading_event) payload.emplace_back("reading_event", reading_event_value(*reading_event, context, player));
     if (loaded_context) payload.emplace_back("loaded_context", json::Value{object({
         {"playthrough_id", loaded_context->playthrough_id}, {"session_id", loaded_context->session_id},
         {"generation", loaded_context->generation}, {"context_sequence", loaded_context->context_sequence}})});

@@ -62,6 +62,13 @@ reaches only the granted witness. A source review found no wrong-grant defect; a
 queue pressure remain in-game checks. There is no model-answer review, game run or migration. See
 [VANILLA-DIALOGUE-WITNESSES.md](VANILLA-DIALOGUE-WITNESSES.md).
 
+## Player reading candidate
+
+Flat-only `context.reading_events` carries the bounded title and text of a book, magazine,
+terminal entry or terminal-launched holotape the player just read, one per context, through the existing
+observation timeline on the server. The off-game contract, codec and queue are tested; the adapter is
+not checked in game, and Pip-Boy inventory reads are not captured. See [READING-EVENTS.md](READING-EVENTS.md).
+
 ## NPC biography and SPECIAL candidate
 
 Authored expertise is preserved once in Background. Skills come only from the exact actor’s copied SPECIAL base/current observations after a negotiated init acknowledgement. New imports use the layout; the server provides an operator-only, provenance-guarded dry-run/apply repair. No database schema change, deployment or game acceptance is implied. See the server [NPC-BIOGRAPHY-REPAIR guide](https://github.com/Dwemer-Dynamics/SynthServer/blob/unstable/docs/NPC-BIOGRAPHY-REPAIR.md) and [protocol/v2/README.md](../protocol/v2/README.md).

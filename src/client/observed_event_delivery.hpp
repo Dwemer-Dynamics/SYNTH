@@ -5,6 +5,7 @@
 #include "client/dialogue_observation_delivery.hpp"
 #include "client/player_dialogue.hpp"
 #include "client/quest_event_delivery.hpp"
+#include "client/reading_event_delivery.hpp"
 #include "client/synth_client.hpp"
 #include "config/config.hpp"
 #include "core/enemy_awareness.hpp"
@@ -77,6 +78,7 @@ public:
         bool quest_events_available;
         bool actor_events_available;
         bool observed_dialogue_available;
+        bool reading_events_available;
         Busy busy;
         CurrentTurn current_turn;
         Notify notify;
@@ -103,6 +105,8 @@ public:
           actor_events_{client_.runtime_session_id(),session_.generation()},
           observed_dialogue_enabled_{dependencies.variant == core::RuntimeVariant::flat && dependencies.observed_dialogue_available},
           dialogue_observations_{session_.generation()},
+          reading_events_enabled_{dependencies.variant == core::RuntimeVariant::flat && dependencies.reading_events_available},
+          reading_events_{session_.generation()},
           player_events_{session_.generation(), dependencies.variant} {
         if (!busy_ || !current_turn_ || !notify_)
             throw std::invalid_argument{"observed event delivery requires busy, turn and notification sinks"};
@@ -120,6 +124,7 @@ public:
         quest_events_.stop();
         actor_events_.stop();
         dialogue_observations_.stop();
+        reading_events_.stop();
     }
 
     void clear_enemy_awareness() noexcept {
@@ -275,6 +280,63 @@ public:
                 } catch (const std::exception&) {
                     if (!observed_dialogue_failure_reported_.exchange(true,std::memory_order_acq_rel))
                         notify_("SYNTH observed dialogue delivery failed; retaining original capture for retry");
+                }
+            }));
+    }
+
+    [[nodiscard]] bool reading_events_ready() const noexcept {
+        return reading_events_enabled_ && client_.reading_events_ready() && !terminal_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool reading_event_capture_ready() const noexcept { return reading_events_ready() && !reading_events_.full(); }
+    [[nodiscard]] std::uint64_t dropped_reading_events() const noexcept { return reading_events_.dropped(); }
+    // Game pump only: one serial per observed reading of this session, consumed even if capture fails.
+    [[nodiscard]] std::uint64_t next_reading_serial() noexcept { return ++reading_serial_; }
+    [[nodiscard]] bool observe_reading(Snapshot scene, core::ReadingEvent event) {
+        return reading_event_capture_ready() && reading_events_.enqueue(std::move(scene), std::move(event));
+    }
+
+    // Same delivery rules as the other observed events: only an exact ACK or a definitive rejection retires a capture.
+    void pump_reading_events() {
+        if (!reading_events_ready() || !reading_events_.pending() || paused_.load(std::memory_order_acquire) ||
+            busy_() || reading_event_tasks_.load(std::memory_order_acquire) != 0) return;
+        const auto now = tasks::TaskLanes::Clock::now();
+        if (now < next_reading_attempt_) return;
+        next_reading_attempt_ = now + std::chrono::seconds{5};
+        (void)network_.try_submit("network", tasks::TaskClass::background,
+            now + std::chrono::milliseconds{request_timeout_ms()}, current_turn_(),
+            tasks::TaskLanes::track_activity(reading_event_tasks_, [this](const core::CancellationToken& cancellation) {
+                if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire) ||
+                    paused_.load(std::memory_order_acquire)) return;
+                ReadingEventDelivery::Prepared capture;
+                try {
+                    capture = reading_events_.prepare();
+                    if (!capture) return;
+                    // Recorded for the addressed actor only; with nobody addressed there is no one who may recall it.
+                    const auto target = context_.reading_target(*capture->scene);
+                    if (!target) {
+                        (void)reading_events_.finish(capture, false);
+                        return;
+                    }
+                    const auto context_turn = client_.begin_context_turn();
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    const auto result = context_.publish(capture->scene, target, cancellation, nullptr, std::nullopt,
+                        std::nullopt, {}, {}, nullptr, {}, capture);
+                    if (cancellation.is_cancelled() || terminal_.load(std::memory_order_acquire)) return;
+                    if (result.status == RequestStatus::complete) {
+                        (void)reading_events_.finish(capture, true);
+                        reading_event_failure_reported_.store(false, std::memory_order_release);
+                    } else if (result.status == RequestStatus::http_failure && result.http_status >= 400 &&
+                        result.http_status < 500 && result.http_status != 408 && result.http_status != 429) {
+                        (void)reading_events_.finish(capture, false);
+                        notify_("SYNTH reading event rejected; check logs");
+                    } else if (!reading_event_failure_reported_.exchange(true, std::memory_order_acq_rel))
+                        notify_("SYNTH reading event not acknowledged; retaining original capture for retry");
+                } catch (const std::invalid_argument&) {
+                    (void)reading_events_.finish(capture, false);
+                    notify_("SYNTH reading event failed validation and was not sent");
+                } catch (const std::exception&) {
+                    if (!reading_event_failure_reported_.exchange(true, std::memory_order_acq_rel))
+                        notify_("SYNTH reading event delivery failed; retaining original capture for retry");
                 }
             }));
     }
@@ -452,6 +514,12 @@ private:
     std::atomic_bool observed_dialogue_failure_reported_{};
     tasks::TaskLanes::Deadline next_observed_dialogue_attempt_{};
     std::uint64_t observed_dialogue_serial_{};
+    const bool reading_events_enabled_;
+    ReadingEventDelivery reading_events_;
+    std::atomic_size_t reading_event_tasks_{};
+    std::atomic_bool reading_event_failure_reported_{};
+    tasks::TaskLanes::Deadline next_reading_attempt_{};
+    std::uint64_t reading_serial_{};
     core::PlayerEventSampler player_events_;
     std::optional<core::CancellationSource> player_event_owner_;
     core::SnapshotClock::time_point next_player_event_attempt_{};

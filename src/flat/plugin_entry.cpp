@@ -18,6 +18,7 @@
 #include "adapters/flat_pickup_inspection.hpp" // Read-only preparation; not a pickup capability.
 #include "adapters/flat_actor_event_capture.hpp"
 #include "adapters/flat_vanilla_dialogue.hpp"
+#include "adapters/flat_reading_events.hpp"
 #include "adapters/commonlib_actions.hpp"
 #include "adapters/commonlib_capture.hpp"
 #include "adapters/commonlib_external_requests.hpp"
@@ -70,6 +71,9 @@ std::uint64_t actor_event_binding_losses{};
 synth::core::DialogueResidencyTracker vanilla_dialogue_tracker;
 const void* vanilla_dialogue_session{};
 std::uint64_t vanilla_dialogue_generation{}, vanilla_dialogue_epoch{}, vanilla_dialogue_losses{};
+// Game-pump-owned: what the player read recently (repeat reads are not new news) and what could not be kept.
+synth::core::ReadingRecents reading_recents;
+std::uint64_t reading_losses{};
 synth::core::PlayerInventoryRefresh player_inventory_refresh;
 std::uint64_t inventory_change_revision{};
 std::uint64_t pending_session_request{};
@@ -411,7 +415,8 @@ void queue_session_initialization(
     }
     pending_session_request = session_host->request_initialize(snapshot, *dispatcher, lifetime,
         synth::adapters::FlatRestEvents::available(), synth::adapters::FlatQuestEvents::available(),
-        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported());
+        synth::adapters::FlatActorEvents::available(), synth::adapters::FlatVanillaDialogue::supported(),
+        synth::adapters::FlatReadingEvents::available());
     if (pending_session_request != 0) {
         REX::INFO("SYNTH runtime: session initialization queued off the game thread");
     }
@@ -861,6 +866,32 @@ void pump_runtime_impl() {
             }
         }
         session->pump_observed_dialogue();
+        if (!session->reading_events_ready()) {
+            synth::adapters::FlatReadingEvents::reset();reading_recents.clear();
+        } else {
+            // Reading happens inside menus that pause the world, so it is sampled on every pump like first-observed dialogue.
+            if (session->reading_event_capture_ready()) {
+                if (auto reading=synth::adapters::FlatReadingEvents::poll(now)) {
+                    const auto owner_session=session.get();const auto generation=runtime->generation();
+                    auto scene=runtime->capture_snapshot(now,synth::runtime::RuntimeCapturePurpose::actor_events);
+                    // Capture can re-enter lifecycle callbacks; a superseded owner keeps nothing.
+                    if (session.get()!=owner_session || runtime->generation()!=generation) return;
+                    const bool fresh=scene && scene->generation()==generation &&
+                        scene->player().playthrough_id()==synth::adapters::commonlib::playthrough_id() &&
+                        reading_recents.fresh(reading->kind,reading->form_id,reading->title,now);
+                    if (fresh) {
+                        reading->serial=session->next_reading_serial();
+                        const auto kind=reading->kind;const auto form=reading->form_id;const auto title=reading->title;
+                        const bool accepted=session->observe_reading(scene,std::move(*reading));
+                        // Only an accepted reading suppresses a re-read; a dropped one stays readable.
+                        if (accepted) reading_recents.remember(kind,form,title,now);
+                        else ++reading_losses;
+                        REX::INFO("SYNTH reading: {} observation admitted {} losses {}",synth::core::reading_kind_name(kind),accepted,reading_losses);
+                    }
+                }
+            }
+            session->pump_reading_events();
+        }
         if (!menu_mode && session->player_event_sample_due(now)) {
             trace_pump_phase("player event sample");
             const auto* owner_session = session.get();
@@ -1421,6 +1452,7 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
         (void)synth::adapters::FlatQuestEvents::install();
         (void)synth::adapters::FlatActorEvents::install();
         (void)synth::adapters::FlatInventoryChanges::install();
+        (void)synth::adapters::FlatReadingEvents::install();
         // F4SE maps every plugin before dispatching this, so the optional
         // F4SE Menu Framework module resolves regardless of plugins.txt order.
         // Registration is a no-op when the framework is not installed.
