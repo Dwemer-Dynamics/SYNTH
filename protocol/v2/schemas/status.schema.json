@@ -58,6 +58,20 @@
     "private_narrator": {
       "type": "boolean"
     },
+    "notify_wake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "port"
+      ],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      }
+    },
     "control_audience": {
       "type": "object",
       "additionalProperties": false,

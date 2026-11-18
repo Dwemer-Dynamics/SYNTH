@@ -170,6 +170,8 @@ def validate(value: Any, schema: dict[str, Any], schema_path: Path, at: str = "$
 
 
 def schema_for_fixture(path: Path, value: dict[str, Any]) -> Path:
+    if value.get("schema") == "synth.notify.hint.v1":
+        return PROTOCOL / "v2/schemas/notify-hint.schema.json"
     if value.get("schema") == "synth.visual_context.capture.v2":
         return PROTOCOL / "v2/schemas/visual-context-capture.schema.json"
     if value.get("schema") == "synth.event.v2":
@@ -195,6 +197,7 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         "synth.visual_context.capture.v1",
         "synth.visual_context.capture.v2",
         "synth.visual_context.response.v1",
+        "synth.notify.hint.v1",
     }:
         return
     catalog_path = V1 / "schemas/payloads.schema.json"
@@ -384,7 +387,12 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
 
 def verify_fixtures(version: Path = V1) -> int:
     checked = 0
-    for path in sorted((version / "fixtures/valid").iterdir()):
+    # fixtures/notify holds wake-up hint frames, which are not events and so stay out of the event fixture directories
+    # that the server's ingress tests replay.
+    extra = version / "fixtures/notify"
+    valid_dirs = [version / "fixtures/valid"] + ([extra / "valid"] if extra.is_dir() else [])
+    invalid_dirs = [version / "fixtures/invalid"] + ([extra / "invalid"] if extra.is_dir() else [])
+    for path in sorted(item for directory in valid_dirs for item in directory.iterdir()):
         lines = path.read_text(encoding="utf-8").splitlines() if path.suffix == ".ndjson" else [path.read_text(encoding="utf-8")]
         values = []
         for line in lines:
@@ -404,7 +412,7 @@ def verify_fixtures(version: Path = V1) -> int:
             line_ids = [v["line_id"] for v in values]
             if len(line_ids) != len(set(line_ids)):
                 raise ValidationError(f"{path}: duplicate line ids")
-    for path in sorted((version / "fixtures/invalid").iterdir()):
+    for path in sorted(item for directory in invalid_dirs for item in directory.iterdir()):
         try:
             lines = path.read_text(encoding="utf-8").splitlines() if path.suffix == ".ndjson" else [path.read_text(encoding="utf-8")]
             for line in lines:

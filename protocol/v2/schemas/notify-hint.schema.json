@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/notify-hint.schema.json",
+  "title": "SYNTH optional wake-up hint frame (carries no message content)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "type"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.notify.hint.v1"
+    },
+    "type": {
+      "enum": [
+        "welcome",
+        "wake"
+      ]
+    },
+    "topic": {
+      "enum": [
+        "speech"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "wake"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "topic"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "welcome"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "topic"
+          ]
+        }
+      }
+    }
+  ]
+}

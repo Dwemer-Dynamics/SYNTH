@@ -670,3 +670,11 @@ manual visual-knowledge edits across saved timelines are still unfinished parity
 ## Conversation continuity and line lifecycle
 
 The optional `dialogue.conversation` capability (v2, with `dialogue.turn_ownership`; acknowledged by `conversation: true` on the init status) gives each conversation a client-created UUID, sent on `input_text`, `input_audio` and every `trigger` and echoed by the server on every `response_start`; the client refuses a response that echoes anything else. `ConversationContinuity` keeps it in memory: a new generation (load or reconnect), a player cell change (observed when a context is acknowledged), an explicit cancel, a halt or ten idle minutes retire it, and the next player request starts a new one. A line discarded before it started playing is reported `skipped`; one cut off after it started is `interrupted` (an older server is sent `interrupted` for both). The `CancelConversation` hotkey (`[Hotkeys]`, unbound by default, flat and VR) drops the conversation's local work like a superseding line and sends `cancel` with `scope: conversation`; `StopTalking` still halts. The v2 protocol README is the normative text.
+
+## Optional wake-up channel
+
+The optional v2 `notify.wake` capability, listed only when `[Server] WakeChannel=true`, lets the server send content-free
+hints over a WebSocket so the wait for ready speech ends early. A server that runs the channel acknowledges with init
+status `notify_wake: {"port": N}`; otherwise nothing is sent and the client polls as before. Hints are
+`synth.notify.hint.v1` (`welcome`, then `wake` with topic `speech`) and change no response. See
+[WAKE-CHANNEL.md](WAKE-CHANNEL.md) and `protocol/v2/README.md`.

@@ -61,6 +61,9 @@ MaxPendingRequests=12
     CHECK(config.server.connection_notice); // On unless SYNTH_custom.ini turns it off.
     CHECK(!parse(defaults, "[Server]\nConnectionNotice=false\n").server.connection_notice);
     rejects([] { (void)parse(defaults, "[Server]\nConnectionNotice=sometimes\n"); });
+    CHECK(!config.server.wake_channel); // Opt-in: off unless SYNTH_custom.ini turns it on.
+    CHECK(parse(defaults, "[Server]\nWakeChannel=true\n").server.wake_channel);
+    rejects([] { (void)parse(defaults, "[Server]\nWakeChannel=maybe\n"); });
     CHECK(config.behavior.end_conversation_cooldown_seconds == 60);
 }
 

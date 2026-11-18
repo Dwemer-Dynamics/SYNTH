@@ -24,6 +24,7 @@
 #include "client/visual_capture.hpp"
 #include "client/server_control.hpp"
 #include "client/private_narrator.hpp"
+#include "client/winhttp_notify_transport.hpp"
 #include "client/winhttp_transport.hpp"
 #include "config/config.hpp"
 #include "core/companion_combat_comment.hpp"
@@ -96,10 +97,11 @@ public:
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
                           configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available,
                           trade::prompt().installed(),
-                          reading_events_available),
+                          reading_events_available, false, configuration_.server.wake_channel),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
+                      .notify_wake_changed = [this](std::uint16_t port) { on_notify_wake(port); },
                   }},
           cancellation_{generation},
           network_({tasks::LaneConfig{"network", configuration_.limits.max_pending_requests, 1, 3}}, 2),
@@ -214,6 +216,7 @@ public:
     PluginSession& operator=(const PluginSession&) = delete;
 
     ~PluginSession() {
+        notify_channel_.shutdown();
         request_stop();
         dialogue_.cancel_microphone();
         transport_.cancel_all();
@@ -221,6 +224,19 @@ public:
         speech_.join_jobs();
         control_.shutdown(tasks::ShutdownMode::cancel_pending);
         speech_.halt_playback();
+    }
+
+    // Called by SynthClient with the acknowledged port after an init, and with 0 when the session has none.
+    void on_notify_wake(std::uint16_t port) {
+        if (port == 0 || !configuration_.server.wake_channel || terminal_.load(std::memory_order_acquire)) {
+            notify_channel_.stop();
+            return;
+        }
+        try {
+            notify_channel_.start(config::detail::parse_url(configuration_.server.base_url).host, port);
+        } catch (...) {
+            notify_channel_.stop(); // The channel is optional: any failure leaves the client polling.
+        }
     }
 
     [[nodiscard]] bool initialize(Snapshot snapshot) { return context_.initialize(std::move(snapshot)); }
@@ -1243,6 +1259,11 @@ private:
     config::Config configuration_;
     WinHttpTransport transport_;
     SynthClient client_;
+    // Optional wake-up channel (Server.WakeChannel). Declared after client_ so it stops first; it only signals
+    // client_.wake_signal() and polling works unchanged without it.
+    WinHttpNotifyTransport notify_transport_{configuration_.server.connect_timeout_ms};
+    transport::NotifyChannel notify_channel_{notify_transport_, client_.wake_signal(),
+        [this](std::string_view message) { push_notification(std::string{message}); }};
     core::CancellationSource cancellation_;
     tasks::TaskLanes network_;
     tasks::TaskLanes control_{{tasks::LaneConfig{"control", 4, 4, 4}}, 1};

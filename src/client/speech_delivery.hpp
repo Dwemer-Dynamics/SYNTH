@@ -349,6 +349,8 @@ private:
             line.generation,line.context_sequence,line.request_id,line.line_id);
         while (!stopped(cancellation) &&
                tasks::TaskLanes::Clock::now() < deadline && speech.status != "ready") {
+            // Read before the status request: a wake-up hint that lands during it ends the wait below at once.
+            const auto wake_epoch = client_.wake_signal().epoch();
             const auto status = client_.fetch_tts_status(speech.cache_key, [this, cancellation] {
                 return stopped(cancellation);
             }, deadline);
@@ -360,8 +362,9 @@ private:
                     break;
                 }
             }
-            std::this_thread::sleep_until(std::min(
-                deadline, tasks::TaskLanes::Clock::now() + std::chrono::milliseconds{100}));
+            // Polling is the default; a live wake-up channel only makes the wait end early and the interval longer.
+            (void)client_.wake_signal().wait_until(std::min(
+                deadline, tasks::TaskLanes::Clock::now() + client_.wake_signal().poll_interval()), wake_epoch);
         }
         if (stopped(cancellation) ||
             tasks::TaskLanes::Clock::now() >= deadline || speech.status != "ready" || !speech.media) return {};

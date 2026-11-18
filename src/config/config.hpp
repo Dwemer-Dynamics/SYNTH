@@ -27,6 +27,7 @@ struct ServerConfig {
     std::uint32_t request_timeout_ms{30'000};
     bool allow_remote{false};
     bool connection_notice{true}; // Tell the player when the server stops answering and when it returns.
+    bool wake_channel{false};     // Opt in to the server's wake-up channel; polling stays the fallback and the default.
 };
 
 struct RuntimeConfig {
@@ -314,6 +315,8 @@ inline void apply(Config& config,
         config.server.allow_remote = parse_bool(value, qualified);
     else if (section == "Server" && key == "ConnectionNotice")
         config.server.connection_notice = parse_bool(value, qualified);
+    else if (section == "Server" && key == "WakeChannel")
+        config.server.wake_channel = parse_bool(value, qualified);
     else if (section == "Runtime" && key == "Enabled")
         config.runtime.enabled = parse_bool(value, qualified);
     else if (section == "Runtime" && key == "LogLevel")
