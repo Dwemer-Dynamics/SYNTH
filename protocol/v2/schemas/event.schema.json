@@ -752,6 +752,35 @@
           },
           "payload": {
             "required": [
+              "reading_event"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "capabilities": {
+            "contains": {
+              "const": "context.reading_events"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
               "actor_events"
             ]
           }
@@ -1338,6 +1367,38 @@
       "if": {
         "properties": {
           "type": {
+            "const": "context"
+          },
+          "payload": {
+            "required": [
+              "actor_states"
+            ],
+            "properties": {
+              "actor_states": {
+                "contains": {
+                  "required": [
+                    "actor_condition"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "context.actor_condition"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
             "const": "social_task_request"
           }
         }
@@ -1823,6 +1884,59 @@
               {
                 "contains": {
                   "const": "action.give_item_to"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.inventory_observation"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dialogue.turn_ownership"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "trade-confirmation-capability",
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "action.trade_confirmation"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime_variant": {
+            "const": "flat"
+          },
+          "capabilities": {
+            "allOf": [
+              {
+                "contains": {
+                  "const": "action.barter"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.player_caps_inventory"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.give_item_to"
+                }
+              },
+              {
+                "contains": {
+                  "const": "action.transfer_inventory"
                 }
               },
               {

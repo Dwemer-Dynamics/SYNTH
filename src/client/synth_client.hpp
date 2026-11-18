@@ -172,6 +172,10 @@ public:
     [[nodiscard]] bool actor_stats_ready() const noexcept {
         return actor_stats_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
     }
+    // Condition facts (radiation, addictions, effects, limbs) need this init's exact acknowledgement.
+    [[nodiscard]] bool actor_condition_ready() const noexcept {
+        return actor_condition_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
     // Private narrator commands, turns and receipts require this init's exact acknowledgement.
     [[nodiscard]] bool uses_private_narrator_contract() const noexcept {
         const auto has = [this](std::string_view value) {
@@ -234,6 +238,19 @@ public:
     }
     [[nodiscard]] bool enemy_awareness_ready() const noexcept {
         return enemy_awareness_negotiated_.load(std::memory_order_acquire) && combat_targets_ready();
+    }
+    [[nodiscard]] bool reading_events_ready() const noexcept {
+        return reading_events_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
+    }
+    // Confirmed NPC sales: granted only by an init whose acknowledgement carries trade_confirmation, over the
+    // player-payment contract it extends. Older servers and VR never acknowledge it.
+    [[nodiscard]] bool uses_trade_contract() const noexcept {
+        return uses_player_caps_contract() &&
+            std::ranges::find(options_.capabilities, "action.barter") != options_.capabilities.end() &&
+            std::ranges::find(options_.capabilities, "action.trade_confirmation") != options_.capabilities.end();
+    }
+    [[nodiscard]] bool trade_ready() const noexcept {
+        return trade_negotiated_.load(std::memory_order_acquire) && player_caps_ready();
     }
     [[nodiscard]] bool observed_dialogue_ready() const noexcept {
         return observed_dialogue_negotiated_.load(std::memory_order_acquire) && !halted_.load(std::memory_order_acquire);
@@ -354,6 +371,7 @@ public:
             // A new generation is a load or reconnect: the old conversation never carries over.
             (void)conversation_.end(ConversationEnd::reconnect);
             actor_stats_negotiated_.store(false, std::memory_order_release);
+            actor_condition_negotiated_.store(false, std::memory_order_release);
             private_narrator_negotiated_.store(false, std::memory_order_release);
             private_narrator_object_negotiated_.store(false, std::memory_order_release);
             everyone_negotiated_.store(false, std::memory_order_release);
@@ -362,6 +380,8 @@ public:
             enemy_awareness_negotiated_.store(false, std::memory_order_release);
             location_ancestry_negotiated_.store(false, std::memory_order_release);
             observed_dialogue_negotiated_.store(false, std::memory_order_release);
+            trade_negotiated_.store(false, std::memory_order_release);
+            reading_events_negotiated_.store(false, std::memory_order_release);
             ambient_npc_negotiated_.store(false, std::memory_order_release);
             quest_events_negotiated_.store(false, std::memory_order_release);
             player_events_negotiated_.store(false, std::memory_order_release);
@@ -399,6 +419,9 @@ public:
             actor_stats_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->actor_stats &&
                 std::ranges::find(options_.capabilities,"context.actor_stats")!=options_.capabilities.end(),std::memory_order_release);
+            actor_condition_negotiated_.store(framed_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && status->actor_condition &&
+                std::ranges::find(options_.capabilities,"context.actor_condition")!=options_.capabilities.end(),std::memory_order_release);
             native_turn_negotiated_.store(framed_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->native_turn && uses_native_turn_contract(),
                 std::memory_order_release);
@@ -442,6 +465,11 @@ public:
                 status->code.starts_with("init_") && status->code.ends_with("_accepted") && status->observed_dialogue &&
                 std::ranges::find(options_.capabilities,"context.observed_dialogue")!=options_.capabilities.end(),
                 std::memory_order_release);
+            // Reading context is flat-only and needs both the capability and the server's explicit grant.
+            reading_events_negotiated_.store(supported_init && options_.runtime_variant == "flat" &&
+                status->code.starts_with("init_") && status->code.ends_with("_accepted") && status->reading_events &&
+                std::ranges::find(options_.capabilities,"context.reading_events")!=options_.capabilities.end(),
+                std::memory_order_release);
             location_ancestry_negotiated_.store(supported_init && status->code.starts_with("init_") &&
                 status->code.ends_with("_accepted") && status->location_ancestry &&
                 std::ranges::find(options_.capabilities,"context.location_ancestry")!=options_.capabilities.end() &&
@@ -458,6 +486,7 @@ public:
             player_item_negotiated_.store(player_item_support, std::memory_order_release);
             const bool player_caps_support = supported_init && (player_item_support || status->code == "init_player_caps_inventory_accepted") && uses_player_caps_contract();
             player_caps_negotiated_.store(player_caps_support, std::memory_order_release);
+            trade_negotiated_.store(player_caps_support && status->trade_confirmation && uses_trade_contract(), std::memory_order_release);
             const bool caps_support = supported_init && (gift_menu_support || player_item_support || player_caps_support || status->code == "init_caps_inventory_accepted") && uses_caps_contract();
             caps_negotiated_.store(caps_support, std::memory_order_release);
             const bool transfer_support = supported_init && (gift_menu_support || player_item_support || caps_support || status->code == "init_transfer_inventory_accepted") && uses_transfer_contract();
@@ -529,7 +558,8 @@ public:
         const std::optional<protocol_native::NativeQuestBatch>& quest_events = std::nullopt,
         const std::optional<protocol_native::NativePlayerEvent>& player_event = std::nullopt,
         const std::optional<protocol_native::NativeActorBatch>& actor_events = std::nullopt,
-        const std::optional<protocol_native::NativeDialogueObservation>& observed_dialogue = std::nullopt) {
+        const std::optional<protocol_native::NativeDialogueObservation>& observed_dialogue = std::nullopt,
+        const std::optional<protocol_native::NativeReadingEvent>& reading_event = std::nullopt) {
         std::scoped_lock request_lock{request_mutex_};
         std::string request_id;
         std::string turn_id;
@@ -543,6 +573,7 @@ public:
         bool combat_contacts_supported{};
         bool enemy_awareness_supported{};
         bool actor_stats_supported{};
+        bool actor_condition_supported{};
         bool location_ancestry_supported{};
         {
             std::scoped_lock state_lock{state_mutex_};
@@ -556,6 +587,8 @@ public:
                 throw std::invalid_argument{"server did not acknowledge native actor event support"};
             if (observed_dialogue && !observed_dialogue_ready())
                 throw std::invalid_argument{"server did not acknowledge observed dialogue support"};
+            if (reading_event && !reading_events_ready())
+                throw std::invalid_argument{"server did not acknowledge reading event support"};
             if (cancellation.generation().valid() && cancellation.generation().value() != generation_)
                 throw std::invalid_argument{"context owner belongs to another runtime generation"};
             if (sequence == 0) sequence = publication_sequence_ + 1;
@@ -573,6 +606,7 @@ public:
             combat_contacts_supported = combat_contacts_ready();
             enemy_awareness_supported = enemy_awareness_ready();
             actor_stats_supported = actor_stats_ready();
+            actor_condition_supported = actor_condition_ready();
             companion_supported = companion_comments_ready();
             location_ancestry_supported = location_ancestry_ready();
         }
@@ -592,6 +626,7 @@ public:
             if (!combat_contacts_supported) state.combat_contacts.reset();
             if (!enemy_awareness_supported) state.enemy_awareness.reset();
             if (!actor_stats_supported) state.actor_stats.reset();
+            if (!actor_condition_supported) state.actor_condition.reset();
             if (state.inventory.size() <= inventory_limit) continue;
             state.inventory.resize(inventory_limit);
             state.inventory_observation = "partial";
@@ -605,7 +640,7 @@ public:
                     audience, negotiated_states, negotiated_world, negotiated_quests, nearby_items, points_of_interest, loaded_context,
                     active_quests_observation, nearby_items_observation,
                     points_of_interest_observation, audience_observation, quest_events, negotiated_player_event, actor_events,
-                    observed_dialogue);
+                    observed_dialogue, reading_event);
                 if (body.size() <= 1'048'576) break;
             } catch (const json::ByteLimitError&) {
                 // The bounded writer stops before allocating an oversized body. Other errors propagate.
@@ -618,7 +653,7 @@ public:
         }
         auto outcome = send_event(request_id, turn_id, generation, std::move(body),
                                   std::move(callback), true, "/main.php", {generation, 0, cancellation});
-        if ((player_event || actor_events || observed_dialogue) && outcome.status == RequestStatus::complete && !context_accepted(outcome)) {
+        if ((player_event || actor_events || observed_dialogue || reading_event) && outcome.status == RequestStatus::complete && !context_accepted(outcome)) {
             outcome.status = RequestStatus::malformed_response;
             outcome.detail = "native event context acknowledgement is missing";
         }
@@ -1529,6 +1564,8 @@ private:
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
     std::atomic_bool observed_dialogue_negotiated_{};
+    std::atomic_bool trade_negotiated_{};
+    std::atomic_bool reading_events_negotiated_{};
     std::atomic_bool ambient_npc_negotiated_{};
     std::atomic_bool action_inventory_negotiated_{};
     std::atomic_bool consumption_negotiated_{};
@@ -1548,6 +1585,7 @@ private:
     std::atomic_bool conversation_negotiated_{};
     ConversationContinuity conversation_;
     std::atomic_bool actor_stats_negotiated_{};
+    std::atomic_bool actor_condition_negotiated_{};
     std::atomic_bool private_narrator_negotiated_{};
     std::atomic_bool private_narrator_object_negotiated_{};
     std::atomic_bool everyone_negotiated_{};

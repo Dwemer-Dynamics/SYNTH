@@ -228,6 +228,10 @@ inline constexpr Setting behavior_page[] = {
      "Behavior", "ShowAISubtitles", SettingKind::toggle},
     {"Scene Safety", "Avoid actors currently controlled by active scene or dialogue packages.",
      "Behavior", "SceneSafety", SettingKind::toggle},
+    {"Server", "", "", "", SettingKind::section},
+    {"Server Connection Notice",
+     "Show a notice when the SYNTH server stops answering and another when it answers again.",
+     "Server", "ConnectionNotice", SettingKind::toggle},
     {"Combat", "", "", "", SettingKind::section},
     {"Allow Combat Dialogue", "Allow regular AI dialogue requests while the player is in combat.",
      "Behavior", "EnableCombatDialogue", SettingKind::toggle},
@@ -358,6 +362,8 @@ inline constexpr std::array<Page, 6> pages{{
             return configuration.activation.exterior_hearing_distance;
         if (key == "AutoHearingDistance")
             return configuration.activation.automatic_hearing_distance;
+    } else if (section == "Server") {
+        if (key == "ConnectionNotice") return boolean(configuration.server.connection_notice);
     } else if (section == "Behavior") {
         if (key == "AIResponseTimeout") return configuration.behavior.ai_response_timeout_seconds;
         if (key == "PauseDialogueOnMenu")

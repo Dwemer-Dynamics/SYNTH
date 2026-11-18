@@ -360,6 +360,82 @@ private:
     return file == nullptr ? std::string{} : std::string{file->GetFilename()};
 }
 
+// Condition facts for the deep actor capture (game thread only). Everything is copied and bounded: no pointer
+// survives the call. An unreadable definition or entry, a cap, or an unsupported lane marks the result
+// truncated instead of reporting "none". Radiation is the radiation actor value over the permanent health
+// value; neither it nor the limb rule has been compared with the HUD in game.
+inline constexpr std::size_t maximum_active_effect_nodes = 256;
+// Numeric SPEL type for addictions; the pinned CommonLibF4 only forward-declares MagicSystem::SpellType.
+inline constexpr std::int32_t addiction_spell_type = 10;
+
+[[nodiscard]] inline std::string condition_name(const RE::TESForm& form) {
+    const auto full = RE::TESFullName::GetFullName(form);
+    auto name = bounded_label(std::string{full}.c_str());
+    if (name.empty()) name = form_fallback(form);
+    return core::ActorConditionEntry::truncate_name(std::move(name));
+}
+
+[[nodiscard]] inline core::ActorCondition actor_condition_snapshot(RE::Actor& actor, const RE::ActorValue* values) {
+    core::ActorCondition result;
+    if (values == nullptr) return result;
+    result.observed = true;
+    const auto* health = values->health;
+    if (values->rads != nullptr && health != nullptr) {
+        const auto rads = static_cast<double>(actor.GetActorValue(*values->rads));
+        const auto maximum = static_cast<double>(actor.GetPermanentActorValue(*health));
+        if (std::isfinite(rads) && std::isfinite(maximum) && maximum > 0.0)
+            result.radiation_percent = std::clamp(rads / maximum * 100.0, 0.0, 100.0);
+    }
+    using Limb = core::ActorCondition::Limb;
+    const std::array<std::pair<const RE::ActorValueInfo*, Limb>, 6> limbs{{
+        {values->perceptionCondition, Limb::head}, {values->enduranceCondition, Limb::torso},
+        {values->leftAttackCondition, Limb::left_arm}, {values->rightAttackCondition, Limb::right_arm},
+        {values->leftMobiltyCondition, Limb::left_leg}, {values->rightMobilityCondition, Limb::right_leg}}};
+    for (const auto& [definition, limb] : limbs) {
+        if (definition == nullptr) { result.truncated = true; continue; }
+        const auto base = static_cast<double>(actor.GetBaseActorValue(*definition));
+        const auto current = static_cast<double>(actor.GetActorValue(*definition));
+        if (!std::isfinite(base) || !std::isfinite(current)) { result.truncated = true; continue; }
+        // A limb the actor does not have has no base condition; only a limb driven to zero is crippled.
+        if (base > 0.0 && current <= 0.0) result.crippled_limbs.push_back(limb);
+    }
+#if defined(SYNTH_WITH_F4SEVR)
+    // The VR adapter has not been verified for the active-effect list; never claim there are none.
+    result.truncated = true;
+#else
+    auto* effects = static_cast<RE::MagicTarget&>(actor).GetActiveEffectList();
+    if (effects == nullptr) { result.truncated = true; return result; }
+    if (effects->data.size() > maximum_active_effect_nodes) result.truncated = true;
+    std::vector<std::uint32_t> seen;
+    std::size_t inspected = 0;
+    for (const auto& node : effects->data) {
+        if (++inspected > maximum_active_effect_nodes) { result.truncated = true; break; }
+        const auto* effect = node.get();
+        if (effect == nullptr || effect->spell == nullptr || effect->effect == nullptr) { result.truncated = true; continue; }
+        using Flags = RE::ActiveEffect::Flags;
+        if (effect->flags.any(Flags::kInactive, Flags::kDispelled, Flags::kWornOff, Flags::kRemovedEffects)) continue;
+        const auto* setting = effect->effect->effectSetting;
+        using SettingFlag = RE::EffectSetting::EffectSettingData::Flag;
+        if (setting != nullptr && setting->data.flags.any(SettingFlag::kHideInUI)) continue;
+        const auto& source = *effect->spell;
+        const auto form_id = source.GetFormID();
+        if (std::ranges::find(seen, form_id) != seen.end()) continue;
+        seen.push_back(form_id);
+        auto plugin = origin_plugin(source);
+        if (plugin.empty()) { result.truncated = true; continue; }
+        const bool addiction = static_cast<std::int32_t>(source.GetSpellType()) == addiction_spell_type;
+        core::ActorConditionEntry entry{form_id, std::move(plugin), condition_name(source),
+            !addiction && source.GetFormType() == RE::ENUM_FORM_ID::kALCH && !source.IsFood()};
+        // Capture never throws: an entry the contract would refuse is skipped and the lists marked incomplete.
+        if (!entry.valid()) { result.truncated = true; continue; }
+        auto& target = addiction ? result.addictions : result.effects;
+        if (target.size() >= core::ActorCondition::max_entries) { result.truncated = true; continue; }
+        target.push_back(std::move(entry));
+    }
+#endif
+    return result;
+}
+
 // Lightweight active-clip capture. A loaded actor in the player's current physical area is required;
 // the immutable dialogue snapshot never substitutes for a missing current speaker or camera.
 [[nodiscard]] inline std::optional<runtime::RuntimeSpeechSpatial> speech_spatial_snapshot(const runtime::RuntimeSpeechOwner& owner) {
@@ -1436,7 +1512,13 @@ struct NearbyReferenceSnapshots final {
             if (pair.valid()) stats[index]=pair;
         }
     }
-    return std::move(captured).with_actor_stats(std::move(stats));
+    auto with_stats = std::move(captured).with_actor_stats(std::move(stats));
+    // Deep capture only; one bounded read set per selected actor, never in the shallow discovery scan.
+    if (!include_details) return with_stats;
+    auto condition = actor_condition_snapshot(mutable_actor, actor_values);
+    // A throw here would abort the whole actor capture on the game thread; an invalid read is simply unobserved.
+    if (!condition.valid()) condition = core::ActorCondition{};
+    return std::move(with_stats).with_actor_condition(std::move(condition));
 }
 
 // Resolve a caller-named loaded actor even when process-list discovery omitted it from the nearest 64.

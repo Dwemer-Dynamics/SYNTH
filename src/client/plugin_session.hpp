@@ -80,7 +80,8 @@ public:
                   core::SaveContextStore* save_context = nullptr,
                   core::SaveContextStore::Binding save_binding = {}, bool rest_events_available = false,
                   bool quest_events_available = false, bool actor_events_available = false,
-                  bool observed_dialogue_available = false, bool orders_available = false)
+                  bool observed_dialogue_available = false, bool orders_available = false,
+                  bool reading_events_available = false)
         : dispatcher_{dispatcher},
           configuration_{std::move(configuration)},
           transport_{configuration_.server.base_url,
@@ -93,7 +94,9 @@ public:
                       .runtime_version = std::move(runtime_version),
                       .locale = "en-US",
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
-                          configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available),
+                          configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available,
+                          trade::prompt().installed(),
+                          reading_events_available),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
@@ -182,6 +185,7 @@ public:
                    [this](std::string message) { push_notification(std::move(message)); }}},
           observations_{{configuration_, client_, network_, context_, quest_events_, terminal_, runtime_paused_, cancellation_.token(),
                          variant, quest_events_available, actor_events_available, observed_dialogue_available,
+                         reading_events_available,
                          [this] {
                              return dialogue_.recording() || requests_.responses() != 0 || actions_.active() != 0 ||
                                  speech_.jobs_active() || !speech_.playback_idle();
@@ -304,6 +308,14 @@ public:
         return observations_.observe_dialogue(std::move(capture));
     }
     void pump_observed_dialogue() { observations_.pump_observed_dialogue(); }
+    [[nodiscard]] bool reading_events_ready() const noexcept { return observations_.reading_events_ready(); }
+    [[nodiscard]] bool reading_event_capture_ready() const noexcept { return observations_.reading_event_capture_ready(); }
+    [[nodiscard]] std::uint64_t dropped_reading_events() const noexcept { return observations_.dropped_reading_events(); }
+    [[nodiscard]] std::uint64_t next_reading_serial() noexcept { return observations_.next_reading_serial(); }
+    [[nodiscard]] bool observe_reading(Snapshot scene, core::ReadingEvent event) {
+        return observations_.observe_reading(std::move(scene), std::move(event));
+    }
+    void pump_reading_events() { observations_.pump_reading_events(); }
 
     [[nodiscard]] bool player_event_sample_due(core::SnapshotClock::time_point now) {
         return observations_.player_event_sample_due(now);
@@ -1178,6 +1190,8 @@ private:
         }
         // A Follow/Sit/Stop order applies only for the exact reply line it rode on, once, in a live turn.
         if (is_order_action(action->name) && !order_replies_.claim(line, *action, cancellation)) return;
+        // A sale offer likewise applies only for the exact reply line it rode on, once: no box for a line never accepted.
+        if (action->name == "barter" && !order_replies_.claim(line, *action, cancellation)) return;
         conversation_holds_.suspend(cancellation); // Release participants before any requested action is dispatched.
         actions_.enqueue(*action, snapshot, response_binding(line, cancellation));
     }

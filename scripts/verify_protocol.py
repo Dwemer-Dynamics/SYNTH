@@ -253,6 +253,10 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
     if value.get("schema") in {"synth.event.v2", "synth.response.line.v2"} and payload_type in narrator_payloads:
         catalog_path = PROTOCOL / "v2/schemas/narrator.schema.json"
         payload_schema = {"$ref": "#/$defs/" + narrator_payloads[payload_type]}
+    if value.get("schema") == "synth.response.line.v2" and payload_type == "action"             and value.get("payload", {}).get("action", {}).get("name") == "barter":
+        catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
+        payload_schema = {"type": "object", "additionalProperties": False, "required": ["action"],
+                          "properties": {"action": {"$ref": "barter-action.schema.json"}}}
     if value.get("schema") == "synth.response.line.v2" and payload_type == "social_task":
         catalog_path = PROTOCOL / "v2/schemas/response-line.schema.json"
         payload_schema = {"type": "object", "additionalProperties": False, "required": ["task"],
@@ -365,6 +369,11 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
             raise ValidationError(f"{path}: native quest batch requires v2 flat capability")
         if any(event["visibility_sequence"] >= payload["snapshot_sequence"] for event in payload["quest_events"]["events"]):
             raise ValidationError(f"{path}: quest visibility witness must precede context or use zero")
+    if payload_type == "context" and "reading_event" in payload:
+        if value.get("protocol_version") != 2 or value.get("runtime_variant") != "flat" or "context.reading_events" not in value.get("capabilities", []):
+            raise ValidationError(f"{path}: reading event requires negotiated v2 flat capability")
+        if int(payload["reading_event"]["event_id"][8:]) > 9007199254740991:
+            raise ValidationError(f"{path}: reading event ID exceeds wire-safe integer")
     if payload_type == "context" and "loaded_context" in payload:
         if "context.saved_anchor" not in value.get("capabilities", []) or payload["loaded_context"]["playthrough_id"] != payload["playthrough_id"]:
             raise ValidationError(f"{path}: unnegotiated or cross-playthrough loaded context")

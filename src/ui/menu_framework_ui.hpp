@@ -65,6 +65,7 @@
 #include "config/config.hpp"
 #include "integration/prompt_target.hpp"
 #include "ui/control_menu.hpp"
+#include "ui/trade_prompt.hpp"
 #include "ui/settings_catalog.hpp"
 
 #if defined(SYNTH_WITH_F4SE) && defined(__has_include)
@@ -994,6 +995,8 @@ inline void __stdcall on_framework_lifecycle(F4SEMenuFramework::Events::Type typ
     // same reason. It reads only its own bridge, so it adds no framework state
     // read and no configuration read to this callback.
     control_menu_tick();
+    // The confirmed-sale box is a third window on the same lifecycle; it exists only while a sale awaits its answer.
+    trade_prompt_tick();
 }
 
 }  // namespace detail
@@ -1175,6 +1178,8 @@ public:
                 // poll owns every dispatch, including capture-before-pause targeting.
                 (void)F4SEMenuFramework::Hotkeys::Register(binding.framework_id, 0, detail::on_hotkey);
             }
+            // A presenter now exists, so the flat client may offer confirmed sales (the window follows on the lifecycle).
+            trade::prompt().set_installed(true);
             registered = true;
         } catch (...) {
             // Registration is best effort: without it SYNTH simply has no

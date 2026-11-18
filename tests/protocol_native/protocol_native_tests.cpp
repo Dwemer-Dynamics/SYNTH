@@ -37,6 +37,53 @@ void actor_stats_tests() {
     if (!refused) throw std::runtime_error{"non-finite stat accepted"};
 }
 
+// Condition wire shape, bounds and the capability gate, without an engine.
+void actor_condition_tests() {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    core::ActorCondition condition;
+    condition.observed=true;condition.radiation_percent=62.5;
+    condition.addictions.push_back({0x57A4C,"Fallout4.esm","Jet Addiction",false});
+    condition.effects.push_back({0x57A4B,"Fallout4.esm","Psycho",true});
+    condition.effects.push_back({0x10E8A2,"Fallout4.esm","Rad-X",false});
+    condition.crippled_limbs={core::ActorCondition::Limb::left_leg,core::ActorCondition::Limb::right_arm};
+    core::ActorSnapshot actor{0x2F1F,"Piper",{},"Fallout4.esm","cond-save"};
+    auto observed=actor.with_actor_condition(condition);
+    require(!actor.actor_condition() && actor.with_details_from(observed).actor_condition(),"condition enrichment leaked or lost");
+    protocol_native::ActorState state;state.actor_condition=observed.actor_condition();
+    const auto wire=protocol_native::actor_state_value(state);
+    const auto& cond=protocol_native::required(wire,"actor_condition");
+    require(protocol_native::text(cond,"observation")=="observed" && protocol_native::required(cond,"radiation_percent").as_double()==62.5,"radiation lost");
+    require(json::write(protocol_native::required(cond,"crippled_limbs"))=="[\"left_leg\",\"right_arm\"]","limbs lost");
+    require(json::write(protocol_native::required(cond,"effects")).find("\"kind\":\"chem\"")!=std::string::npos,"chem kind lost");
+    require(json::write(protocol_native::required(cond,"addictions")).find("\"kind\"")==std::string::npos,"addiction carries a kind");
+    core::ActorCondition none;
+    state.actor_condition=none;
+    require(json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_condition"))=="{\"observation\":\"unavailable\"}","unobserved read claimed an observation");
+    auto expect_refused=[&](core::ActorCondition bad,const char* message) {
+        bool refused=false;
+        try { (void)core::ActorSnapshot{0x2F1F,"Piper",{},"Fallout4.esm","cond-save"}.with_actor_condition(std::move(bad)); }
+        catch (const std::invalid_argument&) { refused=true; }
+        require(refused,message);
+    };
+    auto bad=condition;bad.radiation_percent=101;expect_refused(bad,"out-of-range radiation accepted");
+    bad=condition;bad.crippled_limbs={core::ActorCondition::Limb::head,core::ActorCondition::Limb::head};expect_refused(bad,"duplicate limb accepted");
+    bad=condition;bad.effects.assign(9,condition.effects[0]);expect_refused(bad,"unbounded effects accepted");
+    bad=condition;bad.addictions[0].name.assign(65,'x');expect_refused(bad,"long name accepted");
+    bad=condition;bad.addictions[0].origin_plugin="a/b.esm";expect_refused(bad,"path-like plugin accepted");
+    bad=none;bad.truncated=true;expect_refused(bad,"unobserved read carried a value");
+    // Truncation never splits a multibyte character: 63 ASCII bytes then a 2-byte letter cuts back to 63.
+    const auto cut=core::ActorConditionEntry::truncate_name(std::string(63,'a')+"Ã©Ã©");
+    require(cut==std::string(63,'a'),"multibyte name split");
+    require(core::ActorConditionEntry::truncate_name(std::string(64,'b')).size()==64,"short name shortened");
+    // The game reports plugin file names as installed: an upper-case suffix is valid and serialised unchanged.
+    auto upper=condition;upper.addictions[0].origin_plugin="Foo.ESP";upper.effects[0].origin_plugin="Bar.Esl";
+    require(upper.valid(),"upper-case plugin suffix refused");
+    state.actor_condition=upper;
+    require(json::write(protocol_native::required(protocol_native::actor_state_value(state),"actor_condition")).find("\"Foo.ESP\"")!=std::string::npos,"upper-case plugin altered");
+    upper.addictions[0].origin_plugin="Foo.esx";require(!upper.valid(),"unknown suffix accepted");
+}
+
 void verified_wait_tests() {
     using namespace synth;
     const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
@@ -251,6 +298,41 @@ void observed_dialogue_tests(const std::string& root) {
     require(std::get<protocol_native::Status>(status.payload).observed_dialogue,"observed_dialogue ACK lost");
 }
 
+// Reading events: the golden fixtures are the contract; unnegotiated, VR and oversized readings never encode.
+void reading_event_tests(const std::string& root) {
+    using namespace synth;
+    const auto require=[](bool value,const char* message){if(!value)throw std::runtime_error{message};};
+    const auto load=[&](const char* name){
+        std::ifstream in{root+"/protocol/v2/fixtures/valid/"+name};
+        return json::parse(std::string{std::istreambuf_iterator<char>{in},{}});};
+    protocol_native::EventContext context{"session-reading-001","request-reading-001","turn-reading-001","flat","0.1.0","1.11.240",7,
+        {"context.reading_events"},2,0};
+    const protocol_native::Identity player{"0x00000014","Fallout4.esm","save-001","Sole Survivor"};
+    core::ReadingEvent note{1,core::ReadingKind::book,0x1F2A3,"Fallout4.esm","Grognak the Barbarian #5","The barbarian raised his axe.\nThe cave fell silent.",false,{}};
+    require(json::write(protocol_native::reading_event_value({note,120},context,player))==
+        json::write(protocol_native::required(protocol_native::required(load("context-reading-event.json"),"payload"),"reading_event")),
+        "reading event does not match the mirrored fixture");
+    core::ReadingEvent tape{1,core::ReadingKind::holotape,0x1F2A3,"Fallout4.esm","Holotape: Vault-Tec Orientation","",false,{}};
+    require(json::write(protocol_native::reading_event_value({tape,120},context,player))==
+        json::write(protocol_native::required(protocol_native::required(load("context-reading-event-holotape-title-only.json"),"payload"),"reading_event")),
+        "title-only holotape does not match the mirrored fixture");
+    const auto rejected=[&](protocol_native::NativeReadingEvent value,protocol_native::EventContext owner){
+        try{(void)protocol_native::reading_event_value(value,owner,player);}catch(const std::invalid_argument&){return true;}
+        return false;};
+    auto unnegotiated=context;unnegotiated.capabilities.clear();
+    auto vr=context;vr.runtime_variant="vr";
+    auto v1=context;v1.protocol_version=1;
+    auto unbounded=note;unbounded.text=std::string(4001,'x');
+    auto markup=note;markup.text="<b>x</b>";
+    require(rejected({note,0},unnegotiated) && rejected({note,0},vr) && rejected({note,0},v1) && rejected({unbounded,0},context) &&
+        rejected({markup,0},context) && rejected({note,core::RuntimeGeneration::maximum_wire_value+1},context),
+        "unnegotiated, VR, oversized or malformed reading was encoded");
+    const auto status=protocol_native::decode_line(R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"code":"init_accepted","reading_events":true},"context_sequence":0})");
+    require(std::get<protocol_native::Status>(status.payload).reading_events,"reading_events ACK lost");
+    const auto plain=protocol_native::decode_line(R"({"schema":"synth.response.line.v2","protocol_version":2,"type":"status","line_id":"r:status","request_id":"r","turn_id":"t","generation":2,"game":"fo4","runtime_variant":"flat","payload":{"code":"init_accepted"},"context_sequence":0})");
+    require(!std::get<protocol_native::Status>(plain.payload).reading_events,"reading_events granted without the server's flag");
+}
+
 // Native-turn receipts: exact owner encoding, first terminal outcome only, bounded copy-only outbox.
 // Talking objects (narrator.object.v1): the encoded requests carry exactly the fixture identity, and state and status
 // decode with their bindings; every missing grant or malformed identity is refused before anything is sent.
@@ -344,13 +426,32 @@ void native_turn_receipt_tests(const std::string& root) {
     require(client::speech_receipt_outcome(DialogueDelivery::spoken,false)==protocol_native::SpeechReceiptOutcome::audio_completed,"spoken");
     require(client::speech_receipt_outcome(DialogueDelivery::discarded,true)==protocol_native::SpeechReceiptOutcome::interrupted,"interrupted");
     require(client::speech_receipt_outcome(DialogueDelivery::discarded,false)==protocol_native::SpeechReceiptOutcome::failed,"failed");
-    require(!client::speech_receipt_outcome(DialogueDelivery::text_complete,false),"reading timer claimed text_presented");
+    // A caption shown for its whole reading window (text-only, failed or silent voice) is text_presented; one still
+    // queued or reading, or cancelled, claims nothing.
+    require(client::speech_receipt_outcome(DialogueDelivery::text_complete,false)==protocol_native::SpeechReceiptOutcome::text_presented,"shown text reported no receipt");
+    require(!client::speech_receipt_outcome(DialogueDelivery::text_complete,true),"cancelled text claimed text_presented");
+    require(!client::speech_receipt_outcome(DialogueDelivery::reading,false) && !client::speech_receipt_outcome(DialogueDelivery::pending,false) &&
+        !client::speech_receipt_outcome(DialogueDelivery::playing,false),"unfinished caption claimed a receipt");
     // Receipts follow the explicit server marker only; a legacy typed line without it never owns one.
     std::istringstream native_lines{read("valid/response-native-turn.ndjson")};
     std::vector<bool> markers;
     while(std::getline(native_lines,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload))
         markers.push_back(std::get<protocol_native::Dialogue>(line.payload).native_turn);
     require(markers==std::vector<bool>{true,true},"native-turn marker lost");
+    // Voice is optional: a turn whose lines carry no speech block decodes as text-only native lines.
+    std::istringstream text_only_lines{read("valid/response-native-turn-text-only.ndjson")};
+    int text_only_count{};
+    while(std::getline(text_only_lines,raw)) if(auto line=protocol_native::decode_line(raw);std::holds_alternative<protocol_native::Dialogue>(line.payload)) {
+        const auto& dialogue=std::get<protocol_native::Dialogue>(line.payload);
+        require(dialogue.native_turn && !dialogue.speech && !dialogue.text.empty(),"text-only native line lost its text or gained speech");
+        ++text_only_count;
+    }
+    require(text_only_count==2,"text-only native turn lost a line");
+    // The presented receipt fixture is exactly what the client encodes for a fully shown text-only line.
+    auto presented=receipt; presented.line_id="req-text-1:dialogue:2"; presented.outcome=protocol_native::SpeechReceiptOutcome::text_presented;
+    const auto presented_fixture=json::parse(read("valid/speech-receipt-text-presented.json"));
+    auto presented_context=context; presented_context.request_id="receipt:2:2";
+    require(json::write(json::parse(protocol_native::encode_speech_receipt(presented_context,presented)))==json::write(presented_fixture),"text_presented receipt differs from its fixture");
     auto legacy=read("valid/response-native-turn.ndjson");
     legacy=legacy.substr(legacy.find(10)+1); legacy=legacy.substr(0,legacy.find(10));
     const auto marker=legacy.find(",\"native_turn\":true");
@@ -423,6 +524,21 @@ void native_turn_receipt_tests(const std::string& root) {
     require(static_cast<bool>(client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,true))
         && !client::ordinary_speech_receipt_hook(outbox,first_line,spoken,player,false)
         && !client::speech_receipt_hook(outbox,first_line,spoken,true),"ordinary hook not bound to the marker and its own negotiation");
+    // An enrolled ordinary line whose speech fails keeps its caption timer out of history: a shown caption sends no
+    // text_presented, while completed audio and an interruption still report (only /talk lines may report presented).
+    {
+        const auto ordinary_outbox=std::make_shared<client::SpeechReceiptOutbox>();
+        const auto report=[&](presentation::DialogueDelivery terminal,bool cancelled) {
+            auto hook=client::ordinary_speech_receipt_hook(ordinary_outbox,first_line,spoken,player,true);
+            hook(terminal,cancelled);
+            return ordinary_outbox->take(first_line.generation);
+        };
+        require(report(presentation::DialogueDelivery::text_complete,false).empty(),"ordinary caption timer sent text_presented");
+        const auto done=report(presentation::DialogueDelivery::spoken,false);
+        require(done.size()==1 && done.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::audio_completed,"ordinary audio receipt lost");
+        const auto cut=report(presentation::DialogueDelivery::discarded,true);
+        require(cut.size()==1 && cut.front().receipt.outcome==protocol_native::SpeechReceiptOutcome::interrupted,"ordinary interrupted receipt lost");
+    }
     const auto& text_line=dialogue_lines.back();
     const auto& text_only=std::get<protocol_native::Dialogue>(text_line.payload);
     require(!text_only.receipt_required && !text_only.speech
@@ -542,11 +658,13 @@ void conversation_tests(const std::string& root) {
 int main(int argc,char** argv){
  try{
   actor_stats_tests();
+  actor_condition_tests();
   enemy_awareness_tests();
   if(argc==2) native_turn_receipt_tests(argv[1]);
   if(argc==2) talking_object_tests(argv[1]);
   if(argc==2) observed_dialogue_tests(argv[1]);
   if(argc==2) conversation_tests(argv[1]);
+  if(argc==2) reading_event_tests(argv[1]);
   verified_wait_tests();
   if(argc!=2) throw std::runtime_error{"root required"};
   std::ifstream in{std::string{argv[1]}+"/protocol/v1/fixtures/valid/response.ndjson"};

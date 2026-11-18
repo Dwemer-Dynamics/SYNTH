@@ -22,7 +22,8 @@ namespace synth::runtime { struct RuntimeFacingRequest; }
 
 namespace synth::presentation {
 
-// text_complete means the fallback reading window elapsed, not a renderer acknowledgement.
+// text_complete means the caption was active for its whole reading window (a text-only line, or voice that failed or
+// was silent); the client reports it as text_presented. Cancelled or discarded captions never reach it.
 // skipped is only ever reported to on_terminal, never stored: a line discarded before it started playing or
 // reading, so the player heard none of it. A line discarded after it started is reported as discarded.
 enum class DialogueDelivery { pending, playing, spoken, reading, text_complete, discarded, skipped };
