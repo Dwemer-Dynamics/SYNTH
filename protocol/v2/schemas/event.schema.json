@@ -47,7 +47,8 @@
         "narrator_command",
         "narrator_turn",
         "narrator_receipt",
-        "location_catalog"
+        "location_catalog",
+        "save_created"
       ]
     },
     "session_id": {
@@ -1516,6 +1517,30 @@
           },
           "payload": {
             "$ref": "speech-receipt.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "save_created"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "session.save_created"
+            }
+          },
+          "context_sequence": {
+            "const": 0
+          },
+          "payload": {
+            "$ref": "save-created.schema.json"
           }
         }
       }

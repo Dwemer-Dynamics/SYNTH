@@ -1,5 +1,13 @@
 # SYNTH protocol v2
 
+## Save created (2026-11-18)
+
+`save_created` is a v2 event, `context_sequence` 0, granted by the capability `session.save_created`, which a client lists in
+`init` and in every event of that session. F4SE reports the finished write of a save (`kPostSaveGame`); the client then posts
+`{"playthrough_id": ...}` (its own playthrough identity, as in `location_catalog`). It carries no turn and no content. The server
+validates it, records it through SessionManager and SaveState, and answers with status `save_created_accepted`. A server that
+predates the capability refuses the event and the client drops the signal without retrying: a missed signal costs nothing.
+
 ## Optional wake-up channel (2026-11-18)
 
 `notify.wake` is an optional v2 capability. It only shortens waiting: the client still fetches everything over the

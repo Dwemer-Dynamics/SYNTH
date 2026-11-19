@@ -80,6 +80,8 @@ std::uint64_t pending_session_request{};
 bool runtime_disabled{};
 std::array<bool, 256> hotkey_down{};
 bool voice_capture_down{};
+// Set by the F4SE message callback when a save finished writing; the game-thread pump sends the signal.
+std::atomic_bool save_created_pending{};
 bool player_was_in_combat{};
 auto next_context_publish = synth::core::SnapshotClock::time_point{};
 auto next_profile_refresh = synth::core::SnapshotClock::time_point{};
@@ -657,6 +659,10 @@ void pump_runtime_impl() {
             session->submit_presentation_capture(caption,snapshot);
         }
         session->pump(runtime->generation().value(), *runtime);
+        if (save_created_pending.exchange(false, std::memory_order_acq_rel)) {
+            auto playthrough = synth::adapters::commonlib::playthrough_id();
+            if (!playthrough.empty()) session->notify_save_created(std::move(playthrough));
+        }
         if (session->social_task_capture_due(now)) {
             const auto* owner=session.get();
             const auto generation=runtime->generation();
@@ -1480,6 +1486,10 @@ void on_f4se_message(F4SE::MessagingInterface::Message* message) noexcept {
         action = lifecycle.handle(synth::adapters::LifecycleEvent::post_load_game);
         break;
     }
+    case F4SE::MessagingInterface::kPostSaveGame:
+        // F4SE reports the finished write of a save; the pump sends the one best-effort signal.
+        save_created_pending.store(true, std::memory_order_release);
+        return;
     case F4SE::MessagingInterface::kNewGame: {
         synth::core::ResolvedIdentity identity{synth::core::IdentityResolution::stale};
         try {

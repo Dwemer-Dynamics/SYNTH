@@ -1,0 +1,1 @@
+{"schema":"synth.event.v2","protocol_version":2,"type":"save_created","session_id":"session:flat:fixture","request_id":"req-save-created-1","turn_id":"turn-save-created-1","generation":2,"game":"fo4","runtime_variant":"flat","client_version":"0.1.0","runtime_version":"1.11.240","capabilities":["dialogue.text"],"payload":{"playthrough_id":"playthrough-001"},"context_sequence":0}
