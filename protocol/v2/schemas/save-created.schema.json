@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/save-created.schema.json",
+  "title": "SYNTH v2 save created: the game wrote a save of this playthrough",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["playthrough_id"],
+  "properties": {
+    "playthrough_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}
+  }
+}

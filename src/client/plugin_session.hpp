@@ -466,6 +466,20 @@ public:
         return server_control_.prepare_target(snapshot);
     }
 
+    // The game finished writing a save: one best-effort signal on the network lane. Dropped when the session is ending,
+    // the lane is full or the server does not take it; the save itself never depends on it.
+    void notify_save_created(std::string playthrough_id) noexcept {
+        try {
+            if (terminal_.load(std::memory_order_acquire) || !runtime::social_id(playthrough_id)) return;
+            (void)network_.try_submit(
+                "network", tasks::TaskClass::background,
+                tasks::TaskLanes::Clock::now() + std::chrono::seconds{10}, cancellation_.token(),
+                [this, id = std::move(playthrough_id)](const core::CancellationToken&) {
+                    try { (void)client_.send_save_created(id); } catch (...) {}
+                });
+        } catch (...) {}
+    }
+
     [[nodiscard]] bool request_control(std::string setting = "status", std::string value = "") {
         return server_control_.request(std::move(setting), std::move(value));
     }

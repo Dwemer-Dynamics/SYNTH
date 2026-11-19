@@ -767,6 +767,23 @@ public:
         return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 15000);
     }
 
+    // Network worker: tells the server the game finished writing a save of this playthrough. Unbound and never retried: a
+    // missed signal costs nothing. Its own lock, so a slow request never holds the dialogue request mutex.
+    [[nodiscard]] RequestOutcome send_save_created(std::string_view playthrough_id) {
+        std::scoped_lock save_lock{save_created_mutex_};
+        std::string request_id, turn_id, body;
+        std::uint64_t generation{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            require_ready();
+            request_id = next_id("save-created");
+            turn_id = next_id("turn");
+            generation = generation_;
+            body = protocol_native::encode_save_created(context(request_id, turn_id), playthrough_id);
+        }
+        return send_event(request_id, turn_id, generation, std::move(body), {}, true, "/main.php", {}, false, 5000);
+    }
+
     // Worker-only private narrator request bound to an acknowledged context of this generation. Narrator lines are
     // accepted only on a negotiated session; a transport failure leaves the outcome unknown. Never retried here.
     [[nodiscard]] RequestOutcome send_narrator(std::string_view type, ContextBinding binding,
@@ -1604,6 +1621,7 @@ private:
     std::atomic_bool enemy_awareness_negotiated_{};
     std::atomic_bool location_ancestry_negotiated_{};
     std::atomic_bool location_catalog_negotiated_{};
+    std::mutex save_created_mutex_;
     std::atomic_bool observed_dialogue_negotiated_{};
     std::atomic_bool trade_negotiated_{};
     std::atomic_bool reading_events_negotiated_{};

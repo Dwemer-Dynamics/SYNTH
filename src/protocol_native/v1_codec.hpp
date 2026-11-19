@@ -1142,6 +1142,14 @@ inline std::string encode_location_catalog(const EventContext& context, const Lo
     payload.emplace_back("locations", std::move(locations));
     return encode_event(context, "location_catalog", json::Value{std::move(payload)});
 }
+// The game finished writing a save of this playthrough (protocol/v2/schemas/save-created.schema.json): unbound, no content.
+inline std::string encode_save_created(const EventContext& context, std::string_view playthrough_id) {
+    if (context.protocol_version != 2 || context.context_sequence != 0 ||
+        std::ranges::find(context.capabilities, "session.save_created") == context.capabilities.end())
+        throw std::invalid_argument{"save created requires the negotiated v2 capability"};
+    if (!runtime::social_id(std::string{playthrough_id})) throw std::invalid_argument{"save created playthrough is not bounded"};
+    return encode_event(context, "save_created", json::Value{object({{"playthrough_id", std::string{playthrough_id}}})});
+}
 // Private narrator requests (protocol/v2/schemas/narrator.schema.json). All three are bound to an acknowledged
 // context and require the negotiated capability set; a receipt names its exact reply and checkpoint.
 enum class NarratorAction { state, select, cancel, transcript, bind_object };

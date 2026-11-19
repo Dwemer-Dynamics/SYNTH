@@ -186,6 +186,8 @@ public:
             // Only a flat adapter that can read the BGSLocation set offers the catalog export; VR never does yet.
             if (location_catalog_available) result.push_back("world.location_catalog");
             result.push_back("context.quest_tracking");
+            // The flat F4SE adapter reports each finished save (kPostSaveGame); the server records it per playthrough.
+            result.push_back("session.save_created");
             result.push_back("dialogue.quest_reactions");
         }
         // Opt-in only (Server.WakeChannel): sessions that did not ask keep the previous wire contract.
