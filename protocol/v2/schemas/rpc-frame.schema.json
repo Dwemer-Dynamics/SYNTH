@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/rpc-frame.schema.json",
+  "title": "SYNTH game RPC frame (capability rpc.game): a bounded, allowlisted call from the server to the running game",
+  "oneOf": [
+    {
+      "title": "client to server, first frame: binds the connection to the session that received the token",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "type",
+        "session_id",
+        "token"
+      ],
+      "properties": {
+        "schema": {
+          "const": "synth.rpc.v1"
+        },
+        "type": {
+          "const": "hello"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "token": {
+          "type": "string",
+          "pattern": "[0-9a-f]{64}"
+        }
+      }
+    },
+    {
+      "title": "server to client: the token was accepted; requests may follow",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "type"
+      ],
+      "properties": {
+        "schema": {
+          "const": "synth.rpc.v1"
+        },
+        "type": {
+          "const": "hello_ack"
+        }
+      }
+    },
+    {
+      "title": "server to client: one call; at most one is open per id",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "type",
+        "id",
+        "method",
+        "params",
+        "deadline_ms"
+      ],
+      "properties": {
+        "schema": {
+          "const": "synth.rpc.v1"
+        },
+        "type": {
+          "const": "request"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "method": {
+          "enum": [
+            "ping",
+            "session.info",
+            "inventory.player",
+            "world.nearby_items"
+          ]
+        },
+        "params": {
+          "type": "object",
+          "maxProperties": 8
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        }
+      }
+    },
+    {
+      "title": "client to server: the result of one request, or a closed error code",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "type",
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "schema": {
+          "const": "synth.rpc.v1"
+        },
+        "type": {
+          "const": "response"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "object"
+        },
+        "error": {
+          "enum": [
+            "method_unavailable",
+            "invalid_params",
+            "busy",
+            "failed"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result"
+            ],
+            "not": {
+              "required": [
+                "error"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "error"
+            ],
+            "not": {
+              "required": [
+                "result"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
