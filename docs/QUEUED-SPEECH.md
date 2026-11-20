@@ -1,10 +1,10 @@
 # Queued speech results (optional)
 
 The server can keep a speech result in a durable queue and hand it to the client exactly once, instead of the client
-polling a repeatable status. It is opt-in and the legacy path stays: with the setting off, a server that does not queue,
+polling a repeatable status. It is on by default and the legacy path stays: with the setting off, a server that does not queue,
 or a line the server did not queue, the client polls `GET /api/v1/messages/<cache key>` as before.
 
-- **Setting.** `[Server] MessageQueue=false` by default. Set it to `true` in `SYNTH_custom.ini` to opt in. The client then
+- **Setting.** `[Server] MessageQueue=true` by default. Set it to `false` in `SYNTH_custom.ini` to opt out. The client then
   lists the v2 capability `message.queue` in every event. The server names a message id only for a session that did, and
   only while its own queue is on (`SYNTH_MESSAGE_QUEUE`).
 - **The id.** A voiced dialogue line's `speech` block carries `message_id`. `SpeechDelivery::await_queued_speech` fetches

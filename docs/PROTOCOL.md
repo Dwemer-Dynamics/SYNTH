@@ -681,7 +681,7 @@ response. See [WAKE-CHANNEL.md](WAKE-CHANNEL.md) and `protocol/v2/README.md`.
 
 ## Queued speech results (`message.queue`)
 
-The optional v2 capability `message.queue`, listed only when `[Server] MessageQueue=true`, lets the server hand a speech
+The optional v2 capability `message.queue`, listed unless `[Server] MessageQueue=false`, lets the server hand a speech
 result over through its durable queue. When the server queues the line, the dialogue `speech` block carries `message_id`
 and the client fetches `GET /api/v1/messages/<message_id>` instead of polling the cache-key status: the first fetch of a
 completed message answers 200 (`synth.message.v1`, `status: delivered`, the owner session and generation, and the
