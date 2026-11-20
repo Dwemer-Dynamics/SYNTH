@@ -57,6 +57,12 @@ public:
         return connected() ? std::chrono::milliseconds{250} : std::chrono::milliseconds{100};
     }
 
+    // The same for a queued message: a live channel pushes `message_available`, so the loop only keeps a slow safety poll
+    // beside it; a dropped channel returns the loop to the short interval at once (the poll fallback).
+    [[nodiscard]] std::chrono::milliseconds message_poll_interval() const noexcept {
+        return connected() ? std::chrono::milliseconds{1'000} : std::chrono::milliseconds{100};
+    }
+
 private:
     mutable std::mutex mutex_;
     std::condition_variable changed_;
@@ -64,11 +70,17 @@ private:
     std::atomic_bool connected_{};
 };
 
-enum class HintKind : unsigned char { welcome, wake };
+enum class HintKind : unsigned char { welcome, wake, message_available };
+
+struct Hint final {
+    HintKind kind{HintKind::welcome};
+    std::uint64_t message_id{}; // Only for message_available: the queued message to fetch.
+};
 
 // Strict reading of protocol/v2/schemas/notify-hint.schema.json; anything else is ignored by the caller.
-[[nodiscard]] inline std::optional<HintKind> parse_notify_hint(std::string_view frame) noexcept {
+[[nodiscard]] inline std::optional<Hint> parse_notify_frame(std::string_view frame) noexcept {
     constexpr std::size_t maximum_frame_bytes = 256;
+    constexpr std::uint64_t maximum_message_id = 9'007'199'254'740'991ULL;
     if (frame.empty() || frame.size() > maximum_frame_bytes) return std::nullopt;
     try {
         const auto value = json::parse(frame);
@@ -76,21 +88,37 @@ enum class HintKind : unsigned char { welcome, wake };
         const auto* schema = value.find("schema");
         const auto* type = value.find("type");
         const auto* topic = value.find("topic");
+        const auto* message_id = value.find("message_id");
         if (!schema || !schema->is_string() || schema->as_string() != "synth.notify.hint.v1") return std::nullopt;
         if (!type || !type->is_string()) return std::nullopt;
         const auto members = value.as_object().size();
         if (type->as_string() == "welcome") {
-            if (members != 2 || topic) return std::nullopt;
-            return HintKind::welcome;
+            if (members != 2 || topic || message_id) return std::nullopt;
+            return Hint{HintKind::welcome, 0};
         }
         if (type->as_string() == "wake") {
-            if (members != 3 || !topic || !topic->is_string() || topic->as_string() != "speech") return std::nullopt;
-            return HintKind::wake;
+            if (members != 3 || message_id || !topic || !topic->is_string() || topic->as_string() != "speech") return std::nullopt;
+            return Hint{HintKind::wake, 0};
+        }
+        if (type->as_string() == "message_available") {
+            if (members != 3 || topic || !message_id) return std::nullopt;
+            std::uint64_t id{};
+            if (const auto* unsigned_id = std::get_if<std::uint64_t>(&message_id->storage())) id = *unsigned_id;
+            else if (const auto* signed_id = std::get_if<std::int64_t>(&message_id->storage()); signed_id && *signed_id > 0)
+                id = static_cast<std::uint64_t>(*signed_id);
+            if (id == 0 || id > maximum_message_id) return std::nullopt;
+            return Hint{HintKind::message_available, id};
         }
     } catch (...) {
         return std::nullopt;
     }
     return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<HintKind> parse_notify_hint(std::string_view frame) noexcept {
+    const auto hint = parse_notify_frame(frame);
+    if (!hint) return std::nullopt;
+    return hint->kind;
 }
 
 // Delay before each reconnect: starts at `initial`, doubles per consecutive failure up to `maximum`, and restarts

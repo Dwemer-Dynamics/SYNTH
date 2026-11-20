@@ -129,7 +129,8 @@ public:
                                                              bool trade_confirmation_available = false,
                                                              bool reading_events_available = false,
                                                              bool location_catalog_available = false,
-                                                             bool notify_wake = false) {
+                                                             bool notify_wake = false,
+                                                             bool message_queue = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts", "dialogue.conversation",
@@ -192,6 +193,8 @@ public:
         }
         // Opt-in only (Server.WakeChannel): sessions that did not ask keep the previous wire contract.
         if (notify_wake) result.push_back("notify.wake");
+        // Server.MessageQueue: the server may name a queued message id for speech and the client fetches it by that id.
+        if (message_queue) result.push_back("message.queue");
         if (variant == core::RuntimeVariant::vr) {
             result.push_back("runtime.hmd_pose");
             result.push_back("runtime.controller_pose");

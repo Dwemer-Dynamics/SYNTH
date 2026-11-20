@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://synth.local/protocol/v2/schemas/notify-hint.schema.json",
-  "title": "SYNTH optional wake-up hint frame (carries no message content)",
+  "title": "SYNTH optional wake-up hint frame (carries no message content; a queued message is named by id only)",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,13 +15,19 @@
     "type": {
       "enum": [
         "welcome",
-        "wake"
+        "wake",
+        "message_available"
       ]
     },
     "topic": {
       "enum": [
         "speech"
       ]
+    },
+    "message_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
     }
   },
   "allOf": [
@@ -36,7 +42,12 @@
       "then": {
         "required": [
           "topic"
-        ]
+        ],
+        "not": {
+          "required": [
+            "message_id"
+          ]
+        }
       }
     },
     {
@@ -48,6 +59,34 @@
         }
       },
       "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "topic"
+              ]
+            },
+            {
+              "required": [
+                "message_id"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message_available"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "message_id"
+        ],
         "not": {
           "required": [
             "topic"

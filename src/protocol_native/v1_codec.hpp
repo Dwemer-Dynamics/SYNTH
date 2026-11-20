@@ -164,10 +164,19 @@ struct Speech {
     std::string utterance_id, cache_key, status;
     std::uint64_t deadline_ms{};
     std::optional<Media> media;
+    std::uint64_t message_id{}; // The queued message to fetch the result by; 0 when the server did not queue it.
 };
 struct TtsStatus {
     std::string cache_key, status, error_code;
     std::optional<Media> media;
+};
+// GET /api/v1/messages/<id> (protocol/v2/schemas/message-result.schema.json). Only the HTTP 200 result carries the owner and
+// the payload; every other answer (pending, delivered again, cancelled, expired, unknown, unavailable) is a bare state.
+struct MessageResult {
+    std::uint64_t message_id{};
+    std::string status, message_type, session_id, request_id;
+    std::uint64_t generation{};
+    std::optional<TtsStatus> payload;
 };
 struct VisualResponse {
     std::string request_id, turn_id, capture_id, status, detail;
@@ -287,7 +296,7 @@ inline Media media(const json::Value& value) {
     return out;
 }
 inline Speech speech(const json::Value& value) {
-    closed_object(value, {"schema", "utterance_id", "cache_key", "status", "deadline_ms", "media"});
+    closed_object(value, {"schema", "utterance_id", "cache_key", "status", "deadline_ms", "media", "message_id"});
     if (text(value, "schema") != "synth.speech.v1")
         throw std::invalid_argument{"invalid speech schema"};
     Speech out{text(value, "utterance_id"), text(value, "cache_key"), text(value, "status"),
@@ -299,10 +308,59 @@ inline Speech speech(const json::Value& value) {
     if (const auto* value_media = value.find("media")) out.media = media(*value_media);
     if (out.status == "ready" && !out.media)
         throw std::invalid_argument{"ready speech job has no media"};
+    if (value.find("message_id")) {
+        out.message_id = integer(value, "message_id");
+        if (out.message_id == 0 || out.message_id > 9'007'199'254'740'991ULL)
+            throw std::invalid_argument{"invalid speech message id"};
+    }
     return out;
 }
+inline TtsStatus decode_tts_status_value(const json::Value& root);
 inline TtsStatus decode_tts_status(std::string_view wire) {
+    return decode_tts_status_value(json::parse(wire));
+}
+inline MessageResult decode_message_result(std::string_view wire) {
     const auto root = json::parse(wire);
+    closed_object(root, {"schema", "message_id", "status", "message_type", "session_id", "request_id", "generation",
+                         "completed_at", "delivered_at", "payload"});
+    if (text(root, "schema") != "synth.message.v1") throw std::invalid_argument{"invalid message schema"};
+    MessageResult result;
+    result.message_id = integer(root, "message_id");
+    result.status = text(root, "status");
+    if (result.message_id == 0 || result.message_id > 9'007'199'254'740'991ULL ||
+        (result.status != "delivered" && result.status != "pending" && result.status != "cancelled" &&
+         result.status != "expired" && result.status != "unknown" && result.status != "unavailable"))
+        throw std::invalid_argument{"invalid message result"};
+    if (!root.find("payload")) {
+        // A bare state: pending, cancelled, expired, unknown, unavailable, or "delivered" for a fetch that came too late.
+        if (root.find("delivered_at") || root.find("message_type") || root.find("session_id"))
+            throw std::invalid_argument{"message state carries an owner without a payload"};
+        return result;
+    }
+    if (result.status != "delivered") throw std::invalid_argument{"undelivered message carries a payload"};
+    result.message_type = text(root, "message_type");
+    result.session_id = text(root, "session_id");
+    result.request_id = text(root, "request_id");
+    result.generation = integer(root, "generation");
+    if (result.message_type != "speech" || result.session_id.empty() || result.session_id.size() > 128 ||
+        result.request_id.empty() || result.request_id.size() > 256 || result.generation == 0)
+        throw std::invalid_argument{"invalid delivered message owner"};
+    result.payload = decode_tts_status_value(required(root, "payload"));
+    return result;
+}
+// What a delivered queue message means for the line that waits for it. A result is kept only when it belongs to this session
+// and generation and to this line's cache key: the server returns a completed message once, so a result of a retired session
+// or generation (a stale result that completed after a save load or a restart) is dropped, never played.
+enum class QueuedSpeechVerdict : unsigned char { ready, failed, stale };
+inline QueuedSpeechVerdict judge_queued_speech(const MessageResult& result, std::string_view session_id,
+                                               std::uint64_t generation, std::string_view cache_key) noexcept {
+    if (result.status != "delivered" || !result.payload || result.session_id != session_id ||
+        result.generation != generation || result.payload->cache_key != cache_key)
+        return QueuedSpeechVerdict::stale;
+    if (result.payload->status != "ready" || !result.payload->media) return QueuedSpeechVerdict::failed;
+    return QueuedSpeechVerdict::ready;
+}
+inline TtsStatus decode_tts_status_value(const json::Value& root) {
     if (!root.is_object()) throw std::invalid_argument{"TTS status is not an object"};
     for (const auto& [key, ignored] : root.as_object()) {
         (void)ignored;

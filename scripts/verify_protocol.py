@@ -172,6 +172,8 @@ def validate(value: Any, schema: dict[str, Any], schema_path: Path, at: str = "$
 def schema_for_fixture(path: Path, value: dict[str, Any]) -> Path:
     if value.get("schema") == "synth.notify.hint.v1":
         return PROTOCOL / "v2/schemas/notify-hint.schema.json"
+    if value.get("schema") == "synth.message.v1":
+        return PROTOCOL / "v2/schemas/message-result.schema.json"
     if value.get("schema") == "synth.visual_context.capture.v2":
         return PROTOCOL / "v2/schemas/visual-context-capture.schema.json"
     if value.get("schema") == "synth.event.v2":
@@ -198,6 +200,7 @@ def validate_payloads(value: dict[str, Any], path: Path) -> None:
         "synth.visual_context.capture.v2",
         "synth.visual_context.response.v1",
         "synth.notify.hint.v1",
+        "synth.message.v1",
     }:
         return
     catalog_path = V1 / "schemas/payloads.schema.json"

@@ -63,6 +63,9 @@ MaxPendingRequests=12
     rejects([] { (void)parse(defaults, "[Server]\nConnectionNotice=sometimes\n"); });
     CHECK(!config.server.wake_channel); // Opt-in: off unless SYNTH_custom.ini turns it on.
     CHECK(parse(defaults, "[Server]\nWakeChannel=true\n").server.wake_channel);
+    CHECK(!config.server.message_queue); // Opt-in until the queue is the default.
+    CHECK(parse(defaults, "[Server]\nMessageQueue=true\n").server.message_queue);
+    rejects([] { (void)parse(defaults, "[Server]\nMessageQueue=maybe\n"); });
     rejects([] { (void)parse(defaults, "[Server]\nWakeChannel=maybe\n"); });
     CHECK(config.behavior.end_conversation_cooldown_seconds == 60);
 }
