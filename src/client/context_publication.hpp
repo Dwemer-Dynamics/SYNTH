@@ -129,7 +129,8 @@ public:
                                                              bool trade_confirmation_available = false,
                                                              bool reading_events_available = false,
                                                              bool location_catalog_available = false,
-                                                             bool notify_wake = false) {
+                                                             bool notify_wake = false,
+                                                             bool game_rpc = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
             "dialogue.delivery_receipts", "dialogue.conversation",
@@ -192,6 +193,8 @@ public:
         }
         // Opt-in only (Server.WakeChannel): sessions that did not ask keep the previous wire contract.
         if (notify_wake) result.push_back("notify.wake");
+        // Game RPC rides the wake-up channel, so it is listed only together with it and only on its own opt-in (Server.GameRpc).
+        if (notify_wake && game_rpc) result.push_back("rpc.game");
         if (variant == core::RuntimeVariant::vr) {
             result.push_back("runtime.hmd_pose");
             result.push_back("runtime.controller_pose");

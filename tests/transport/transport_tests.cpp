@@ -296,6 +296,15 @@ public:
         }
         return ReceiveResult::closed;
     }
+    [[nodiscard]] bool send(std::string_view frame) override {
+        std::scoped_lock lock{mutex_};
+        sent_.emplace_back(frame);
+        return true;
+    }
+    [[nodiscard]] std::vector<std::string> sent() {
+        std::scoped_lock lock{mutex_};
+        return sent_;
+    }
     void abort() noexcept override {
         {
             std::scoped_lock lock{mutex_};
@@ -308,6 +317,7 @@ private:
     std::mutex mutex_;
     std::condition_variable changed_;
     std::deque<std::string> frames_;
+    std::vector<std::string> sent_;
     bool closed_{};
     bool aborted_{};
 };
@@ -317,6 +327,7 @@ class Forwarding final : public INotifyConnection {
 public:
     explicit Forwarding(std::shared_ptr<FakeConnection> target) : target_{std::move(target)} {}
     [[nodiscard]] ReceiveResult receive(std::string& frame) override { return target_->receive(frame); }
+    [[nodiscard]] bool send(std::string_view frame) override { return target_->send(frame); }
     void abort() noexcept override { target_->abort(); }
 
 private:
@@ -540,6 +551,99 @@ void test_stop_ends_a_blocked_receive_and_shutdown_refuses_restart() {
     CHECK(transport.attempts().size() == attempts);
 }
 
+const std::string rpc_token(64, 'a');
+constexpr const char* hello_ack_frame = R"({"schema":"synth.rpc.v1","type":"hello_ack"})";
+constexpr const char* ping_request_frame = R"({"schema":"synth.rpc.v1","type":"request","id":1,"method":"ping","params":{},"deadline_ms":2000})";
+
+synth::json::Value empty_params() { return synth::json::Value{synth::json::Value::Object{}}; }
+
+void test_rpc_frame_parsing_is_strict() {
+    const auto request = parse_rpc_frame(ping_request_frame);
+    CHECK(request && std::holds_alternative<RpcRequest>(*request));
+    CHECK(std::get<RpcRequest>(*request).id == 1 && std::get<RpcRequest>(*request).method == "ping");
+    CHECK(parse_rpc_frame(hello_ack_frame) && std::holds_alternative<RpcHelloAck>(*parse_rpc_frame(hello_ack_frame)));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":7,"method":"game.console","params":{},"deadline_ms":2000})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":0,"method":"ping","params":{},"deadline_ms":2000})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":4294967296,"method":"ping","params":{},"deadline_ms":2000})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":1,"method":"ping","params":{},"deadline_ms":99})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":1,"method":"ping","params":[],"deadline_ms":2000})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"request","id":1,"method":"ping","params":{},"deadline_ms":2000,"extra":1})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v1","type":"hello_ack","extra":1})"));
+    CHECK(!parse_rpc_frame(R"({"schema":"synth.rpc.v2","type":"hello_ack"})"));
+    CHECK(!parse_rpc_frame(welcome_frame));
+    CHECK(!parse_rpc_frame(std::string(maximum_rpc_frame_bytes + 1, ' ')));
+    CHECK(!parse_rpc_frame("not json"));
+    CHECK(valid_rpc_token(rpc_token) && !valid_rpc_token("abc") && !valid_rpc_token(std::string(64, 'G')));
+}
+
+void test_rpc_answers_only_registered_methods_and_fails_closed() {
+    const auto table = basic_rpc_methods({"0.1.0", "flat", "1.11.0"});
+    const auto pong = table.handle("ping", empty_params());
+    CHECK(pong.ok && pong.result.find("pong") && pong.result.find("pong")->as_bool());
+    const auto info = table.handle("session.info", empty_params());
+    CHECK(info.ok && info.result.find("runtime_variant")->as_string() == "flat");
+    CHECK(table.handle("ping", synth::json::Value{synth::json::Value::Object{{"x", 1}}}).error == "invalid_params");
+    // Game-state methods are on the closed list but not registered: unavailable, never an attempt to read the game.
+    CHECK(table.handle("inventory.player", empty_params()).error == "method_unavailable");
+    CHECK(table.handle("world.nearby_items", empty_params()).error == "method_unavailable");
+    CHECK(table.handle("not.a.method", empty_params()).error == "method_unavailable");
+    RpcMethodTable throwing;
+    throwing.add("ping", [](const synth::json::Value&) -> RpcResult { throw std::runtime_error{"boom"}; });
+    throwing.add("shell", [](const synth::json::Value&) { return RpcResult::success(synth::json::Value::Object{}); }); // Not on the list: ignored.
+    CHECK(throwing.handle("ping", empty_params()).error == "failed");
+    CHECK(throwing.handle("shell", empty_params()).error == "method_unavailable");
+    CHECK(rpc_response_frame(3, RpcResult::failure("busy")) == R"({"schema":"synth.rpc.v1","type":"response","id":3,"ok":false,"error":"busy"})");
+}
+
+void test_the_channel_binds_rpc_after_the_welcome_and_answers_requests() {
+    FakeTransport transport;
+    auto connection = std::make_shared<FakeConnection>();
+    transport.queue(connection);
+    WakeSignal signal;
+    NotifyChannel channel{transport, signal};
+    channel.set_rpc(RpcBinding{"session:flat:test", rpc_token, basic_rpc_methods({"0.1.0", "flat", "1.11.0"}).handler()});
+    channel.start("127.0.0.1", 8091);
+    // A request before the welcome and before the hello_ack is never answered.
+    connection->push(ping_request_frame);
+    connection->push(welcome_frame);
+    CHECK(eventually([&] { return connection->sent().size() == 1; }));
+    CHECK(connection->sent()[0] == std::string{R"({"schema":"synth.rpc.v1","type":"hello","session_id":"session:flat:test","token":")"} + rpc_token + R"("})");
+    connection->push(ping_request_frame);
+    std::this_thread::sleep_for(30ms);
+    CHECK(connection->sent().size() == 1); // Not ready until the server acknowledged the hello.
+    connection->push(hello_ack_frame);
+    connection->push(R"({"schema":"synth.rpc.v1","type":"request","id":3,"method":"ping","params":{},"deadline_ms":2000})");
+    connection->push(R"({"schema":"synth.rpc.v1","type":"request","id":4,"method":"inventory.player","params":{},"deadline_ms":2000})");
+    connection->push(R"({"schema":"synth.rpc.v1","type":"request","id":5,"method":"shell","params":{},"deadline_ms":2000})"); // Malformed: ignored.
+    CHECK(eventually([&] { return connection->sent().size() == 3; }));
+    CHECK(connection->sent()[1] == R"({"schema":"synth.rpc.v1","type":"response","id":3,"ok":true,"result":{"pong":true}})");
+    CHECK(connection->sent()[2] == R"({"schema":"synth.rpc.v1","type":"response","id":4,"ok":false,"error":"method_unavailable"})");
+    // Wake hints keep working on the same connection.
+    const auto seen = signal.epoch();
+    connection->push(wake_frame);
+    CHECK(signal.wait_until(Clock::now() + 3s, seen));
+    channel.stop();
+}
+
+void test_without_a_binding_the_channel_never_sends() {
+    FakeTransport transport;
+    auto connection = std::make_shared<FakeConnection>();
+    transport.queue(connection);
+    WakeSignal signal;
+    NotifyChannel channel{transport, signal};
+    channel.start("127.0.0.1", 8091);
+    connection->push(welcome_frame);
+    CHECK(eventually([&] { return signal.connected(); }));
+    connection->push(hello_ack_frame);
+    connection->push(ping_request_frame);
+    std::this_thread::sleep_for(30ms);
+    CHECK(connection->sent().empty());
+    // Binding after the fact drops the connection (the caller starts it again).
+    channel.set_rpc(RpcBinding{"s", rpc_token, {}});
+    CHECK(eventually([&] { return !signal.connected(); }));
+    channel.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -560,6 +664,10 @@ int main() {
         test_a_connection_that_never_welcomes_does_not_reset_the_backoff();
         test_a_dropped_channel_returns_to_plain_polling_and_reconnects();
         test_stop_ends_a_blocked_receive_and_shutdown_refuses_restart();
+        test_rpc_frame_parsing_is_strict();
+        test_rpc_answers_only_registered_methods_and_fails_closed();
+        test_the_channel_binds_rpc_after_the_welcome_and_answers_requests();
+        test_without_a_binding_the_channel_never_sends();
         std::cout << "transport tests passed (" << assertions << " assertions)\n";
         return 0;
     } catch (const std::exception& error) {

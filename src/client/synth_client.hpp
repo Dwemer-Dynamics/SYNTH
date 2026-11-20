@@ -36,6 +36,8 @@ struct SessionOptions final {
     std::uint64_t protocol_version{1};
     // Called with the acknowledged wake-up port after an init, and with 0 when the session no longer has one.
     std::function<void(std::uint16_t)> notify_wake_changed;
+    // Called after an init with the game RPC token the server granted, or an empty string when it granted none.
+    std::function<void(const std::string&)> rpc_game_changed;
 };
 
 // Immutable acknowledgement owned by a turn, never inferred from the latest client state.
@@ -124,6 +126,9 @@ public:
     }
 
     [[nodiscard]] const std::string& runtime_session_id() const noexcept { return options_.runtime_session_id; }
+    [[nodiscard]] const std::string& client_version() const noexcept { return options_.client_version; }
+    [[nodiscard]] const std::string& runtime_variant() const noexcept { return options_.runtime_variant; }
+    [[nodiscard]] const std::string& runtime_version() const noexcept { return options_.runtime_version; }
     // The parent-bound wire contract fails closed if the server cannot honor owned continuation.
     [[nodiscard]] bool uses_rechat_parent_contract() const noexcept {
         return options_.protocol_version == 2 &&
@@ -482,6 +487,10 @@ public:
                 status->code.starts_with("init_") && status->code.ends_with("_accepted") && status->reading_events &&
                 std::ranges::find(options_.capabilities,"context.reading_events")!=options_.capabilities.end(),
                 std::memory_order_release);
+            // Game RPC needs the channel and its own listing; a token is kept only when the server granted both.
+            if (options_.rpc_game_changed) options_.rpc_game_changed(supported_init && status->code.starts_with("init_") &&
+                status->code.ends_with("_accepted") && std::ranges::find(options_.capabilities,"rpc.game")!=options_.capabilities.end() &&
+                std::ranges::find(options_.capabilities,"notify.wake")!=options_.capabilities.end() ? status->rpc_game_token : std::string{});
             // Only a server that runs the channel acknowledges it, and only to a client that opted in and listed it.
             set_notify_wake_port(supported_init && status->code.starts_with("init_") && status->code.ends_with("_accepted") &&
                 std::ranges::find(options_.capabilities,"notify.wake")!=options_.capabilities.end() ? status->notify_wake_port : 0);

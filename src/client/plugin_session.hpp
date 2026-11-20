@@ -97,11 +97,12 @@ public:
                       .capabilities = ContextPublication::capabilities(variant, rest_events_available, quest_events_available, actor_events_available,
                           configuration_.behavior.companion_combat_comments, observed_dialogue_available, orders_available,
                           trade::prompt().installed(),
-                          reading_events_available, false, configuration_.server.wake_channel),
+                          reading_events_available, false, configuration_.server.wake_channel, configuration_.server.game_rpc),
                       .request_timeout_ms = configuration_.behavior.ai_response_timeout_seconds * 1000U,
                       .maximum_response_bytes = configuration_.limits.max_response_bytes,
                       .protocol_version = 2,
                       .notify_wake_changed = [this](std::uint16_t port) { on_notify_wake(port); },
+                      .rpc_game_changed = [this](const std::string& token) { on_rpc_game(token); },
                   }},
           cancellation_{generation},
           network_({tasks::LaneConfig{"network", configuration_.limits.max_pending_requests, 1, 3}}, 2),
@@ -224,6 +225,17 @@ public:
         speech_.join_jobs();
         control_.shutdown(tasks::ShutdownMode::cancel_pending);
         speech_.halt_playback();
+    }
+
+    // Called by SynthClient after an init, before on_notify_wake: binds game RPC to the channel with the granted token, or unbinds it.
+    // Only ping and session.info are answered (immutable session facts); game-state methods stay method_unavailable.
+    void on_rpc_game(const std::string& token) {
+        if (token.empty() || !configuration_.server.wake_channel || !configuration_.server.game_rpc) {
+            notify_channel_.set_rpc(std::nullopt);
+            return;
+        }
+        notify_channel_.set_rpc(transport::RpcBinding{client_.runtime_session_id(), token,
+            transport::basic_rpc_methods({client_.client_version(), client_.runtime_variant(), client_.runtime_version()}).handler()});
     }
 
     // Called by SynthClient with the acknowledged port after an init, and with 0 when the session has none.

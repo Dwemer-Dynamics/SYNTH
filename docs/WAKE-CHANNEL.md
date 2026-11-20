@@ -26,6 +26,26 @@ fallback, and with the channel off, absent or broken the client behaves exactly 
 - **Remote hosting.** The plugin connects to the host of `BaseUrl` on the acknowledged port with plain `ws://`; frames
   carry nothing sensitive. A remote installation must forward that port as for the HTTP port, or leave the setting off.
 
+## Game RPC (optional, `[Server] GameRpc=true`, needs `WakeChannel=true`)
+
+The server may ask the running game a small closed set of questions over the same WebSocket (protocol capability `rpc.game`,
+`protocol/v2/README.md`, schema `rpc-frame.schema.json`). It is off by default and never required.
+
+- **Negotiation.** The client lists `rpc.game` beside `notify.wake` only when both INI options are on. The init status then
+  carries `rpc_game: {"token"}` only while the server's channel runs. No token means the client sends nothing.
+- **Binding.** After each welcome the channel thread sends `hello` with the session id and the token, and ignores every request
+  until the server's `hello_ack` arrives. A wrong or expired token makes the server close the connection; the usual reconnect
+  backoff applies.
+- **Methods.** Requests are parsed strictly (closed method list, bounded id, deadline and parameter count). The client answers
+  `ping` and `session.info` (client version, runtime variant, runtime version), which read only immutable session facts.
+  `inventory.player` and `world.nearby_items` are on the protocol list but are not registered: they answer `method_unavailable`
+  until a game-thread provider adds them. Anything else is not parsed as a request. Errors are closed codes, never text.
+- **Threading.** Requests are answered on the channel thread, one at a time, between receives. A method that must read game state
+  has to be registered by code that owns a thread-safe way to do it; nothing here touches game objects.
+
+Tests: `tests/transport` (hello after welcome, no answer before `hello_ack`, strict parsing, fail-closed methods, no sends without
+a binding), `tests/protocol_native` (the `rpc_game` status) and `tests/config`. Not run in game.
+
 Tests: `tests/transport` (hint parsing, signal, absent channel, backoff, drop and reconnect, stop), `tests/protocol_native`
 (status acknowledgement) and `tests/config`. Not run in game: the WinHTTP transport was exercised against the server's
 channel on loopback only.

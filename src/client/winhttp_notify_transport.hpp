@@ -45,6 +45,15 @@ public:
         }
     }
 
+    // Game RPC replies: one UTF-8 text frame, sent by the thread that owns the receive loop. Anything unusual reports false.
+    [[nodiscard]] bool send(std::string_view frame) override {
+        if (frame.empty() || frame.size() > transport::maximum_rpc_frame_bytes) return false;
+        const HINTERNET socket = socket_.load(std::memory_order_acquire);
+        if (socket == nullptr) return false;
+        return WinHttpWebSocketSend(socket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                    const_cast<char*>(frame.data()), static_cast<DWORD>(frame.size())) == ERROR_SUCCESS;
+    }
+
     // Closing the socket handle makes a receive blocked on another thread return with an error.
     void abort() noexcept override {
         if (const HINTERNET socket = socket_.exchange(nullptr, std::memory_order_acq_rel)) WinHttpCloseHandle(socket);

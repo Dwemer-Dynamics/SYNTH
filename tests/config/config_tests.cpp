@@ -64,6 +64,9 @@ MaxPendingRequests=12
     CHECK(!config.server.wake_channel); // Opt-in: off unless SYNTH_custom.ini turns it on.
     CHECK(parse(defaults, "[Server]\nWakeChannel=true\n").server.wake_channel);
     rejects([] { (void)parse(defaults, "[Server]\nWakeChannel=maybe\n"); });
+    CHECK(!config.server.game_rpc); // Opt-in as well: server calls to the game stay off unless SYNTH_custom.ini asks for them.
+    CHECK(parse(defaults, "[Server]\nGameRpc=true\n").server.game_rpc);
+    rejects([] { (void)parse(defaults, "[Server]\nGameRpc=maybe\n"); });
     CHECK(config.behavior.end_conversation_cooldown_seconds == 60);
 }
 
