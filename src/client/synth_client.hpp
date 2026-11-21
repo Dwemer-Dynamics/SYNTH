@@ -102,6 +102,15 @@ struct TtsStatusOutcome final {
     std::optional<protocol_native::TtsStatus> value;
 };
 
+// One GET /api/v1/messages/<id>. `http_status` is the server's answer: 200 delivered the result (once), 409 pending or already
+// delivered, 404 cancelled, expired or unknown; the body names which. `value` is set whenever the body decoded.
+struct MessageOutcome final {
+    RequestStatus status{RequestStatus::transport_failure};
+    std::string detail;
+    unsigned http_status{};
+    std::optional<protocol_native::MessageResult> value;
+};
+
 struct VisualOutcome final {
     RequestStatus status{RequestStatus::transport_failure};
     std::string request_id;
@@ -1199,6 +1208,54 @@ public:
             return {RequestStatus::complete, {}, std::move(value)};
         } catch (const std::exception& error) {
             return {RequestStatus::malformed_response, error.what(), std::nullopt};
+        }
+    }
+
+    // Whether the session offered the queue (capability message.queue): only then does the server name a message id.
+    [[nodiscard]] bool message_queue_enabled() const {
+        return std::ranges::find(options_.capabilities, "message.queue") != options_.capabilities.end();
+    }
+
+    // Fetches one queued result by id. The server hands a completed message out exactly once, so the caller must keep what
+    // a 200 returns; a later fetch of the same id is a 409 "delivered".
+    [[nodiscard]] MessageOutcome fetch_message(std::uint64_t message_id,
+                                               const Cancelled& cancelled = {},
+                                               std::chrono::steady_clock::time_point deadline =
+                                                   std::chrono::steady_clock::time_point::max()) {
+        if (message_id == 0 || message_id > 9'007'199'254'740'991ULL) {
+            throw std::invalid_argument{"invalid message id"};
+        }
+        const auto result = send_speech_request(HttpRequest{
+            .method = HttpMethod::get,
+            .target = "/api/v1/messages/" + std::to_string(message_id),
+            .content_type = {},
+            .body = {},
+            .timeout_ms = options_.request_timeout_ms,
+            .accept = "application/json",
+            .maximum_response_bytes = 64U * 1024U,
+        }, cancelled, deadline);
+        if (!result.delivered()) {
+            return {result.failure == TransportFailure::cancelled ? RequestStatus::cancelled
+                                                                  : RequestStatus::transport_failure,
+                    {}, 0, std::nullopt};
+        }
+        const auto http_status = static_cast<unsigned>(result.response.status);
+        const bool answered = http_status == 200 || http_status == 404 || http_status == 409 || http_status == 503;
+        if (!answered) {
+            return {RequestStatus::http_failure, "HTTP " + std::to_string(http_status), http_status, std::nullopt};
+        }
+        try {
+            auto value = protocol_native::decode_message_result(result.response.body);
+            if (value.message_id != message_id) {
+                return {RequestStatus::stale_response, "message id mismatch", http_status, std::nullopt};
+            }
+            // Only a 200 carries a result, and a 200 always does.
+            if ((http_status == 200) != value.payload.has_value()) {
+                return {RequestStatus::malformed_response, "message payload does not match HTTP status", http_status, std::nullopt};
+            }
+            return {RequestStatus::complete, {}, http_status, std::move(value)};
+        } catch (const std::exception& error) {
+            return {RequestStatus::malformed_response, error.what(), http_status, std::nullopt};
         }
     }
 

@@ -676,5 +676,14 @@ The optional `dialogue.conversation` capability (v2, with `dialogue.turn_ownersh
 The optional v2 `notify.wake` capability, listed only when `[Server] WakeChannel=true`, lets the server send content-free
 hints over a WebSocket so the wait for ready speech ends early. A server that runs the channel acknowledges with init
 status `notify_wake: {"port": N}`; otherwise nothing is sent and the client polls as before. Hints are
-`synth.notify.hint.v1` (`welcome`, then `wake` with topic `speech`) and change no response. See
-[WAKE-CHANNEL.md](WAKE-CHANNEL.md) and `protocol/v2/README.md`.
+`synth.notify.hint.v1` (`welcome`, then `wake` with topic `speech`, or `message_available` with a `message_id`) and change no
+response. See [WAKE-CHANNEL.md](WAKE-CHANNEL.md) and `protocol/v2/README.md`.
+
+## Queued speech results (`message.queue`)
+
+The optional v2 capability `message.queue`, listed unless `[Server] MessageQueue=false`, lets the server hand a speech
+result over through its durable queue. When the server queues the line, the dialogue `speech` block carries `message_id`
+and the client fetches `GET /api/v1/messages/<message_id>` instead of polling the cache-key status: the first fetch of a
+completed message answers 200 (`synth.message.v1`, `status: delivered`, the owner session and generation, and the
+`synth.tts_status.v1` payload), every later fetch answers 409 `delivered`, a message still being made answers 409
+`pending`, and a cancelled, expired or unknown one answers 404. See [QUEUED-SPEECH.md](QUEUED-SPEECH.md).

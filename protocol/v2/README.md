@@ -46,6 +46,18 @@ rejects an oversized or malformed frame by closing the connection. The client an
 `hello_ack`, and never reads or writes game state outside the method it was asked for. Everything is still fetched and
 delivered over the ordinary HTTP protocol; the channel carries no dialogue or speech.
 
+## Queued speech results (2026-11-20)
+
+`message.queue` is an optional v2 capability (`[Server] MessageQueue` in the client INI). When the server's durable queue is
+on and the session listed it, a dialogue line's `speech` block carries `message_id`. The client fetches
+`GET /api/v1/messages/<message_id>` (`schemas/message-result.schema.json`, `synth.message.v1`): the first fetch of a completed
+message answers 200 `status: delivered` with the owner (`session_id`, `request_id`, `generation`) and the
+`synth.tts_status.v1` `payload`; every later fetch answers 409 `delivered`, a message still being made answers 409 `pending`,
+and `cancelled`, `expired` or `unknown` answer 404. The `message_available` hint (`{"type":"message_available","message_id":N}`)
+tells a connected client to fetch at once; it names the id and carries nothing else. Without the channel the client polls,
+and it drops a result whose session or generation is no longer current. A server or client without the capability keeps
+polling `GET /api/v1/messages/<cache key>` exactly as before.
+
 ## Location catalog export (2026-11-16)
 
 `location_catalog` is a v2 event, `context_sequence` 0, granted by the capability `world.location_catalog`; the init status
