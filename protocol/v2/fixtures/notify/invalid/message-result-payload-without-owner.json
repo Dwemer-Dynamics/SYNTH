@@ -1,0 +1,1 @@
+{"schema":"synth.message.v1","message_id":123,"status":"delivered","payload":{"schema":"synth.tts_status.v1","cache_key":"0123456789abcdef0123456789abcdef","status":"failed","error_code":"synthesis_failed"}}

@@ -341,12 +341,53 @@ private:
         }
     }
 
+    // Waits for the queued result of one line and takes it once. The first fetch of a completed message returns it and the
+    // server never returns it again, so a result is kept or dropped here, never fetched twice. A `message_available` hint
+    // ends the wait at once; without a live channel the loop polls every 100 ms, with one it keeps a slow safety poll. A
+    // result of another session or generation, or of another line, is stale and dropped. Returns true with speech.media set
+    // when the line's audio is ready; false for text only (failed, stale, cancelled, expired, already delivered, deadline).
+    [[nodiscard]] bool await_queued_speech(const protocol_native::Line& line, protocol_native::Speech& speech,
+                                           const core::CancellationToken& cancellation,
+                                           tasks::TaskLanes::Clock::time_point deadline) {
+        const auto cancelled = [this, cancellation] { return stopped(cancellation); };
+        while (!stopped(cancellation) && tasks::TaskLanes::Clock::now() < deadline) {
+            // Read before the fetch: a hint that lands during it ends the wait below at once.
+            const auto wake_epoch = client_.wake_signal().epoch();
+            const auto outcome = client_.fetch_message(speech.message_id, cancelled, deadline);
+            if (outcome.status == RequestStatus::cancelled) return false;
+            if (outcome.status == RequestStatus::complete && outcome.value) {
+                const auto& result = *outcome.value;
+                if (outcome.http_status == 200) {
+                    // Stale and failed both end in the caller's single media_failed and the text-only caption.
+                    if (protocol_native::judge_queued_speech(result, client_.runtime_session_id(), line.generation,
+                                                             speech.cache_key) != protocol_native::QueuedSpeechVerdict::ready)
+                        return false;
+                    speech.status = "ready";
+                    speech.media = result.payload->media;
+                    return true;
+                }
+                // Only "pending" is worth waiting for; delivered (taken by an earlier fetch), cancelled, expired and
+                // unknown are final for this line.
+                if (result.status != "pending") return false;
+            }
+            // Pending, a busy server and a failed request all wait the same: for a hint or the poll interval.
+            (void)client_.wake_signal().wait_until(std::min(
+                deadline, tasks::TaskLanes::Clock::now() + client_.wake_signal().message_poll_interval()), wake_epoch);
+        }
+        return false;
+    }
+
     // Poll and verify immutable WAV bytes on a worker; this never presents text/audio or executes actions.
     [[nodiscard]] RechatPrefetch::MediaBytes prepare_speech_media(
         const protocol_native::Line& line, protocol_native::Speech speech,
         const core::CancellationToken& cancellation, tasks::TaskLanes::Clock::time_point deadline) {
         trace_->record(diagnostics::ConversationStage::media_prepare_started,
             line.generation,line.context_sequence,line.request_id,line.line_id);
+        // A queued line (the server named a message id and this session offered message.queue) is fetched by id; any other
+        // line, and any server that does not queue, keeps the status poll below.
+        if (speech.message_id != 0 && client_.message_queue_enabled()) {
+            if (!await_queued_speech(line, speech, cancellation, deadline)) return {};
+        }
         while (!stopped(cancellation) &&
                tasks::TaskLanes::Clock::now() < deadline && speech.status != "ready") {
             // Read before the status request: a wake-up hint that lands during it ends the wait below at once.

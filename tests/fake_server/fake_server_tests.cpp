@@ -236,6 +236,41 @@ public:
     void cancel_all() noexcept override {}
 };
 
+// The queue endpoint as the server serves it: message 7 is pending for two fetches, then the first fetch after completion gets
+// the result (200) and every later one gets 409 "delivered"; 8 was cancelled, 9 is unknown, 10 answers a different id.
+class MessageProbeTransport final : public synth::client::IHttpTransport {
+public:
+    BindingEchoTransport echo;
+    std::vector<std::string> targets;
+    int fetches_of_seven{};
+    static std::string owner(const std::string& session) {
+        return R"("message_type":"speech","session_id":")" + session +
+               R"(","request_id":"req-1","generation":1,"completed_at":"2026-11-20T10:00:01Z","delivered_at":"2026-11-20T10:00:02Z")";
+    }
+    synth::client::HttpResult send(const synth::client::HttpRequest& request,
+                                  const synth::client::Cancelled& cancelled) override {
+        if (request.method != synth::client::HttpMethod::get) return echo.send(request, cancelled);
+        targets.push_back(request.target);
+        const auto reply = [](int status, std::string body) {
+            return synth::client::HttpResult{synth::client::TransportFailure::none, {status, "application/json", std::move(body)}};
+        };
+        if (request.target == "/api/v1/messages/7") {
+            const auto count = ++fetches_of_seven;
+            if (count <= 2) return reply(409, R"({"schema":"synth.message.v1","message_id":7,"status":"pending"})");
+            if (count == 3)
+                return reply(200, R"({"schema":"synth.message.v1","message_id":7,"status":"delivered",)" + owner("session:message-queue") +
+                    R"(,"payload":{"schema":"synth.tts_status.v1","cache_key":"0123456789abcdef0123456789abcdef","status":"failed","error_code":"synthesis_failed"}})");
+            return reply(409, R"({"schema":"synth.message.v1","message_id":7,"status":"delivered"})");
+        }
+        if (request.target == "/api/v1/messages/8") return reply(404, R"({"schema":"synth.message.v1","message_id":8,"status":"cancelled"})");
+        if (request.target == "/api/v1/messages/9") return reply(404, "not json");
+        if (request.target == "/api/v1/messages/10") return reply(409, R"({"schema":"synth.message.v1","message_id":11,"status":"pending"})");
+        if (request.target == "/api/v1/messages/12") return reply(200, R"({"schema":"synth.message.v1","message_id":12,"status":"pending"})");
+        return reply(500, "");
+    }
+    void cancel_all() noexcept override {}
+};
+
 // Hold a dialogue RPC open while a separate control RPC must complete.
 class BlockingTurnTransport final : public synth::client::IHttpTransport {
     std::atomic_bool block_next_{true};
@@ -626,6 +661,46 @@ int main() {
             CHECK(speech_client.fetch_tts_status(cache_key, {}, Clock::now() + 1s).status == RequestStatus::complete);
             CHECK(speech_client.fetch_media(media_id, [] { return true; }).failure == TransportFailure::cancelled);
             CHECK(speech_client.fetch_tts_status(cache_key, [] { return true; }).status == RequestStatus::cancelled);
+        }
+        {
+            // The queued-result fetch: exactly-once delivery as the client sees it, and every refusal it must not trust.
+            using Clock = std::chrono::steady_clock;
+            using namespace std::chrono_literals;
+            MessageProbeTransport wire;
+            SynthClient queue_client{wire, SessionOptions{
+                .runtime_session_id = "session:message-queue", .runtime_variant = "flat",
+                .client_version = "test", .runtime_version = "1.11.240",
+                .capabilities = {"dialogue.text", "message.queue"}, .protocol_version = 2}};
+            CHECK(queue_client.message_queue_enabled());
+            CHECK(queue_client.initialize(1, false).status == RequestStatus::complete);
+            const auto deadline = Clock::now() + 2s;
+            for (int pending = 0; pending < 2; ++pending) {
+                const auto waiting = queue_client.fetch_message(7, {}, deadline);
+                CHECK(waiting.status == RequestStatus::complete && waiting.http_status == 409);
+                CHECK(waiting.value && waiting.value->status == "pending" && !waiting.value->payload);
+            }
+            const auto first = queue_client.fetch_message(7, {}, deadline);
+            CHECK(first.status == RequestStatus::complete && first.http_status == 200);
+            CHECK(first.value && first.value->status == "delivered" && first.value->session_id == "session:message-queue");
+            CHECK(first.value && first.value->payload && first.value->payload->status == "failed");
+            const auto taken = queue_client.fetch_message(7, {}, deadline);
+            CHECK(taken.status == RequestStatus::complete && taken.http_status == 409 && taken.value && taken.value->status == "delivered");
+            CHECK(!taken.value->payload); // a repeat never carries the result again
+            const auto gone = queue_client.fetch_message(8, {}, deadline);
+            CHECK(gone.status == RequestStatus::complete && gone.http_status == 404 && gone.value && gone.value->status == "cancelled");
+            CHECK(queue_client.fetch_message(9, {}, deadline).status == RequestStatus::malformed_response);
+            CHECK(queue_client.fetch_message(10, {}, deadline).status == RequestStatus::stale_response);
+            CHECK(queue_client.fetch_message(12, {}, deadline).status == RequestStatus::malformed_response); // 200 must deliver
+            CHECK(queue_client.fetch_message(13, {}, deadline).status == RequestStatus::http_failure);
+            CHECK(queue_client.fetch_message(7, [] { return true; }).status == RequestStatus::cancelled);
+            CHECK(wire.targets.front() == "/api/v1/messages/7");
+            bool refused = false;
+            try { (void)queue_client.fetch_message(0, {}, deadline); } catch (const std::invalid_argument&) { refused = true; }
+            CHECK(refused);
+            // A session that did not offer the capability never uses the queue.
+            SynthClient plain{wire, SessionOptions{.runtime_session_id = "session:plain", .runtime_variant = "flat",
+                .client_version = "test", .runtime_version = "1.11.240", .protocol_version = 2}};
+            CHECK(!plain.message_queue_enabled());
         }
         FakeHttpServer server;
         FakeHttpTransport transport{server};

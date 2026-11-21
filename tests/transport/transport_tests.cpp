@@ -376,6 +376,30 @@ void test_notify_hint_parsing() {
     CHECK(!parse_notify_hint("not json"));
     CHECK(!parse_notify_hint(""));
     CHECK(!parse_notify_hint(std::string(300, ' ') + wake_frame));
+
+    // message_available names one queued message by id and nothing else.
+    const std::string available = R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":123})";
+    CHECK(parse_notify_hint(available) == HintKind::message_available);
+    const auto frame = parse_notify_frame(available);
+    CHECK(frame && frame->kind == HintKind::message_available && frame->message_id == 123);
+    CHECK(parse_notify_frame(wake_frame) && parse_notify_frame(wake_frame)->message_id == 0);
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available"})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":0})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":-4})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":"7"})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":9007199254740992})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":7,"text":"hi"})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"message_available","message_id":7,"topic":"speech"})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"wake","topic":"speech","message_id":7})"));
+    CHECK(!parse_notify_frame(R"({"schema":"synth.notify.hint.v1","type":"welcome","message_id":7})"));
+
+    // A queued message polls slowly beside a live channel and quickly (the fallback) without one.
+    WakeSignal signal;
+    CHECK(signal.message_poll_interval() == std::chrono::milliseconds{100});
+    signal.set_connected(true);
+    CHECK(signal.message_poll_interval() == std::chrono::milliseconds{1'000});
+    signal.set_connected(false);
+    CHECK(signal.message_poll_interval() == std::chrono::milliseconds{100});
 }
 
 void test_wake_signal_ends_a_wait_and_is_never_lost() {

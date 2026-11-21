@@ -22,6 +22,8 @@ fallback, and with the channel off, absent or broken the client behaves exactly 
   after a connection proved itself with a welcome frame. There is always a wait between attempts, so there is no busy
   loop. One on-screen line reports an unavailable channel and one reports a lost one; retries are silent. A connection
   that is lost wakes the poll once on reconnect, so anything missed while it was down is found.
+- **Queued speech.** A `message_available` hint names the queued message that just completed; it ends the wait of the line
+  that is fetching that message ([QUEUED-SPEECH.md](QUEUED-SPEECH.md)).
 - **Not changed.** The protocol, response lines, generation and ownership rules, and every other request path.
 - **Remote hosting.** The plugin connects to the host of `BaseUrl` on the acknowledged port with plain `ws://`; frames
   carry nothing sensitive. A remote installation must forward that port as for the HTTP port, or leave the setting off.

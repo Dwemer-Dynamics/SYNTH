@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synth.local/protocol/v2/schemas/message-result.schema.json",
+  "title": "SYNTH queued message fetch result (GET /api/v1/messages/<id>): HTTP 200 carries the payload once, 409 and 404 are bare states",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "message_id",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "const": "synth.message.v1"
+    },
+    "message_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "status": {
+      "enum": [
+        "delivered",
+        "pending",
+        "cancelled",
+        "expired",
+        "unknown",
+        "unavailable"
+      ]
+    },
+    "message_type": {
+      "enum": [
+        "speech"
+      ]
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "completed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "delivered_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "payload": {
+      "$ref": "../../v1/schemas/tts-status.schema.json"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "payload"
+        ]
+      },
+      "then": {
+        "required": [
+          "status",
+          "message_type",
+          "session_id",
+          "request_id",
+          "generation",
+          "completed_at",
+          "delivered_at"
+        ],
+        "properties": {
+          "status": {
+            "const": "delivered"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "pending",
+              "cancelled",
+              "expired",
+              "unknown",
+              "unavailable"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "payload"
+              ]
+            },
+            {
+              "required": [
+                "delivered_at"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1249,6 +1249,43 @@ int main(int argc,char** argv){
   rejected=false; try{ (void)synth::protocol_native::decode_line("{\"schema\":\"synth.response.line.v1\",\"protocol_version\":1,\"type\":\"response_end\",\"line_id\":\"line:1\",\"request_id\":\"req:1\",\"turn_id\":\"turn:1\",\"generation\":1,\"game\":\"fo4\",\"runtime_variant\":\"flat\",\"payload\":{\"status\":\"complete\"},\"unexpected\":true}"); }catch(...){rejected=true;} if(!rejected) throw std::runtime_error{"unknown response field accepted"};
   const auto ready=synth::protocol_native::decode_tts_status("{\"schema\":\"synth.tts_status.v1\",\"cache_key\":\"0123456789abcdef0123456789abcdef\",\"status\":\"ready\",\"media\":{\"schema\":\"synth.media.v1\",\"media_id\":\"media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"content_type\":\"audio/wav\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":44}}");
   if(!ready.media || ready.status!="ready") throw std::runtime_error{"ready TTS status"};
+  {
+    // Queued speech: the id rides on the speech block; the result comes back once from /api/v1/messages/<id>.
+    using namespace synth::protocol_native;
+    const std::string speech_base="{\"schema\":\"synth.speech.v1\",\"utterance_id\":\"u:1\",\"cache_key\":\"0123456789abcdef0123456789abcdef\",\"status\":\"pending\",\"deadline_ms\":30000";
+    if(speech(synth::json::parse(speech_base+"}")).message_id!=0) throw std::runtime_error{"speech without a message id"};
+    if(speech(synth::json::parse(speech_base+",\"message_id\":42}")).message_id!=42) throw std::runtime_error{"speech message id"};
+    for(const char* bad:{",\"message_id\":0}",",\"message_id\":\"42\"}",",\"message_id\":-1}",",\"message_id\":9007199254740992}"}) {
+      bool refused=false; try{ (void)speech(synth::json::parse(speech_base+bad)); }catch(...){refused=true;}
+      if(!refused) throw std::runtime_error{"bad speech message id accepted"};
+    }
+    const std::string media_json="{\"schema\":\"synth.media.v1\",\"media_id\":\"media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"content_type\":\"audio/wav\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":44}";
+    const std::string ready_payload="{\"schema\":\"synth.tts_status.v1\",\"cache_key\":\"0123456789abcdef0123456789abcdef\",\"status\":\"ready\",\"media\":"+media_json+"}";
+    const std::string owner="\"message_id\":42,\"message_type\":\"speech\",\"session_id\":\"session-1\",\"request_id\":\"req-1\",\"generation\":3,\"status\":\"delivered\",\"completed_at\":\"2026-11-20T10:00:01Z\",\"delivered_at\":\"2026-11-20T10:00:02Z\"";
+    const auto delivered=decode_message_result("{\"schema\":\"synth.message.v1\","+owner+",\"payload\":"+ready_payload+"}");
+    if(delivered.message_id!=42 || delivered.session_id!="session-1" || delivered.generation!=3 || !delivered.payload || !delivered.payload->media)
+      throw std::runtime_error{"delivered message result"};
+    if(judge_queued_speech(delivered,"session-1",3,"0123456789abcdef0123456789abcdef")!=QueuedSpeechVerdict::ready) throw std::runtime_error{"ready queued speech"};
+    // Stale: another session, an older generation, or another line's cache key is dropped, never played.
+    if(judge_queued_speech(delivered,"session-2",3,"0123456789abcdef0123456789abcdef")!=QueuedSpeechVerdict::stale) throw std::runtime_error{"stale session accepted"};
+    if(judge_queued_speech(delivered,"session-1",4,"0123456789abcdef0123456789abcdef")!=QueuedSpeechVerdict::stale) throw std::runtime_error{"stale generation accepted"};
+    if(judge_queued_speech(delivered,"session-1",3,"ffffffffffffffffffffffffffffffff")!=QueuedSpeechVerdict::stale) throw std::runtime_error{"other line accepted"};
+    const auto failed=decode_message_result("{\"schema\":\"synth.message.v1\","+owner+",\"payload\":{\"schema\":\"synth.tts_status.v1\",\"cache_key\":\"0123456789abcdef0123456789abcdef\",\"status\":\"failed\",\"error_code\":\"synthesis_failed\"}}");
+    if(judge_queued_speech(failed,"session-1",3,"0123456789abcdef0123456789abcdef")!=QueuedSpeechVerdict::failed) throw std::runtime_error{"failed queued speech"};
+    for(const char* state:{"pending","delivered","cancelled","expired","unknown","unavailable"}) {
+      const auto bare=decode_message_result(std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":42,\"status\":\""}+state+"\"}");
+      if(bare.status!=state || bare.payload || judge_queued_speech(bare,"session-1",3,"0123456789abcdef0123456789abcdef")!=QueuedSpeechVerdict::stale) throw std::runtime_error{"bare message state"};
+    }
+    for(const std::string& bad:{std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":42,\"status\":\"delivered\",\"session_id\":\"session-1\"}"},
+                                std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":42,\"status\":\"pending\",\"payload\":"}+ready_payload+"}",
+                                std::string{"{\"schema\":\"synth.message.v2\",\"message_id\":42,\"status\":\"pending\"}"},
+                                std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":0,\"status\":\"pending\"}"},
+                                std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":42,\"status\":\"bogus\"}"},
+                                std::string{"{\"schema\":\"synth.message.v1\",\"message_id\":42,\"status\":\"pending\",\"text\":\"hi\"}"}}) {
+      bool refused=false; try{ (void)decode_message_result(bad); }catch(...){refused=true;}
+      if(!refused) throw std::runtime_error{"bad message result accepted"};
+    }
+  }
   rejected=false; try{ (void)synth::protocol_native::decode_tts_status("{\"schema\":\"synth.tts_status.v1\",\"cache_key\":\"0123456789abcdef0123456789abcdef\",\"status\":\"pending\",\"path\":\"/tmp/voice.wav\"}"); }catch(...){rejected=true;} if(!rejected) throw std::runtime_error{"TTS path leak accepted"};
   rejected=false; try{ (void)synth::protocol_native::decode_visual_response("{\"schema\":\"synth.visual_context.response.v1\",\"request_id\":\"visual:2:1\",\"turn_id\":\"turn:2:2\",\"generation\":2,\"capture_id\":\"capture:2:3\",\"ok\":true,\"status\":\"success\",\"replayed\":\"yes\"}"); }catch(...){rejected=true;} if(!rejected) throw std::runtime_error{"invalid visual replay flag accepted"};
   std::ifstream v2_in{std::string{argv[1]}+"/protocol/v2/fixtures/valid/response.ndjson"};
