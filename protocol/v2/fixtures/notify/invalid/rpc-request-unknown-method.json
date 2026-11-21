@@ -1,0 +1,1 @@
+{"schema":"synth.rpc.v1","type":"request","id":1,"method":"game.console","params":{},"deadline_ms":2000}

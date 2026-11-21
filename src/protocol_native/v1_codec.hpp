@@ -12,6 +12,7 @@
 #include "runtime/social_task_codec.hpp"
 
 #include "json/json.hpp"
+#include "transport/game_rpc.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -207,7 +208,7 @@ struct Dialogue {
 // Acknowledged session audience (dialogue.everyone): carried by the negotiated init acknowledgement and control_state.
 struct ControlAudience { bool everyone{}; std::uint64_t reset_epoch{}; };
 struct Status { std::string code, detail; bool rechat_scene{}, combat_targets{}, ambient_npc{}, combat_contacts{}, enemy_awareness{}, social_tasks{}, native_turn{}, actor_stats{}, companion_combat_comments{}, location_ancestry{}, private_narrator{}, observed_dialogue{};
-    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; bool conversation{}; bool location_catalog{}; std::uint16_t notify_wake_port{}; };
+    std::optional<ControlAudience> control_audience; bool delivery_receipts{}, narrator_object{}, actor_condition{}, trade_confirmation{}, reading_events{}; bool conversation{}; bool location_catalog{}; std::uint16_t notify_wake_port{}; std::string rpc_game_token; };
 struct SocialTaskOffer { runtime::SocialTaskDescriptor task; };
 struct End { std::string status; };
 // Private narrator (narrator.private.v1): a named definition revision, never an actor identity.
@@ -593,7 +594,7 @@ inline Line decode_line(std::string_view wire) {
         }
     }
     else if(type=="status") {
-        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "conversation", "narrator_object", "location_catalog", "notify_wake"});
+        if (line.protocol_version == 2) closed_object(payload, {"code", "detail", "rechat_scene", "combat_targets", "ambient_npc", "combat_contacts", "enemy_awareness", "social_tasks", "native_turn", "actor_stats", "actor_condition", "companion_combat_comments", "location_ancestry", "private_narrator", "observed_dialogue", "trade_confirmation", "reading_events", "control_audience", "delivery_receipts", "conversation", "narrator_object", "location_catalog", "notify_wake", "rpc_game"});
         else closed_object(payload, {"code", "detail"});
         line.payload=Status{text(payload,"code"), payload.find("detail")?text(payload,"detail"):"",
             payload.find("rechat_scene") ? required(payload,"rechat_scene").as_bool() : false,
@@ -635,6 +636,12 @@ inline Line decode_line(std::string_view wire) {
             const auto port = integer(*wake, "port");
             if (port < 1024 || port > 65535) throw std::invalid_argument{"invalid notify_wake port"};
             std::get<Status>(line.payload).notify_wake_port = static_cast<std::uint16_t>(port);
+        }
+        if (const auto* rpc = payload.find("rpc_game")) {
+            closed_object(*rpc, {"token"});
+            const auto& token = required(*rpc, "token").as_string();
+            if (!transport::valid_rpc_token(token)) throw std::invalid_argument{"invalid rpc_game token"};
+            std::get<Status>(line.payload).rpc_game_token = token;
         }
     }
     else if(type=="response_end") {

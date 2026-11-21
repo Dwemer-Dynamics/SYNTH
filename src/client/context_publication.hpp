@@ -130,6 +130,7 @@ public:
                                                              bool reading_events_available = false,
                                                              bool location_catalog_available = false,
                                                              bool notify_wake = false,
+                                                             bool game_rpc = false,
                                                              bool message_queue = false) {
         std::vector<std::string> result{
             "dialogue.text", "dialogue.audio", "dialogue.turn_ownership", "dialogue.turn_cancel", "dialogue.rechat.ownership", "dialogue.rechat.scene", "dialogue.listener_identity", "dialogue.ambient_npc", "dialogue.native_turn", "control.menu", "dialogue.everyone",
@@ -193,6 +194,8 @@ public:
         }
         // Opt-in only (Server.WakeChannel): sessions that did not ask keep the previous wire contract.
         if (notify_wake) result.push_back("notify.wake");
+        // Game RPC rides the wake-up channel, so it is listed only together with it and only on its own opt-in (Server.GameRpc).
+        if (notify_wake && game_rpc) result.push_back("rpc.game");
         // Server.MessageQueue: the server may name a queued message id for speech and the client fetches it by that id.
         if (message_queue) result.push_back("message.queue");
         if (variant == core::RuntimeVariant::vr) {

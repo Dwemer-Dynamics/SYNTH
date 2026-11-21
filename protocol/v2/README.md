@@ -24,6 +24,28 @@ unknown, malformed or oversized frame is ignored. The channel is one-way (server
 The client reconnects with a growing delay and never depends on the channel: a missed hint costs at most the normal
 poll interval.
 
+## Game RPC over the wake-up channel (2026-11-20)
+
+`rpc.game` is an optional v2 capability that lets the server make a bounded, allowlisted call to the running game over the
+wake-up channel's WebSocket. It requires `notify.wake`; a client lists both only when its INI opts in (`Server.GameRpc`). A
+server that runs the channel and its RPC bridge answers the init status with `rpc_game: {"token": "<64 hex>"}` beside
+`notify_wake`; otherwise no key is sent and the client never sends an RPC frame. Frames are `schema/rpc-frame.schema.json`
+(`synth.rpc.v1`), one JSON object per text frame, at most 16384 bytes:
+
+- `hello` (client to server, the first frame after the welcome hint): `session_id` and the `token`. The server accepts it only
+  when the token was minted for that session; it then answers `hello_ack`. Any other first frame, or a wrong token, closes the
+  connection. One RPC connection is bound per session; a newer one replaces the older.
+- `request` (server to client): `id`, `method`, `params`, `deadline_ms` (100 to 10000). The method is one of the closed list
+  `ping`, `session.info`, `inventory.player`, `world.nearby_items`. A client answers a method it does not implement, or whose
+  game feature is unavailable, with `method_unavailable` (fail closed).
+- `response` (client to server): the request `id`, then `ok: true` with a `result` object, or `ok: false` with a closed `error`
+  code (`method_unavailable`, `invalid_params`, `busy`, `failed`). No free-text error crosses the wire.
+
+The server keeps at most 8 requests open, drops a request at its deadline, ignores a response whose id it did not send, and
+rejects an oversized or malformed frame by closing the connection. The client answers only requests that arrive after
+`hello_ack`, and never reads or writes game state outside the method it was asked for. Everything is still fetched and
+delivered over the ordinary HTTP protocol; the channel carries no dialogue or speech.
+
 ## Queued speech results (2026-11-20)
 
 `message.queue` is an optional v2 capability (`[Server] MessageQueue` in the client INI). When the server's durable queue is

@@ -769,6 +769,16 @@ void notify_wake_tests() {
             refused(R"({"code":"init_accepted","notify_wake":{"port":8091,"host":"x"}})") &&
             refused(R"({"code":"init_accepted","notify_wake":true})"),
         "malformed notify_wake accepted");
+    // Game RPC (rpc.game): the init status may carry the session token beside notify_wake; only a 64 hex token is accepted.
+    const auto token = std::string(64, 'a');
+    const auto rpc = protocol_native::decode_line(status_line((std::string{R"({"code":"init_accepted","notify_wake":{"port":8091},"rpc_game":{"token":")"} + token + R"("}})").c_str()));
+    require(std::get<protocol_native::Status>(rpc.payload).rpc_game_token == token, "rpc_game token lost");
+    require(std::get<protocol_native::Status>(older.payload).rpc_game_token.empty(), "rpc token invented for a server that sent none");
+    require(refused(R"({"code":"init_accepted","rpc_game":{"token":"abc"}})") &&
+            refused(R"({"code":"init_accepted","rpc_game":{}})") &&
+            refused(R"({"code":"init_accepted","rpc_game":true})") &&
+            refused((std::string{R"({"code":"init_accepted","rpc_game":{"token":")"} + token + R"(","extra":1}})").c_str()),
+        "malformed rpc_game accepted");
 }
 
 int main(int argc,char** argv){

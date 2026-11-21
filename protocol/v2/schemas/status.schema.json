@@ -72,6 +72,19 @@
         }
       }
     },
+    "rpc_game": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token"
+      ],
+      "properties": {
+        "token": {
+          "type": "string",
+          "pattern": "[0-9a-f]{64}"
+        }
+      }
+    },
     "control_audience": {
       "type": "object",
       "additionalProperties": false,

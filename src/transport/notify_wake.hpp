@@ -1,6 +1,7 @@
 #pragma once
 
 #include "json/json.hpp"
+#include "transport/game_rpc.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -152,6 +153,9 @@ public:
     // Blocks for one complete text frame; closed and failed both end the connection. abort() may be called from
     // another thread and must make a blocked receive return promptly.
     [[nodiscard]] virtual ReceiveResult receive(std::string& frame) = 0;
+    // Sends one text frame from the thread that also receives (game RPC only; the wake-up channel itself sends nothing).
+    // A transport that cannot send reports false, and the RPC part then stays unused.
+    [[nodiscard]] virtual bool send(std::string_view /*frame*/) { return false; }
     virtual void abort() noexcept = 0;
 };
 
@@ -192,6 +196,16 @@ public:
         thread_ = std::thread{[this, host = host_, port = port_] { run(host, port); }};
     }
 
+    // Binds game RPC to this channel (capability rpc.game): after each welcome the channel sends `hello` with the session's token and
+    // then answers requests through the binding's handler on the channel thread. A changed or removed binding drops a running
+    // connection, so the caller starts the channel again afterwards; with no binding the channel never sends anything.
+    void set_rpc(std::optional<RpcBinding> binding) {
+        std::unique_lock lock{mutex_};
+        if (closed_ || (binding.has_value() == rpc_.has_value() && (!binding || *binding == *rpc_))) return;
+        rpc_ = std::move(binding);
+        if (thread_.joinable()) stop_locked(lock);
+    }
+
     // Returns the client to plain polling: the connection is dropped and the thread ends.
     void stop() {
         std::unique_lock lock{mutex_};
@@ -224,6 +238,33 @@ private:
         return stopping_;
     }
 
+    [[nodiscard]] std::optional<RpcBinding> rpc_binding() const {
+        std::scoped_lock lock{mutex_};
+        return rpc_;
+    }
+
+    // One RPC frame from the server. False ends the connection (a send failed). A request before the hello_ack is ignored, and a
+    // method the table does not hold answers method_unavailable, so an unknown or unready request never reaches game state.
+    static bool handle_rpc_frame(INotifyConnection& connection, const RpcBinding& binding, std::string_view frame, bool& ready) {
+        const auto parsed = parse_rpc_frame(frame);
+        if (!parsed) return true;
+        if (std::holds_alternative<RpcHelloAck>(*parsed)) {
+            ready = true;
+            return true;
+        }
+        if (!ready) return true;
+        const auto& request = std::get<RpcRequest>(*parsed);
+        RpcResult outcome = RpcResult::failure("method_unavailable");
+        if (binding.handler) {
+            try {
+                outcome = binding.handler(request.method, request.params);
+            } catch (...) {
+                outcome = RpcResult::failure("failed");
+            }
+        }
+        return connection.send(rpc_response_frame(request.id, outcome));
+    }
+
     void say(std::string_view message) const {
         if (log_) log_(message);
     }
@@ -252,15 +293,22 @@ private:
                     connection_ = connection.get();
                 }
                 std::string frame;
+                const auto rpc = rpc_binding();
+                bool rpc_ready = false;
                 while (connection->receive(frame) == ReceiveResult::frame) {
                     const auto hint = parse_notify_hint(frame);
-                    if (!hint) continue;
+                    if (!hint) {
+                        // Not a hint: with game RPC bound it may be the hello_ack or a request; anything else is ignored.
+                        if (rpc && welcomed && !handle_rpc_frame(*connection, *rpc, frame, rpc_ready)) break;
+                        continue;
+                    }
                     if (*hint == HintKind::welcome) {
                         if (!welcomed) {
                             welcomed = true;
                             backoff.reset();
                             signal_.set_connected(true);
                             reported_unavailable = false;
+                            if (rpc && !connection->send(rpc_hello_frame(*rpc))) break;
                         }
                         // Anything that happened while the channel was down is found by one extra look.
                         signal_.notify();
@@ -300,6 +348,7 @@ private:
     std::uint16_t port_{};
     bool stopping_{};
     bool closed_{};
+    std::optional<RpcBinding> rpc_;
 };
 
 }  // namespace synth::transport

@@ -28,6 +28,7 @@ struct ServerConfig {
     bool allow_remote{false};
     bool connection_notice{true}; // Tell the player when the server stops answering and when it returns.
     bool wake_channel{false};     // Opt in to the server's wake-up channel; polling stays the fallback and the default.
+    bool game_rpc{false};         // Opt in to server calls to the game over that channel (needs WakeChannel); off by default.
     bool message_queue{true};     // Ask the server for queued speech results fetched by message id (capability message.queue).
 };
 
@@ -318,6 +319,8 @@ inline void apply(Config& config,
         config.server.connection_notice = parse_bool(value, qualified);
     else if (section == "Server" && key == "WakeChannel")
         config.server.wake_channel = parse_bool(value, qualified);
+    else if (section == "Server" && key == "GameRpc")
+        config.server.game_rpc = parse_bool(value, qualified);
     else if (section == "Server" && key == "MessageQueue")
         config.server.message_queue = parse_bool(value, qualified);
     else if (section == "Runtime" && key == "Enabled")
